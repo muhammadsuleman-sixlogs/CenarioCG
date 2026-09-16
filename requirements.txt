@@ -1,0 +1,12 @@
+psycopg2-binary
+python-dotenv
+openai
+pydantic
+networkx
+numpy
+fastapi
+uvicorn
+sqlglot
+
+
+when ever i hit the api for getting the response i want the UI should bilk like kind of bulb from where the data is extracting 

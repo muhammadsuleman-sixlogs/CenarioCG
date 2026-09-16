@@ -1,0 +1,2905 @@
+{
+  "tables": {
+    "access_profiles": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "default_landing_page",
+          "type": "character varying"
+        },
+        {
+          "name": "profile_colour",
+          "type": "character varying"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean"
+        },
+        {
+          "name": "permissions",
+          "type": "jsonb"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_by_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "cde_provider_tasks": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "workspace_id",
+          "type": "uuid"
+        },
+        {
+          "name": "external_task_id",
+          "type": "text"
+        },
+        {
+          "name": "operation",
+          "type": "character varying"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "error_message",
+          "type": "text"
+        },
+        {
+          "name": "started_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "completed_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "cde_ssh_keys": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "workspace_id",
+          "type": "uuid"
+        },
+        {
+          "name": "public_key",
+          "type": "text"
+        },
+        {
+          "name": "private_key",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "cde_workspaces": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "developer_id",
+          "type": "uuid"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid"
+        },
+        {
+          "name": "provider",
+          "type": "character varying"
+        },
+        {
+          "name": "provider_vm_id",
+          "type": "character varying"
+        },
+        {
+          "name": "provider_node",
+          "type": "character varying"
+        },
+        {
+          "name": "vm_name",
+          "type": "character varying"
+        },
+        {
+          "name": "vcpu_cores",
+          "type": "integer"
+        },
+        {
+          "name": "ram_mb",
+          "type": "integer"
+        },
+        {
+          "name": "disk_gb",
+          "type": "integer"
+        },
+        {
+          "name": "developer_ip",
+          "type": "character varying"
+        },
+        {
+          "name": "host_address",
+          "type": "character varying"
+        },
+        {
+          "name": "ssh_config_block",
+          "type": "text"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "last_status_check",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "last_heartbeat",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "last_active_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "idle_since",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "error_message",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "destroyed_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "provision_progress",
+          "type": "integer"
+        },
+        {
+          "name": "provision_step",
+          "type": "character varying"
+        },
+        {
+          "name": "ide_url",
+          "type": "character varying"
+        },
+        {
+          "name": "github_repo_url",
+          "type": "character varying"
+        },
+        {
+          "name": "workspace_repo_path",
+          "type": "character varying"
+        },
+        {
+          "name": "workspace_git_branch",
+          "type": "character varying"
+        },
+        {
+          "name": "tech_stack",
+          "type": "character varying"
+        },
+        {
+          "name": "ide_password",
+          "type": "character varying"
+        },
+        {
+          "name": "ide_access_error",
+          "type": "text"
+        },
+        {
+          "name": "security_monitoring_enabled",
+          "type": "boolean"
+        },
+        {
+          "name": "siem_status",
+          "type": "character varying"
+        },
+        {
+          "name": "siem_last_seen_at",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "siem_receiver_host",
+          "type": "character varying"
+        },
+        {
+          "name": "siem_receiver_port",
+          "type": "integer"
+        },
+        {
+          "name": "siem_error",
+          "type": "text"
+        },
+        {
+          "name": "siem_configured_at",
+          "type": "timestamp with time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "chat_messages": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "chat_room_id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "message",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "type",
+          "type": "USER-DEFINED"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "chat_room_participants": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "chat_room_id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "chat_rooms": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "ticket_id",
+          "type": "uuid"
+        },
+        {
+          "name": "proposal_id",
+          "type": "uuid"
+        },
+        {
+          "name": "consultant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "is_internal",
+          "type": "boolean"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid"
+        },
+        {
+          "name": "task_id",
+          "type": "uuid"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "companies": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        },
+        {
+          "name": "slug",
+          "type": "character varying"
+        },
+        {
+          "name": "website",
+          "type": "character varying"
+        },
+        {
+          "name": "phone",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "root_user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "created_by_consultant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "country",
+          "type": "character varying"
+        },
+        {
+          "name": "founded_at",
+          "type": "date"
+        },
+        {
+          "name": "primary_domain",
+          "type": "character varying"
+        },
+        {
+          "name": "all_domains",
+          "type": "jsonb"
+        },
+        {
+          "name": "overall_spending",
+          "type": "numeric"
+        },
+        {
+          "name": "last_interaction_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "twitter_handle",
+          "type": "character varying"
+        },
+        {
+          "name": "twitter_followers",
+          "type": "integer"
+        },
+        {
+          "name": "linkedin_slug",
+          "type": "character varying"
+        },
+        {
+          "name": "categories",
+          "type": "jsonb"
+        },
+        {
+          "name": "tags",
+          "type": "jsonb"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "company_contacts": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        },
+        {
+          "name": "job_title",
+          "type": "character varying"
+        },
+        {
+          "name": "email",
+          "type": "character varying"
+        },
+        {
+          "name": "phone",
+          "type": "character varying"
+        },
+        {
+          "name": "created_by_user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "company_hours": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "invoice_id",
+          "type": "uuid"
+        },
+        {
+          "name": "hours_purchased",
+          "type": "numeric"
+        },
+        {
+          "name": "price_per_hour",
+          "type": "numeric"
+        },
+        {
+          "name": "total_amount",
+          "type": "numeric"
+        },
+        {
+          "name": "hours_remaining",
+          "type": "numeric"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "invoice_tags": {
+      "columns": [
+        {
+          "name": "invoice_id",
+          "type": "uuid"
+        },
+        {
+          "name": "tag_id",
+          "type": "uuid"
+        }
+      ],
+      "primary_keys": [
+        "invoice_id",
+        "tag_id"
+      ]
+    },
+    "invoices": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "invoice_number",
+          "type": "character varying"
+        },
+        {
+          "name": "type",
+          "type": "character varying"
+        },
+        {
+          "name": "payment_status",
+          "type": "character varying"
+        },
+        {
+          "name": "payment_method",
+          "type": "character varying"
+        },
+        {
+          "name": "invoice_date",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "request_no",
+          "type": "character varying"
+        },
+        {
+          "name": "total_amount",
+          "type": "numeric"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "character varying"
+        },
+        {
+          "name": "due_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "paid_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "ticket_id",
+          "type": "uuid"
+        },
+        {
+          "name": "stripe_payment_intent_id",
+          "type": "character varying"
+        },
+        {
+          "name": "stripe_invoice_id",
+          "type": "character varying"
+        },
+        {
+          "name": "public_share_token",
+          "type": "character varying"
+        },
+        {
+          "name": "share_password_hash",
+          "type": "character varying"
+        },
+        {
+          "name": "share_expires_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "share_enabled",
+          "type": "boolean"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "migrations": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "timestamp",
+          "type": "bigint"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "notifications": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "type",
+          "type": "character varying"
+        },
+        {
+          "name": "title",
+          "type": "character varying"
+        },
+        {
+          "name": "message",
+          "type": "text"
+        },
+        {
+          "name": "related_entity_type",
+          "type": "character varying"
+        },
+        {
+          "name": "related_entity_id",
+          "type": "uuid"
+        },
+        {
+          "name": "read",
+          "type": "boolean"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "packages": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "amount",
+          "type": "numeric"
+        },
+        {
+          "name": "duration_days",
+          "type": "integer"
+        },
+        {
+          "name": "currency",
+          "type": "character varying"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean"
+        },
+        {
+          "name": "sort_order",
+          "type": "integer"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "code",
+          "type": "character varying"
+        },
+        {
+          "name": "billing_mode",
+          "type": "character varying"
+        },
+        {
+          "name": "features",
+          "type": "jsonb"
+        },
+        {
+          "name": "tagline",
+          "type": "character varying"
+        },
+        {
+          "name": "cta_label",
+          "type": "character varying"
+        },
+        {
+          "name": "trial_days",
+          "type": "integer"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "password_reset_tokens": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "token_hash",
+          "type": "character varying"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "pending_signups": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "email",
+          "type": "character varying"
+        },
+        {
+          "name": "password_hash",
+          "type": "character varying"
+        },
+        {
+          "name": "first_name",
+          "type": "character varying"
+        },
+        {
+          "name": "last_name",
+          "type": "character varying"
+        },
+        {
+          "name": "company_name",
+          "type": "character varying"
+        },
+        {
+          "name": "package_id",
+          "type": "uuid"
+        },
+        {
+          "name": "stripe_customer_id",
+          "type": "character varying"
+        },
+        {
+          "name": "stripe_setup_intent_id",
+          "type": "character varying"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "consumed_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "stripe_checkout_session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "social_login",
+          "type": "boolean"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "project_change_orders": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid"
+        },
+        {
+          "name": "display_id",
+          "type": "character varying"
+        },
+        {
+          "name": "billing_type",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "amount",
+          "type": "numeric"
+        },
+        {
+          "name": "added_date",
+          "type": "date"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "project_details": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "project_name",
+          "type": "character varying"
+        },
+        {
+          "name": "project_id_display",
+          "type": "character varying"
+        },
+        {
+          "name": "unit",
+          "type": "character varying"
+        },
+        {
+          "name": "duration",
+          "type": "integer"
+        },
+        {
+          "name": "start_date",
+          "type": "date"
+        },
+        {
+          "name": "end_date",
+          "type": "date"
+        },
+        {
+          "name": "budget",
+          "type": "numeric"
+        },
+        {
+          "name": "billing_type",
+          "type": "USER-DEFINED"
+        },
+        {
+          "name": "client_account",
+          "type": "character varying"
+        },
+        {
+          "name": "files",
+          "type": "jsonb"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "status",
+          "type": "USER-DEFINED"
+        },
+        {
+          "name": "general_status",
+          "type": "USER-DEFINED"
+        },
+        {
+          "name": "tags",
+          "type": "text"
+        },
+        {
+          "name": "is_archieved",
+          "type": "boolean"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "created_by_user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_by_client_id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "owner_consultant_id",
+          "type": "uuid"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "project_milestones": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid"
+        },
+        {
+          "name": "milestone_name",
+          "type": "character varying"
+        },
+        {
+          "name": "milestone_display_id",
+          "type": "character varying"
+        },
+        {
+          "name": "date",
+          "type": "date"
+        },
+        {
+          "name": "total_tasks",
+          "type": "integer"
+        },
+        {
+          "name": "completed_tasks",
+          "type": "integer"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "project_stake_holders": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "project_sub_tasks": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "task_id",
+          "type": "uuid"
+        },
+        {
+          "name": "title",
+          "type": "character varying"
+        },
+        {
+          "name": "details",
+          "type": "text"
+        },
+        {
+          "name": "due_date",
+          "type": "date"
+        },
+        {
+          "name": "is_completed",
+          "type": "boolean"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "assignee_id",
+          "type": "uuid"
+        },
+        {
+          "name": "companion_user_story_id",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "project_task_time_logs": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "task_id",
+          "type": "uuid"
+        },
+        {
+          "name": "consultant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "session_date",
+          "type": "date"
+        },
+        {
+          "name": "minutes_logged",
+          "type": "integer"
+        },
+        {
+          "name": "work_performed",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "project_tasks": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid"
+        },
+        {
+          "name": "milestone_id",
+          "type": "uuid"
+        },
+        {
+          "name": "task_display_id",
+          "type": "character varying"
+        },
+        {
+          "name": "task_name",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "assignee_id",
+          "type": "uuid"
+        },
+        {
+          "name": "priority",
+          "type": "USER-DEFINED"
+        },
+        {
+          "name": "stage",
+          "type": "character varying"
+        },
+        {
+          "name": "tags",
+          "type": "text"
+        },
+        {
+          "name": "due_date",
+          "type": "date"
+        },
+        {
+          "name": "start_date",
+          "type": "date"
+        },
+        {
+          "name": "hours_logged",
+          "type": "numeric"
+        },
+        {
+          "name": "hours_remaining",
+          "type": "numeric"
+        },
+        {
+          "name": "dependencies",
+          "type": "text"
+        },
+        {
+          "name": "files",
+          "type": "jsonb"
+        },
+        {
+          "name": "points",
+          "type": "integer"
+        },
+        {
+          "name": "status",
+          "type": "USER-DEFINED"
+        },
+        {
+          "name": "is_completed",
+          "type": "boolean"
+        },
+        {
+          "name": "completed_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "created_by_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "companion_epic_id",
+          "type": "character varying"
+        },
+        {
+          "name": "companion_session_id",
+          "type": "uuid"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "project_team_stages": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "project_id",
+          "type": "uuid"
+        },
+        {
+          "name": "assign_consultants",
+          "type": "jsonb"
+        },
+        {
+          "name": "client_stakeholders",
+          "type": "jsonb"
+        },
+        {
+          "name": "kanban_workflow",
+          "type": "jsonb"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "proposals": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "ticket_id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "consultant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "title",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "est_start_date",
+          "type": "date"
+        },
+        {
+          "name": "est_end_date",
+          "type": "date"
+        },
+        {
+          "name": "est_hours",
+          "type": "numeric"
+        },
+        {
+          "name": "total_amount",
+          "type": "numeric"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "client_comments",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "consultant_comments",
+          "type": "text"
+        },
+        {
+          "name": "revision_requested_by",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "recent_activities": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "action",
+          "type": "character varying"
+        },
+        {
+          "name": "entity_type",
+          "type": "USER-DEFINED"
+        },
+        {
+          "name": "entity_id",
+          "type": "uuid"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "refresh_tokens": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "token",
+          "type": "character varying"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "revoked_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "revoked_access_tokens": {
+      "columns": [
+        {
+          "name": "jti",
+          "type": "character varying"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "revoked_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "jti"
+      ]
+    },
+    "roles": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "service_allocations": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "consultant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "service_id",
+          "type": "uuid"
+        },
+        {
+          "name": "is_default",
+          "type": "boolean"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "services": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        },
+        {
+          "name": "icon_default",
+          "type": "character varying"
+        },
+        {
+          "name": "icon_hover",
+          "type": "character varying"
+        },
+        {
+          "name": "default_price",
+          "type": "numeric"
+        },
+        {
+          "name": "calendly_username",
+          "type": "character varying"
+        },
+        {
+          "name": "status",
+          "type": "boolean"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "owner_consultant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "hourly_rate",
+          "type": "numeric"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "subscriptions": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "amount",
+          "type": "numeric"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean"
+        },
+        {
+          "name": "subscription_start_date",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "subscription_end_date",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "renew_date",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "payment_card_id",
+          "type": "character varying"
+        },
+        {
+          "name": "package_id",
+          "type": "uuid"
+        },
+        {
+          "name": "package_name",
+          "type": "character varying"
+        },
+        {
+          "name": "stripe_payment_intent_id",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "is_trial",
+          "type": "boolean"
+        },
+        {
+          "name": "stripe_subscription_id",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "tags": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "ticket_attachments": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "ticket_id",
+          "type": "uuid"
+        },
+        {
+          "name": "filename",
+          "type": "character varying"
+        },
+        {
+          "name": "file_path",
+          "type": "character varying"
+        },
+        {
+          "name": "mime_type",
+          "type": "character varying"
+        },
+        {
+          "name": "size_bytes",
+          "type": "integer"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "ticket_logs": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "ticket_id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "comment",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "ticket_tags": {
+      "columns": [
+        {
+          "name": "ticket_id",
+          "type": "uuid"
+        },
+        {
+          "name": "tag_id",
+          "type": "uuid"
+        }
+      ],
+      "primary_keys": [
+        "ticket_id",
+        "tag_id"
+      ]
+    },
+    "ticket_time_logs": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "ticket_id",
+          "type": "uuid"
+        },
+        {
+          "name": "consultant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "session_date",
+          "type": "date"
+        },
+        {
+          "name": "minutes_logged",
+          "type": "integer"
+        },
+        {
+          "name": "work_performed",
+          "type": "text"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "reviewer_id",
+          "type": "uuid"
+        },
+        {
+          "name": "reviewer_comment",
+          "type": "text"
+        },
+        {
+          "name": "reviewed_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "tickets": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "reference_id",
+          "type": "character varying"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_by_user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "subject",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "priority",
+          "type": "character varying"
+        },
+        {
+          "name": "service_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "delivery_stage",
+          "type": "character varying"
+        },
+        {
+          "name": "ticket_type",
+          "type": "character varying"
+        },
+        {
+          "name": "is_billable",
+          "type": "boolean"
+        },
+        {
+          "name": "internal_only",
+          "type": "boolean"
+        },
+        {
+          "name": "internal_tag",
+          "type": "character varying"
+        },
+        {
+          "name": "session_date",
+          "type": "date"
+        },
+        {
+          "name": "session_duration_minutes",
+          "type": "integer"
+        },
+        {
+          "name": "client_attendees",
+          "type": "text"
+        },
+        {
+          "name": "internal_minutes",
+          "type": "integer"
+        },
+        {
+          "name": "comment",
+          "type": "text"
+        },
+        {
+          "name": "files_name",
+          "type": "text"
+        },
+        {
+          "name": "internal_status",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "user_access_profiles": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "access_profile_id",
+          "type": "uuid"
+        },
+        {
+          "name": "assigned_by_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "users": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "email",
+          "type": "character varying"
+        },
+        {
+          "name": "password_hash",
+          "type": "character varying"
+        },
+        {
+          "name": "first_name",
+          "type": "character varying"
+        },
+        {
+          "name": "last_name",
+          "type": "character varying"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean"
+        },
+        {
+          "name": "email_verified_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "role_id",
+          "type": "uuid"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "last_login_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "total_logins",
+          "type": "integer"
+        },
+        {
+          "name": "access_level",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "department",
+          "type": "character varying"
+        },
+        {
+          "name": "phone",
+          "type": "character varying"
+        },
+        {
+          "name": "location",
+          "type": "character varying"
+        },
+        {
+          "name": "is_company_approver",
+          "type": "boolean"
+        },
+        {
+          "name": "social_login",
+          "type": "boolean"
+        },
+        {
+          "name": "stripe_customer_id",
+          "type": "character varying"
+        },
+        {
+          "name": "consultant_status",
+          "type": "character varying"
+        },
+        {
+          "name": "preferred_timezone",
+          "type": "character varying"
+        },
+        {
+          "name": "title",
+          "type": "character varying"
+        },
+        {
+          "name": "is_consultant_approver",
+          "type": "boolean"
+        },
+        {
+          "name": "consultant_system_role",
+          "type": "character varying"
+        },
+        {
+          "name": "profile_picture",
+          "type": "character varying"
+        },
+        {
+          "name": "two_factor",
+          "type": "boolean"
+        },
+        {
+          "name": "two_factor_code",
+          "type": "character varying"
+        },
+        {
+          "name": "two_factor_expires_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "is_trial",
+          "type": "boolean"
+        },
+        {
+          "name": "trial_days",
+          "type": "integer"
+        },
+        {
+          "name": "trial_started_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "lead_consultant_id",
+          "type": "uuid"
+        },
+        {
+          "name": "consultant_company_name",
+          "type": "character varying"
+        },
+        {
+          "name": "stripe_connect_account_id",
+          "type": "character varying"
+        },
+        {
+          "name": "stripe_connect_onboarding_complete",
+          "type": "boolean"
+        },
+        {
+          "name": "stripe_connect_charges_enabled",
+          "type": "boolean"
+        },
+        {
+          "name": "stripe_connect_details_submitted",
+          "type": "boolean"
+        },
+        {
+          "name": "stripe_connect_updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "vaults": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid"
+        },
+        {
+          "name": "user_id",
+          "type": "uuid"
+        },
+        {
+          "name": "platform",
+          "type": "character varying"
+        },
+        {
+          "name": "url",
+          "type": "character varying"
+        },
+        {
+          "name": "user_name",
+          "type": "character varying"
+        },
+        {
+          "name": "password",
+          "type": "character varying"
+        },
+        {
+          "name": "company_id",
+          "type": "uuid"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    }
+  },
+  "relationships": [
+    {
+      "source_table": "access_profiles",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "access_profiles",
+      "source_column": "created_by_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "cde_provider_tasks",
+      "source_column": "workspace_id",
+      "target_table": "cde_workspaces",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "cde_ssh_keys",
+      "source_column": "workspace_id",
+      "target_table": "cde_workspaces",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "cde_workspaces",
+      "source_column": "created_by",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "cde_workspaces",
+      "source_column": "developer_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "cde_workspaces",
+      "source_column": "project_id",
+      "target_table": "project_details",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_messages",
+      "source_column": "chat_room_id",
+      "target_table": "chat_rooms",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_messages",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_room_participants",
+      "source_column": "chat_room_id",
+      "target_table": "chat_rooms",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_room_participants",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_rooms",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_rooms",
+      "source_column": "consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_rooms",
+      "source_column": "project_id",
+      "target_table": "project_details",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_rooms",
+      "source_column": "proposal_id",
+      "target_table": "proposals",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_rooms",
+      "source_column": "task_id",
+      "target_table": "project_tasks",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "chat_rooms",
+      "source_column": "ticket_id",
+      "target_table": "tickets",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "companies",
+      "source_column": "created_by_consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "companies",
+      "source_column": "root_user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "company_contacts",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "company_contacts",
+      "source_column": "created_by_user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "company_hours",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "company_hours",
+      "source_column": "invoice_id",
+      "target_table": "invoices",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "invoice_tags",
+      "source_column": "invoice_id",
+      "target_table": "invoices",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "invoice_tags",
+      "source_column": "tag_id",
+      "target_table": "tags",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "invoices",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "invoices",
+      "source_column": "ticket_id",
+      "target_table": "tickets",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "notifications",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "password_reset_tokens",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_change_orders",
+      "source_column": "project_id",
+      "target_table": "project_details",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_details",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_details",
+      "source_column": "created_by_client_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_details",
+      "source_column": "created_by_user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_details",
+      "source_column": "owner_consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_details",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_milestones",
+      "source_column": "project_id",
+      "target_table": "project_details",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_stake_holders",
+      "source_column": "project_id",
+      "target_table": "project_details",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_stake_holders",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_sub_tasks",
+      "source_column": "assignee_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_sub_tasks",
+      "source_column": "task_id",
+      "target_table": "project_tasks",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_task_time_logs",
+      "source_column": "consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_task_time_logs",
+      "source_column": "task_id",
+      "target_table": "project_tasks",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_tasks",
+      "source_column": "assignee_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_tasks",
+      "source_column": "created_by_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_tasks",
+      "source_column": "milestone_id",
+      "target_table": "project_milestones",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_tasks",
+      "source_column": "project_id",
+      "target_table": "project_details",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "project_team_stages",
+      "source_column": "project_id",
+      "target_table": "project_details",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "proposals",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "proposals",
+      "source_column": "consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "proposals",
+      "source_column": "ticket_id",
+      "target_table": "tickets",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "recent_activities",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "refresh_tokens",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "service_allocations",
+      "source_column": "consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "service_allocations",
+      "source_column": "service_id",
+      "target_table": "services",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "services",
+      "source_column": "owner_consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "subscriptions",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "subscriptions",
+      "source_column": "package_id",
+      "target_table": "packages",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "subscriptions",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "tags",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "ticket_attachments",
+      "source_column": "ticket_id",
+      "target_table": "tickets",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "ticket_logs",
+      "source_column": "ticket_id",
+      "target_table": "tickets",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "ticket_logs",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "ticket_tags",
+      "source_column": "tag_id",
+      "target_table": "tags",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "ticket_tags",
+      "source_column": "ticket_id",
+      "target_table": "tickets",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "ticket_time_logs",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "ticket_time_logs",
+      "source_column": "consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "ticket_time_logs",
+      "source_column": "ticket_id",
+      "target_table": "tickets",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "tickets",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "tickets",
+      "source_column": "created_by_user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "tickets",
+      "source_column": "service_id",
+      "target_table": "services",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "tickets",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "user_access_profiles",
+      "source_column": "access_profile_id",
+      "target_table": "access_profiles",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "user_access_profiles",
+      "source_column": "assigned_by_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "user_access_profiles",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "users",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "users",
+      "source_column": "lead_consultant_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "users",
+      "source_column": "role_id",
+      "target_table": "roles",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "vaults",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "vaults",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    }
+  ]
+}

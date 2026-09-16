@@ -1,0 +1,42 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Generated/local data
+data/
+storage/
+cache/
+
+# Context/vector artifacts
+*.pkl
+*.pickle
+*.faiss
+*.index
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,685 @@
+{
+  "relationships": [
+    {
+      "source_table": "access_profiles",
+      "target_table": "companies",
+      "business_relationship": "An access profile is scoped to a company.",
+      "reason": "The company reference places each access profile within a specific company.",
+      "evidence": [
+        "Foreign key: access_profiles.company_id -> companies.id",
+        "access_profiles contains permissions and is_active fields."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "user_access_profiles",
+      "target_table": "users",
+      "business_relationship": "A user access profile assignment assigns access settings to a user.",
+      "reason": "The assignment table directly references the user receiving the access profile.",
+      "evidence": [
+        "Foreign key: user_access_profiles.user_id -> users.id",
+        "user_access_profiles also contains access_profile_id and assigned_by_id."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "user_access_profiles",
+      "target_table": "access_profiles",
+      "business_relationship": "A user access profile assignment applies an access profile.",
+      "reason": "The assignment record links a user-facing assignment to a defined access profile.",
+      "evidence": [
+        "Foreign key: user_access_profiles.access_profile_id -> access_profiles.id",
+        "user_access_profiles contains user_id and assigned_by_id."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "users",
+      "target_table": "roles",
+      "business_relationship": "A user is assigned a role.",
+      "reason": "The role reference connects each applicable user record to a role definition.",
+      "evidence": [
+        "Foreign key: users.role_id -> roles.id",
+        "roles contains name and description fields."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "users",
+      "target_table": "companies",
+      "business_relationship": "A user is associated with a company.",
+      "reason": "The company reference explicitly associates users with company records.",
+      "evidence": [
+        "Foreign key: users.company_id -> companies.id",
+        "users contains company-related attributes such as is_company_approver."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "users",
+      "target_table": "users",
+      "business_relationship": "A user may report or be assigned to another user acting as lead consultant.",
+      "reason": "The self-referencing lead_consultant_id identifies another user in a lead-consultant role.",
+      "evidence": [
+        "Foreign key: users.lead_consultant_id -> users.id",
+        "users contains consultant_status and consultant_system_role."
+      ],
+      "confidence": 0.97
+    },
+    {
+      "source_table": "company_contacts",
+      "target_table": "companies",
+      "business_relationship": "A company contact belongs to a company.",
+      "reason": "Each contact record directly references the company for which it stores contact information.",
+      "evidence": [
+        "Foreign key: company_contacts.company_id -> companies.id",
+        "company_contacts contains name, job_title, email, and phone."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "tags",
+      "target_table": "companies",
+      "business_relationship": "A tag is defined within a company.",
+      "reason": "The company reference scopes tag definitions to a company.",
+      "evidence": [
+        "Foreign key: tags.company_id -> companies.id",
+        "tags contains a name field."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "subscriptions",
+      "target_table": "companies",
+      "business_relationship": "A subscription may provide subscription coverage for a company.",
+      "reason": "The subscription directly references a company and contains lifecycle and billing fields.",
+      "evidence": [
+        "Foreign key: subscriptions.company_id -> companies.id",
+        "subscriptions contains is_active, subscription_start_date, subscription_end_date, and renew_date."
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "subscriptions",
+      "target_table": "users",
+      "business_relationship": "A subscription is associated with a user.",
+      "reason": "The subscription record directly references a user in addition to its optional company context.",
+      "evidence": [
+        "Foreign key: subscriptions.user_id -> users.id",
+        "subscriptions contains amount, is_active, and billing lifecycle fields."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "subscriptions",
+      "target_table": "packages",
+      "business_relationship": "A subscription is based on a package.",
+      "reason": "The package reference identifies the package selected for the subscription.",
+      "evidence": [
+        "Foreign key: subscriptions.package_id -> packages.id",
+        "subscriptions contains package_name while packages contains amount, duration_days, billing_mode, and features."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "invoices",
+      "target_table": "companies",
+      "business_relationship": "An invoice is issued for a company.",
+      "reason": "The invoice's company reference identifies the company associated with the billed amount.",
+      "evidence": [
+        "Foreign key: invoices.company_id -> companies.id",
+        "invoices contains invoice_number, total_amount, payment_status, due_at, and paid_at."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "invoices",
+      "target_table": "tickets",
+      "business_relationship": "An invoice may bill work associated with a ticket.",
+      "reason": "The ticket reference directly connects an invoice to the ticket being billed.",
+      "evidence": [
+        "Foreign key: invoices.ticket_id -> tickets.id",
+        "invoices contains total_amount, description, and payment fields."
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "company_hours",
+      "target_table": "companies",
+      "business_relationship": "A company hours record tracks purchased and remaining hours for a company.",
+      "reason": "The record is company-scoped and contains hour purchase and balance information.",
+      "evidence": [
+        "Foreign key: company_hours.company_id -> companies.id",
+        "company_hours contains hours_purchased, hours_remaining, price_per_hour, and status."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "company_hours",
+      "target_table": "invoices",
+      "business_relationship": "A company hours purchase is associated with an invoice.",
+      "reason": "The invoice reference ties the purchased-hours record to its billing document.",
+      "evidence": [
+        "Foreign key: company_hours.invoice_id -> invoices.id",
+        "company_hours contains hours_purchased, price_per_hour, and total_amount."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "invoices",
+      "target_table": "tags",
+      "business_relationship": "Invoices can be classified with tags.",
+      "reason": "The invoice_tags junction table links invoice and tag records.",
+      "evidence": [
+        "Foreign key: invoice_tags.invoice_id -> invoices.id",
+        "Foreign key: invoice_tags.tag_id -> tags.id",
+        "invoice_tags has composite primary key (invoice_id, tag_id)."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "services",
+      "target_table": "users",
+      "business_relationship": "A service is owned by a user acting as a consultant.",
+      "reason": "The owner_consultant_id explicitly identifies the user responsible for the service.",
+      "evidence": [
+        "Foreign key: services.owner_consultant_id -> users.id",
+        "services contains pricing and scheduling-related fields."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "service_allocations",
+      "target_table": "services",
+      "business_relationship": "A service allocation assigns a service.",
+      "reason": "The allocation record directly references the allocated service.",
+      "evidence": [
+        "Foreign key: service_allocations.service_id -> services.id",
+        "service_allocations also contains consultant_id and is_default."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "service_allocations",
+      "target_table": "users",
+      "business_relationship": "A service allocation assigns a user acting as a consultant to a service.",
+      "reason": "The consultant reference identifies the user receiving the service allocation.",
+      "evidence": [
+        "Foreign key: service_allocations.consultant_id -> users.id",
+        "service_allocations also references services.id through service_id."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "tickets",
+      "target_table": "companies",
+      "business_relationship": "A ticket is associated with a company.",
+      "reason": "The company reference places the ticket within a company account.",
+      "evidence": [
+        "Foreign key: tickets.company_id -> companies.id",
+        "tickets contains subject, description, status, priority, and billing-related fields."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "tickets",
+      "target_table": "services",
+      "business_relationship": "A ticket requests or concerns a service.",
+      "reason": "The service reference categorizes the ticket under a defined service.",
+      "evidence": [
+        "Foreign key: tickets.service_id -> services.id",
+        "tickets contains ticket_type, delivery_stage, session details, and is_billable."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "tickets",
+      "target_table": "users",
+      "business_relationship": "A ticket is associated with a user and records a user creator.",
+      "reason": "Two user references represent the ticket-associated user and the user who created it.",
+      "evidence": [
+        "Foreign key: tickets.user_id -> users.id",
+        "Foreign key: tickets.created_by_user_id -> users.id"
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "ticket_attachments",
+      "target_table": "tickets",
+      "business_relationship": "A ticket can have file attachments.",
+      "reason": "Each attachment directly references the ticket to which its file belongs.",
+      "evidence": [
+        "Foreign key: ticket_attachments.ticket_id -> tickets.id",
+        "ticket_attachments contains filename, file_path, mime_type, and size_bytes."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "ticket_logs",
+      "target_table": "tickets",
+      "business_relationship": "A ticket can have a history of comments or log entries.",
+      "reason": "Each log entry references a ticket and stores a comment and timestamp.",
+      "evidence": [
+        "Foreign key: ticket_logs.ticket_id -> tickets.id",
+        "ticket_logs contains comment and created_at."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "ticket_logs",
+      "target_table": "users",
+      "business_relationship": "A ticket log entry is authored by a user.",
+      "reason": "The user reference identifies the user associated with the logged comment.",
+      "evidence": [
+        "Foreign key: ticket_logs.user_id -> users.id",
+        "ticket_logs contains comment and created_at."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "tickets",
+      "target_table": "tags",
+      "business_relationship": "Tickets can be classified with tags.",
+      "reason": "The ticket_tags junction table links ticket and tag records.",
+      "evidence": [
+        "Foreign key: ticket_tags.ticket_id -> tickets.id",
+        "Foreign key: ticket_tags.tag_id -> tags.id",
+        "ticket_tags has composite primary key (ticket_id, tag_id)."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "ticket_time_logs",
+      "target_table": "tickets",
+      "business_relationship": "A ticket can have time entries recording work performed.",
+      "reason": "Each time log directly references a ticket and records minutes and work details.",
+      "evidence": [
+        "Foreign key: ticket_time_logs.ticket_id -> tickets.id",
+        "ticket_time_logs contains session_date, minutes_logged, work_performed, and status."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "ticket_time_logs",
+      "target_table": "users",
+      "business_relationship": "A ticket time entry records work performed by a user acting as a consultant.",
+      "reason": "The consultant reference identifies the user whose time was logged.",
+      "evidence": [
+        "Foreign key: ticket_time_logs.consultant_id -> users.id",
+        "ticket_time_logs contains minutes_logged and work_performed."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "ticket_time_logs",
+      "target_table": "companies",
+      "business_relationship": "A ticket time entry is attributed to a company.",
+      "reason": "The company reference provides the company context for the recorded work.",
+      "evidence": [
+        "Foreign key: ticket_time_logs.company_id -> companies.id",
+        "ticket_time_logs also references tickets.id and users.id."
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "proposals",
+      "target_table": "tickets",
+      "business_relationship": "A proposal is prepared in response to or in connection with a ticket.",
+      "reason": "The proposal directly references its related ticket and includes estimates and commercial terms.",
+      "evidence": [
+        "Foreign key: proposals.ticket_id -> tickets.id",
+        "proposals contains est_start_date, est_end_date, est_hours, total_amount, and status."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "proposals",
+      "target_table": "companies",
+      "business_relationship": "A proposal is addressed to or associated with a company.",
+      "reason": "The company reference establishes the proposal's company context.",
+      "evidence": [
+        "Foreign key: proposals.company_id -> companies.id",
+        "proposals contains title, description, total_amount, and client_comments."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "proposals",
+      "target_table": "users",
+      "business_relationship": "A proposal is associated with a user acting as a consultant.",
+      "reason": "The consultant reference identifies the user responsible for the proposal.",
+      "evidence": [
+        "Foreign key: proposals.consultant_id -> users.id",
+        "proposals contains consultant_comments and revision_requested_by."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_details",
+      "target_table": "companies",
+      "business_relationship": "A project is associated with a company.",
+      "reason": "The company reference places the project under a company account.",
+      "evidence": [
+        "Foreign key: project_details.company_id -> companies.id",
+        "project_details contains project_name, budget, billing_type, dates, and status."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_details",
+      "target_table": "users",
+      "business_relationship": "A project is associated with users in ownership, client-creation, general-creation, and user roles.",
+      "reason": "Multiple user foreign keys record distinct user responsibilities around the project.",
+      "evidence": [
+        "Foreign key: project_details.user_id -> users.id",
+        "Foreign key: project_details.created_by_user_id -> users.id",
+        "Foreign key: project_details.created_by_client_id -> users.id",
+        "Foreign key: project_details.owner_consultant_id -> users.id"
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "project_change_orders",
+      "target_table": "project_details",
+      "business_relationship": "A project can have change orders that adjust its scope or billing.",
+      "reason": "Each change order references a project and contains billing and amount information.",
+      "evidence": [
+        "Foreign key: project_change_orders.project_id -> project_details.id",
+        "project_change_orders contains billing_type, description, amount, and added_date."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_milestones",
+      "target_table": "project_details",
+      "business_relationship": "A project can be organized into milestones.",
+      "reason": "Each milestone directly references its project and tracks dates and task counts.",
+      "evidence": [
+        "Foreign key: project_milestones.project_id -> project_details.id",
+        "project_milestones contains milestone_name, date, total_tasks, and completed_tasks."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_tasks",
+      "target_table": "project_details",
+      "business_relationship": "A project contains tasks.",
+      "reason": "Each task directly references its parent project.",
+      "evidence": [
+        "Foreign key: project_tasks.project_id -> project_details.id",
+        "project_tasks contains task_name, priority, stage, dates, status, and completion fields."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_tasks",
+      "target_table": "project_milestones",
+      "business_relationship": "A project task may be organized under a project milestone.",
+      "reason": "The milestone reference connects a task to a milestone.",
+      "evidence": [
+        "Foreign key: project_tasks.milestone_id -> project_milestones.id",
+        "Both tables contain project-oriented task tracking fields."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_tasks",
+      "target_table": "users",
+      "business_relationship": "A project task is assigned to a user and records the user who created it.",
+      "reason": "Separate user references represent task assignment and task creation.",
+      "evidence": [
+        "Foreign key: project_tasks.assignee_id -> users.id",
+        "Foreign key: project_tasks.created_by_id -> users.id"
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_sub_tasks",
+      "target_table": "project_tasks",
+      "business_relationship": "A project task can be broken down into subtasks.",
+      "reason": "Each subtask directly references its parent task.",
+      "evidence": [
+        "Foreign key: project_sub_tasks.task_id -> project_tasks.id",
+        "project_sub_tasks contains title, details, due_date, and is_completed."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_sub_tasks",
+      "target_table": "users",
+      "business_relationship": "A project subtask may be assigned to a user.",
+      "reason": "The assignee reference identifies the user responsible for the subtask.",
+      "evidence": [
+        "Foreign key: project_sub_tasks.assignee_id -> users.id",
+        "project_sub_tasks contains due_date and is_completed."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_task_time_logs",
+      "target_table": "project_tasks",
+      "business_relationship": "A project task can have time entries recording work performed.",
+      "reason": "Each time log directly references a task and records minutes and work details.",
+      "evidence": [
+        "Foreign key: project_task_time_logs.task_id -> project_tasks.id",
+        "project_task_time_logs contains session_date, minutes_logged, and work_performed."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_task_time_logs",
+      "target_table": "users",
+      "business_relationship": "A project task time entry is logged for a user acting as a consultant.",
+      "reason": "The consultant reference identifies the user whose work is represented by the time entry.",
+      "evidence": [
+        "Foreign key: project_task_time_logs.consultant_id -> users.id",
+        "project_task_time_logs contains minutes_logged and work_performed."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_stake_holders",
+      "target_table": "project_details",
+      "business_relationship": "A project stakeholder assignment associates a stakeholder with a project.",
+      "reason": "The stakeholder assignment directly references the project.",
+      "evidence": [
+        "Foreign key: project_stake_holders.project_id -> project_details.id",
+        "project_stake_holders contains user_id and is_active."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_stake_holders",
+      "target_table": "users",
+      "business_relationship": "A project stakeholder assignment identifies a user as a project stakeholder.",
+      "reason": "The user reference identifies the stakeholder participating in the project.",
+      "evidence": [
+        "Foreign key: project_stake_holders.user_id -> users.id",
+        "project_stake_holders also references project_details.id."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "project_team_stages",
+      "target_table": "project_details",
+      "business_relationship": "Project team and workflow-stage configuration belongs to a project.",
+      "reason": "The record references a project and stores consultant assignments, client stakeholders, and workflow configuration.",
+      "evidence": [
+        "Foreign key: project_team_stages.project_id -> project_details.id",
+        "project_team_stages contains assign_consultants, client_stakeholders, and kanban_workflow."
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "cde_workspaces",
+      "target_table": "project_details",
+      "business_relationship": "A CDE workspace supports a project.",
+      "reason": "The workspace directly references a project and contains repository, branch, technology, and IDE configuration.",
+      "evidence": [
+        "Foreign key: cde_workspaces.project_id -> project_details.id",
+        "cde_workspaces contains github_repo_url, workspace_repo_path, workspace_git_branch, tech_stack, and ide_url."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "cde_workspaces",
+      "target_table": "users",
+      "business_relationship": "A CDE workspace is assigned to a user acting as a developer and records its creating user.",
+      "reason": "Separate user references identify the workspace developer and creator.",
+      "evidence": [
+        "Foreign key: cde_workspaces.developer_id -> users.id",
+        "Foreign key: cde_workspaces.created_by -> users.id"
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "cde_provider_tasks",
+      "target_table": "cde_workspaces",
+      "business_relationship": "A CDE workspace can have provider-operation tasks.",
+      "reason": "Provider task records reference a workspace and track operation status and execution timing.",
+      "evidence": [
+        "Foreign key: cde_provider_tasks.workspace_id -> cde_workspaces.id",
+        "cde_provider_tasks contains operation, status, error_message, started_at, and completed_at."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "cde_ssh_keys",
+      "target_table": "cde_workspaces",
+      "business_relationship": "A CDE workspace has associated SSH key material.",
+      "reason": "Each SSH key record directly references its workspace.",
+      "evidence": [
+        "Foreign key: cde_ssh_keys.workspace_id -> cde_workspaces.id",
+        "cde_ssh_keys contains public_key and private_key."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "chat_messages",
+      "target_table": "chat_rooms",
+      "business_relationship": "A chat room contains chat messages.",
+      "reason": "Each message directly references the room in which it was posted.",
+      "evidence": [
+        "Foreign key: chat_messages.chat_room_id -> chat_rooms.id",
+        "chat_messages contains message, type, and created_at."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "chat_messages",
+      "target_table": "users",
+      "business_relationship": "A chat message is associated with the user who posted it.",
+      "reason": "The user reference identifies the message author.",
+      "evidence": [
+        "Foreign key: chat_messages.user_id -> users.id",
+        "chat_messages contains message and created_at."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "chat_room_participants",
+      "target_table": "chat_rooms",
+      "business_relationship": "A chat room participant assignment adds participation to a chat room.",
+      "reason": "The participant record directly references its chat room.",
+      "evidence": [
+        "Foreign key: chat_room_participants.chat_room_id -> chat_rooms.id",
+        "chat_room_participants also contains user_id."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "chat_room_participants",
+      "target_table": "users",
+      "business_relationship": "A chat room participant assignment identifies a participating user.",
+      "reason": "The user reference identifies the participant in the linked chat room.",
+      "evidence": [
+        "Foreign key: chat_room_participants.user_id -> users.id",
+        "chat_room_participants also references chat_rooms.id."
+      ],
+      "confidence": 0.99
+    },
+    {
+      "source_table": "chat_rooms",
+      "target_table": "companies",
+      "business_relationship": "A chat room may be associated with a company.",
+      "reason": "The company reference establishes the chat room's company context.",
+      "evidence": [
+        "Foreign key: chat_rooms.company_id -> companies.id",
+        "chat_rooms contains is_internal and several business-context references."
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "chat_rooms",
+      "target_table": "tickets",
+      "business_relationship": "A chat room may support discussion about a ticket.",
+      "reason": "The ticket reference directly connects the chat room to a ticket.",
+      "evidence": [
+        "Foreign key: chat_rooms.ticket_id -> tickets.id"
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "chat_rooms",
+      "target_table": "proposals",
+      "business_relationship": "A chat room may support discussion about a proposal.",
+      "reason": "The proposal reference directly connects the chat room to a proposal.",
+      "evidence": [
+        "Foreign key: chat_rooms.proposal_id -> proposals.id"
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "chat_rooms",
+      "target_table": "project_details",
+      "business_relationship": "A chat room may support discussion about a project.",
+      "reason": "The project reference directly connects the chat room to a project.",
+      "evidence": [
+        "Foreign key: chat_rooms.project_id -> project_details.id"
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "chat_rooms",
+      "target_table": "project_tasks",
+      "business_relationship": "A chat room may support discussion about a project task.",
+      "reason": "The task reference directly connects the chat room to a project task.",
+      "evidence": [
+        "Foreign key: chat_rooms.task_id -> project_tasks.id"
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "chat_rooms",
+      "target_table": "users",
+      "business_relationship": "A chat room may be associated with a user acting as a consultant.",
+      "reason": "The consultant reference identifies the user associated with the room in that role.",
+      "evidence": [
+        "Foreign key: chat_rooms.consultant_id -> users.id"
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "vaults",
+      "target_table": "companies",
+      "business_relationship": "A vault credential record may be stored in a company context.",
+      "reason": "The company reference scopes stored platform credentials to a company.",
+      "evidence": [
+        "Foreign key: vaults.company_id -> companies.id",
+        "vaults contains platform, url, user_name, and password."
+      ],
+      "confidence": 0.98
+    },
+    {
+      "source_table": "vaults",
+      "target_table": "users",
+      "business_relationship": "A vault credential record is associated with a user.",
+      "reason": "The user reference identifies the user associated with the stored credentials.",
+      "evidence": [
+        "Foreign key: vaults.user_id -> users.id",
+        "vaults contains platform, url, user_name, and password."
+      ],
+      "confidence": 0.98
+    }
+  ]
+}
