@@ -237,9 +237,37 @@ GENERAL RULES:
 
 14. Avoid unnecessary joins, unnecessary tables, and unnecessary columns.
 
+ENTITY DETAIL LOOKUPS:
+
+15. When the user asks to show, display, retrieve, or provide the details
+    of a specific entity, include the entity's identifying/display fields
+    in required_columns when those fields exist in the discovered schema.
+
+16. For an entity-detail question, do not select only technical identifiers
+    such as primary keys if the Context Layer contains additional fields
+    that identify or describe the entity.
+
+17. Consider available fields such as names, titles, labels, slugs, codes,
+    descriptions, and other semantically identifying fields when selecting
+    required_columns.
+
+18. Select these fields dynamically from the discovered schema.
+    Never assume a particular column name such as "name", "title", or "label".
+
+19. If the schema does not contain an appropriate identifying/display field,
+    do not invent one. Return only fields that actually exist.
+
+20. For a specific entity-detail question, include the requested entity's
+    identifying information together with its other relevant available
+    attributes.
+
+21. Do not retrieve unnecessary columns merely because they exist in the
+    table. Prefer fields relevant to identifying or describing the requested
+    entity.
+
 OPERATIONS:
 
-15. Operations may include:
+22. Operations may include:
 
     lookup
     filter
@@ -253,67 +281,67 @@ OPERATIONS:
     grouping
     aggregation
 
-16. Filters must describe conditions that retrieval will need.
+23. Filters must describe conditions that retrieval will need.
 
-17. When a filter refers to a categorical/text value described in natural language,
+24. When a filter refers to a categorical/text value described in natural language,
     do not assume the exact database casing or spelling of the value.
 
-18. Preserve the user's requested semantic value in the filter description,
+25. Preserve the user's requested semantic value in the filter description,
     but do not invent an exact database literal when the Context Layer does not
     provide the actual value.
 
-19. For example, if the user asks for records that are "pending", the plan
+26. For example, if the user asks for records that are "pending", the plan
     may describe the filter as "tickets.status matches pending", but must not
     assume that the stored value is exactly "pending" rather than "Pending".
 
-20. Grouping must describe the fields needed for grouped results.
+27. Grouping must describe the fields needed for grouped results.
 
-21. Sorting must identify actual available columns using table.column format
+28. Sorting must identify actual available columns using table.column format
     where appropriate.
 
 CONVERSATION:
 
-22. If the user refers to something from an earlier conversation turn,
+29. If the user refers to something from an earlier conversation turn,
     use conversation context.
 
-23. Set needs_conversation_context to true when previous conversation
+30. Set needs_conversation_context to true when previous conversation
     information is required to understand the current question.
 
 LIMIT:
 
-24. Determine limit from the user's requested result size when explicitly
+31. Determine limit from the user's requested result size when explicitly
     stated.
 
-25. Examples:
+32. Examples:
 
     "top 5" -> limit 5
     "latest 10" -> limit 10
     "show me 20" -> limit 20
     "first 3" -> limit 3
 
-26. For ranking, newest, latest, most recent, top, or bottom questions where
+33. For ranking, newest, latest, most recent, top, or bottom questions where
     the user does NOT specify a result size, use a small default limit such
     as 10.
 
-27. Do NOT use a row limit for count, sum, average, minimum, maximum, or
+34. Do NOT use a row limit for count, sum, average, minimum, maximum, or
     other aggregate operations when the limit would incorrectly reduce the
     aggregation input.
 
-28. For a specific record lookup or a question clearly asking about one
+35. For a specific record lookup or a question clearly asking about one
     entity, use a limit appropriate for that single-result lookup.
 
-29. The limit must be an integer greater than 0 or null.
+36. The limit must be an integer greater than 0 or null.
 
-30. Never invent a limit based on database size.
+37. Never invent a limit based on database size.
 
-31. Sorting and limit must work together.
+38. Sorting and limit must work together.
 
-32. For "most recent", "latest", "newest", or similar questions, identify
+39. For "most recent", "latest", "newest", or similar questions, identify
     an appropriate available time-related column and sort descending.
 
 BROAD QUESTIONS:
 
-33. For broad questions such as:
+40. For broad questions such as:
 
     "Which records were created most recently?"
     "What are the latest records?"
@@ -322,28 +350,28 @@ BROAD QUESTIONS:
     do NOT automatically select every table that contains a created_at,
     updated_at, timestamp, or similar column.
 
-34. For a broad question, first identify which tables are most likely to
+41. For a broad question, first identify which tables are most likely to
     represent meaningful business records based on the complete Context
     Layer.
 
-35. Prefer a focused candidate set rather than querying the entire database.
+42. Prefer a focused candidate set rather than querying the entire database.
 
-36. If several tables are genuinely equally relevant and the question
+43. If several tables are genuinely equally relevant and the question
     explicitly asks across the whole database, multiple tables may be
     selected. However, unnecessary tables must still be excluded.
 
-37. When selecting multiple tables for a broad ranking question, every
+44. When selecting multiple tables for a broad ranking question, every
     selected table must have a clear reason for being included in the plan.
 
-38. The reasoning field should briefly explain why the selected tables are
+45. The reasoning field should briefly explain why the selected tables are
     relevant and why obviously unrelated tables were excluded.
 
 SCHEMA LIMITATION:
 
-39. If the question cannot be answered from the available schema, return
+46. If the question cannot be answered from the available schema, return
     the best possible plan and clearly explain the limitation.
 
-40. confidence must be between 0 and 1.
+47. confidence must be between 0 and 1.
 
 AVAILABLE CONTEXT LAYER:
 

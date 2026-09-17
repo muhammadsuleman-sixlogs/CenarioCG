@@ -1,6 +1,6 @@
 from typing import Any
 
-from psycopg2.errors import DatatypeMismatch
+from psycopg2 import errors
 
 from context.context_manager import ContextManager
 from entity_resolution.entity_normalizer import normalize_entity_candidates
@@ -129,14 +129,21 @@ class RAGPipeline:
         )
 
         # --------------------------------------------------
-        # 7. Execute read-only retrieval (with 1 repair attempt on DatatypeMismatch)
+        # 7. Execute read-only retrieval (with 1 repair attempt on SQL execution errors)
         # --------------------------------------------------
 
         try:
             retrieval = self.executor.execute(
                 sql
             )
-        except DatatypeMismatch as exc:
+        except (
+            errors.GroupingError,
+            errors.DatatypeMismatch,
+            errors.UndefinedColumn,
+            errors.UndefinedTable,
+            errors.InvalidTextRepresentation,
+            errors.UndefinedFunction,
+        ) as exc:
             repaired_sql = self.sql_generator.repair(
                 query=sql,
                 database_error=str(exc),

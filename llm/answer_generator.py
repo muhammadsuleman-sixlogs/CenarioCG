@@ -19,7 +19,6 @@ class AnswerGenerator:
         question: str,
         evidence: dict[str, Any],
     ) -> str:
-
         if not question or not question.strip():
             raise ValueError("Question cannot be empty.")
 
@@ -40,6 +39,15 @@ Rules:
 6. When useful, mention the source table/entity.
 7. Do not expose internal reasoning.
 8. If the evidence was truncated, answer only from the evidence provided.
+9. Use normal paragraphs or simple bullet points for the answer.
+10. Do NOT use Markdown tables.
+11. Never format retrieved records as a table.
+12. When multiple records need to be shown, use bullet points instead.
+13. Keep each record on a separate bullet point when appropriate.
+14. Use simple readable text rather than complex Markdown formatting.
+15. Do not escape pipe characters such as \|.
+16. Do not put multiple records on one line.
+17. Preserve line breaks between paragraphs and bullet points.
 
 USER QUESTION:{question}
 

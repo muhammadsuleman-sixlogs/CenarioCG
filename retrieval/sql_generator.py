@@ -115,52 +115,134 @@ RETRIEVAL REQUIREMENTS:
 29. If the contract requests aggregation such as count, sum, average,
     minimum, or maximum, perform that operation in SQL rather than
     retrieving all rows for the LLM.
-30. If the contract requests ranking or "most recent"/"latest"/"top"
+
+MULTI-ENTITY SQL GENERATION:
+
+30. Treat the Retrieval Contract as authoritative.
+31. When multiple required tables are present, determine the complete
+    join path from the supplied Context Layer relationships.
+32. Every JOIN must be supported by an explicitly discovered relationship.
+33. Do not invent JOIN conditions from column-name similarity.
+34. Do not assume primary-key-to-primary-key joins.
+35. Use the discovered source_table, source_column, target_table, and
+    target_column relationship metadata to construct joins.
+36. When the requested answer requires multiple hops, include every
+    necessary intermediate table.
+37. Do not omit an intermediate table merely because it is not explicitly
+    requested in the final output.
+38. Select only the columns required by the Retrieval Contract and the
+    minimum additional columns needed to establish the joins.
+39. When multiple entity types are requested, include identifying/display
+    columns for each requested entity when they exist in the schema.
+40. Preserve entity identity throughout the query.
+41. Avoid accidental many-to-many multiplication. Before aggregation,
+    verify that the selected join path represents the requested
+    relationship.
+42. When aggregation follows multiple joins, determine which entity level
+    the aggregate belongs to and group accordingly.
+43. Apply requested filters at the correct entity level.
+44. If the user asks for pending tickets, filter the ticket status before
+    counting tickets.
+45. If the user asks for each company and each project, GROUP BY all
+    required company/project identifying expressions.
+46. Do not use LIMIT unless the Retrieval Contract specifies a valid limit.
+47. Never use LIMIT to arbitrarily reduce "each", "all", or "every"
+    results.
+48. For ranking questions, apply LIMIT only after the required aggregation
+    and ordering have been performed.
+49. Never change the user's requested entity level merely to simplify SQL.
+
+GROUP BY VALIDATION:
+
+50. When using aggregate functions such as COUNT, SUM, AVG, MIN, or MAX,
+    inspect every expression in the SELECT list.
+51. Every SELECT expression that is not an aggregate expression must be
+    included in the GROUP BY clause, unless PostgreSQL can legally derive
+    it from grouped expressions according to PostgreSQL grouping rules.
+52. Do not select a non-aggregated column while grouping only by another
+    column from the same table.
+53. If the query selects identifying fields from multiple entities,
+    include the required identifying expressions in GROUP BY.
+54. Do not group only by one entity when the SELECT output contains
+    identifying fields from another entity.
+55. Ensure ORDER BY expressions are also valid for the aggregation query.
+56. Before returning an aggregated query, compare the final SELECT list
+    against the GROUP BY clause and ensure that every required
+    non-aggregated expression is grouped.
+57. If the query selects multiple non-aggregated columns, include all
+    required columns or expressions in GROUP BY.
+58. Do not remove selected columns merely to avoid a GROUP BY error.
+    Preserve the Retrieval Contract and include the required grouping.
+59. Apply these GROUP BY rules dynamically using the discovered schema
+    and Retrieval Contract. Do not hardcode table names or column names.
+
+JOIN PATH VALIDATION:
+
+60. Before returning the query, list the tables used in FROM and JOIN.
+61. For every JOIN, verify that the Context Layer contains a relationship
+    connecting the two participating tables.
+62. For a multi-hop query, verify that all intermediate tables form a
+    continuous discovered relationship path.
+63. Verify that every JOIN condition uses the actual discovered relationship
+    columns.
+64. Verify that no unrelated table was introduced.
+65. Verify that no required table was omitted.
+66. Verify that the final SELECT fields can be traced to the requested
+    entities.
+67. Verify that aggregation occurs at the requested entity level.
+68. Verify that filters apply to the correct table/entity.
+69. Verify that LIMIT does not truncate an aggregation or an "each/all"
+    result.
+70. If any of these checks fail, correct the SQL before returning it.
+
+GENERAL SQL RULES:
+
+71. If the contract requests ranking or "most recent"/"latest"/"top"
     results and provides a limit, return only that number of results.
-31. Do not add arbitrary tables or columns that are not required by the
+72. Do not add arbitrary tables or columns that are not required by the
     retrieval contract unless they are necessary to perform a validated
     relationship, filter, grouping, sorting, or operation.
-32. Prefer SQL-side filtering, grouping, aggregation, ordering, and limiting
+73. Prefer SQL-side filtering, grouping, aggregation, ordering, and limiting
     instead of retrieving unnecessary rows and processing them in the LLM.
-33. When filtering by an entity identifier, choose a column whose discovered
+74. When filtering by an entity identifier, choose a column whose discovered
     schema type is compatible with the supplied identifier value.
-34. Do not compare a textual identifier with a UUID column.
-35. If the supplied entity identifier is textual and the schema contains a
+75. Do not compare a textual identifier with a UUID column.
+76. If the supplied entity identifier is textual and the schema contains a
     textual identifier/reference column for that entity, use that column.
-36. Never cast an incompatible identifier into another type merely to make
+77. Never cast an incompatible identifier into another type merely to make
     the comparison execute.
-37. Use the entity information and evidence supplied in the Retrieval Contract
+78. Use the entity information and evidence supplied in the Retrieval Contract
     together with the Context Layer schema to determine the correct identifier
     column.
-38. When a retrieval filter refers to a natural-language categorical or text
+79. When a retrieval filter refers to a natural-language categorical or text
     value, do not assume the exact database casing.
-39. For case-insensitive equality against a textual database column, use a
+80. For case-insensitive equality against a textual database column, use a
     case-insensitive SQL comparison such as LOWER(column) = LOWER('value').
-40. Do not hardcode known database values. Resolve the requested value from
+81. Do not hardcode known database values. Resolve the requested value from
     the supplied filter semantics and discovered schema.
-41. Preserve exact equality semantics when the filter requires exact matching;
+82. Preserve exact equality semantics when the filter requires exact matching;
     only normalize casing when the filter represents a natural-language
     categorical value.
-42. When using UNION or UNION ALL, corresponding output columns at the
+83. When using UNION or UNION ALL, corresponding output columns at the
     same ordinal position in every SELECT branch MUST have compatible
     PostgreSQL data types.
-43. Before generating a UNION or UNION ALL query, inspect the discovered
+84. Before generating a UNION or UNION ALL query, inspect the discovered
     data types of every corresponding output expression across ALL branches.
-44. If a projected output field such as record_id has different native
+85. If a projected output field such as record_id has different native
     types across UNION branches, explicitly normalize that field to text
     in EVERY UNION branch, including branches where the value is NULL.
-45. For example, if one branch returns a UUID record_id and another branch
+86. For example, if one branch returns a UUID record_id and another branch
     returns NULL, use:
         CAST(record_id AS text) AS record_id
     and:
         CAST(NULL AS text) AS record_id
     so that every UNION branch returns text for record_id.
-46. Apply this type normalization consistently to ALL corresponding UNION
+87. Apply this type normalization consistently to ALL corresponding UNION
     output columns that have incompatible types, not only record_id.
-47. Do not use output-type normalization for filtering, joining, grouping,
+88. Do not use output-type normalization for filtering, joining, grouping,
     or sorting when the native database type is required. Normalize only
     the projected output expressions needed for UNION compatibility.
-48. Never assume that casting only one UNION branch is sufficient.
+89. Never assume that casting only one UNION branch is sufficient.
     Every corresponding column across every UNION branch must resolve to
     the same or compatible PostgreSQL type.
 
@@ -271,70 +353,66 @@ REPAIR REQUIREMENTS:
 21. Fix the PostgreSQL error without changing the requested answer.
 22. Inspect the discovered PostgreSQL data types before repairing
     type-related expressions.
-23. If the error involves UNION or UNION ALL:
+23. If the PostgreSQL error involves GROUP BY or aggregation:
+    - Inspect every expression in the SELECT list.
+    - Identify every non-aggregated SELECT expression.
+    - Ensure every required non-aggregated expression appears in GROUP BY.
+    - If multiple non-aggregated columns are selected, include all required
+      columns or expressions in GROUP BY.
+    - Preserve all requested aggregate calculations.
+    - Do not remove requested output columns merely to avoid the error.
+    - Do not hardcode table or column names.
+    - Use the supplied Context Layer schema and Retrieval Contract
+      to determine the correct grouping dynamically.
+24. Before returning the repaired query, validate the final SELECT list,
+    aggregate expressions, and GROUP BY clause together.
+25. If the error involves UNION or UNION ALL:
     - Inspect EVERY SELECT branch.
     - Compare EVERY corresponding output column by position.
     - Ensure corresponding output expressions have compatible
       PostgreSQL data types across ALL branches.
-
-24. If corresponding UNION output expressions have incompatible
+26. If corresponding UNION output expressions have incompatible
     PostgreSQL types, normalize the projected output values to one
     compatible type across ALL affected branches.
-
-25. This normalization applies ONLY to SELECT projection/output
+27. This normalization applies ONLY to SELECT projection/output
     expressions.
-
-26. Do NOT change the database schema or database column types.
-
-27. For PostgreSQL enum types:
+28. Do NOT change the database schema or database column types.
+29. For PostgreSQL enum types:
     - If an enum value is UNIONed with text/varchar, it may be
       explicitly cast to text.
     - Apply the same output normalization to the corresponding
       UNION branches.
-
-28. For UUID/text conflicts:
+30. For UUID/text conflicts:
     - If the projected output requires textual normalization,
       explicitly cast the UUID to text.
     - Apply the same normalization to corresponding branches.
-
-29. For other incompatible UNION types such as integer, bigint,
+31. For other incompatible UNION types such as integer, bigint,
     numeric, date, timestamp, text, varchar, UUID, or enum:
     - Determine a compatible output representation.
     - Apply the conversion consistently across ALL corresponding
       UNION branches.
-
-30. If a branch returns NULL for a normalized output field,
+32. If a branch returns NULL for a normalized output field,
     explicitly cast NULL to the selected output type when necessary.
-
-31. Do NOT cast columns merely to make filtering or joining work.
-
-32. Preserve native database types for:
+33. Do NOT cast columns merely to make filtering or joining work.
+34. Preserve native database types for:
     - WHERE conditions
     - JOIN conditions
     - GROUP BY
     - ORDER BY
     whenever required.
-
-33. Do not change the meaning of the Retrieval Contract.
-
-34. Do not add unnecessary tables or columns.
-
-35. Do not retrieve unnecessary rows.
-
-36. Preserve requested filtering, aggregation, grouping, sorting,
+35. Do not change the meaning of the Retrieval Contract.
+36. Do not add unnecessary tables or columns.
+37. Do not retrieve unnecessary rows.
+38. Preserve requested filtering, aggregation, grouping, sorting,
     and limiting.
-
-37. If PostgreSQL identifies one problematic expression, repair it
+39. If PostgreSQL identifies one problematic expression, repair it
     AND inspect the corresponding expressions in every other UNION
     branch for the same datatype incompatibility.
-
-38. Before returning the query, mentally verify every corresponding
+40. Before returning the query, mentally verify every corresponding
     UNION output column across every branch.
-
-39. The database must remain completely read-only.
+41. The database must remain completely read-only.
     The repair may ONLY modify the generated SQL query.
-
-40. Return exactly ONE valid read-only PostgreSQL query.
+42. Return exactly ONE valid read-only PostgreSQL query.
 
 ORIGINAL SQL:{query}
 
