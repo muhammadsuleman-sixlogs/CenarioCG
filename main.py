@@ -9,7 +9,7 @@ app = FastAPI(title="AI Context Layer API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://cenario-cg.vercel.app"],
+    allow_origins=["http://localhost:5173", "https://cenario-cg.vercel.app","https://cenario-cg-xmvw.vercel.app/"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
