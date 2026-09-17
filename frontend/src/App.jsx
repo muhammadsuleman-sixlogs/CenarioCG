@@ -37,7 +37,7 @@ function App() {
     const loadGraph = async () => {
       try {
         const response = await fetch(
-          "http://127.0.0.1:8000/api/graph"
+          "https://cenario-cg.vercel.app/api/graph"
         );
 
         if (!response.ok) {
@@ -80,7 +80,7 @@ function App() {
 
     try {
       const response = await fetch(
-        "http://127.0.0.1:8000/api/chat",
+        "https://cenario-cg.vercel.app/api/chat",
         {
           method: "POST",
           headers: {
