@@ -1,8 +1,10 @@
 import json
 from typing import Any
 
-from llm.openai_client import get_openai_client
-
+from llm.openai_client import (
+    get_openai_client,
+    OPENAI_MODEL,
+)
 
 def build_schema_for_llm(
     context: dict[str, Any],

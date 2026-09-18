@@ -3,7 +3,10 @@ from typing import Any
 
 from context.context_store import load_context
 from database.readonly_guard import validate_read_only_query
-from llm.openai_client import get_openai_client
+from llm.openai_client import (
+    get_openai_client,
+    OPENAI_MODEL,
+)
 from retrieval.sql_validator import validate_sql_syntax
 
 

@@ -3,7 +3,10 @@ import json
 from typing import Any
 
 from context.context_store import load_context
-from llm.openai_client import get_openai_client
+from llm.openai_client import (
+    get_openai_client,
+    OPENAI_MODEL,
+)
 
 
 class QuestionPlanner:
