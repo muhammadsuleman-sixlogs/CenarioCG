@@ -487,7 +487,7 @@ USER QUESTION:
 """
 
         response = self.client.responses.create(
-            model=OPENAI_MODEL,
+            model="gpt-5.4-nano-2026-03-17",
             input=prompt,
         )
 
