@@ -66,7 +66,7 @@ RETRIEVED EVIDENCE:{evidence}
         )
 
         response = self.client.responses.create(
-            model="gpt-5.6-terra",
+            model=OPENAI_MODEL,
             input=prompt,
         )
 
