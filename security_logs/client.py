@@ -69,15 +69,11 @@ class SecurityLogClient:
             "",
         ).strip()
 
-        if not self.base_url:
-            raise ValueError(
-                "SECURITY_API_BASE_URL is not configured."
-            )
-
-        if not self.token:
-            raise ValueError(
-                "SECURITY_API_TOKEN is not configured."
-            )
+        # Security Logs is an optional source.
+        # The application must still start when the API is unavailable.
+        self.available = bool(
+            self.base_url and self.token
+        )
 
         self.timeout = self._positive_float_env(
             "SECURITY_API_TIMEOUT",
@@ -108,12 +104,20 @@ class SecurityLogClient:
 
         self.session = requests.Session()
 
-        self.session.headers.update(
-            {
-                "Authorization": f"Bearer {self.token}",
-                "Accept": "application/json",
-            }
-        )
+        # Only configure authentication when credentials exist.
+        if self.token:
+            self.session.headers.update(
+                {
+                    "Authorization": f"Bearer {self.token}",
+                    "Accept": "application/json",
+                }
+            )
+        else:
+            self.session.headers.update(
+                {
+                    "Accept": "application/json",
+                }
+            )
 
         # Retry only transient GET failures.
         #
@@ -472,6 +476,13 @@ class SecurityLogClient:
         cache_key_name: str,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
+
+        if not self.available:
+            raise RuntimeError(
+                "Security Logs source is unavailable. "
+                "Configure SECURITY_API_BASE_URL and "
+                "SECURITY_API_TOKEN before requesting security logs."
+            )
 
         clean_params = {
             key: value
