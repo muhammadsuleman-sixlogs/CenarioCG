@@ -680,6 +680,257 @@
         "vaults contains platform, url, user_name, and password."
       ],
       "confidence": 0.98
+    },
+    {
+      "source_id": "db1",
+      "source_table": "access_profiles",
+      "target_table": "companies",
+      "business_relationship": "An access profile is configured for a specific company (tenant).",
+      "reason": "The access profile records reference a company via a dedicated company_id field.",
+      "evidence": [
+        "access_profiles.company_id (uuid) exists",
+        "Relationship evidence provided: access_profiles.company_id -> companies.id (FOREIGN_KEY, confidence 1.0)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "access_profiles",
+      "target_table": "users",
+      "business_relationship": "An access profile is created by a specific user.",
+      "reason": "The access profile includes created_by_id, indicating the creator user.",
+      "evidence": [
+        "access_profiles.created_by_id (uuid) exists",
+        "Relationship evidence provided: access_profiles.created_by_id -> users.id (FOREIGN_KEY, confidence 1.0)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db2",
+      "source_table": "action_items",
+      "target_table": "projects",
+      "business_relationship": "Each action item belongs to a project.",
+      "reason": "The action item record includes a project_id that matches the projects.project_id key used to identify projects.",
+      "evidence": [
+        "action_items has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "action_items",
+      "target_table": "sessions",
+      "business_relationship": "Each action item is associated with a session.",
+      "reason": "action_items includes session_id, which aligns with the session identifier stored in sessions.session_id.",
+      "evidence": [
+        "action_items has column session_id (character varying)",
+        "sessions has column session_id (character varying) and an integer primary key id"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "epics",
+      "target_table": "projects",
+      "business_relationship": "Each epic belongs to a project.",
+      "reason": "epics records include project_id consistent with the projects.project_id identifier.",
+      "evidence": [
+        "epics has column project_id (character varying)",
+        "projects has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "epics",
+      "target_table": "sessions",
+      "business_relationship": "Each epic is associated with a session.",
+      "reason": "epics records include session_id consistent with sessions.session_id identifier.",
+      "evidence": [
+        "epics has column session_id (character varying)",
+        "sessions has column session_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "documents",
+      "target_table": "projects",
+      "business_relationship": "Each document is associated with a project.",
+      "reason": "documents includes project_id aligned with projects.project_id.",
+      "evidence": [
+        "documents has column project_id (character varying)",
+        "projects has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "key_insights",
+      "target_table": "projects",
+      "business_relationship": "Each key insight belongs to a project.",
+      "reason": "key_insights includes project_id matching the projects.project_id identifier used by projects.",
+      "evidence": [
+        "key_insights has column project_id (character varying)",
+        "projects has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "key_insights",
+      "target_table": "sessions",
+      "business_relationship": "Each key insight is associated with a session.",
+      "reason": "key_insights includes session_id matching sessions.session_id.",
+      "evidence": [
+        "key_insights has column session_id (character varying)",
+        "sessions has column session_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "live_intelligence_snapshots",
+      "target_table": "projects",
+      "business_relationship": "Each live intelligence snapshot belongs to a project.",
+      "reason": "live_intelligence_snapshots includes project_id consistent with projects.project_id.",
+      "evidence": [
+        "live_intelligence_snapshots has column project_id (character varying)",
+        "projects has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "live_intelligence_snapshots",
+      "target_table": "sessions",
+      "business_relationship": "Each live intelligence snapshot is associated with a session.",
+      "reason": "live_intelligence_snapshots includes session_id matching sessions.session_id.",
+      "evidence": [
+        "live_intelligence_snapshots has column session_id (character varying)",
+        "sessions has column session_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "meeting_summaries",
+      "target_table": "projects",
+      "business_relationship": "Each meeting summary belongs to a project.",
+      "reason": "meeting_summaries includes project_id matching projects.project_id identifier.",
+      "evidence": [
+        "meeting_summaries has column project_id (character varying)",
+        "projects has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "meeting_summaries",
+      "target_table": "sessions",
+      "business_relationship": "Each meeting summary is associated with a session.",
+      "reason": "meeting_summaries includes session_id matching sessions.session_id.",
+      "evidence": [
+        "meeting_summaries has column session_id (character varying)",
+        "sessions has column session_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "questions",
+      "target_table": "projects",
+      "business_relationship": "Each question belongs to a project.",
+      "reason": "questions includes project_id consistent with projects.project_id.",
+      "evidence": [
+        "questions has column project_id (character varying)",
+        "projects has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "questions",
+      "target_table": "sessions",
+      "business_relationship": "Each question is associated with a session.",
+      "reason": "questions includes session_id consistent with sessions.session_id.",
+      "evidence": [
+        "questions has column session_id (character varying)",
+        "sessions has column session_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "requirements",
+      "target_table": "projects",
+      "business_relationship": "Each requirement belongs to a project.",
+      "reason": "requirements includes project_id matching projects.project_id.",
+      "evidence": [
+        "requirements has column project_id (character varying)",
+        "projects has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "requirements",
+      "target_table": "sessions",
+      "business_relationship": "Each requirement is associated with a session.",
+      "reason": "requirements includes session_id consistent with sessions.session_id.",
+      "evidence": [
+        "requirements has column session_id (character varying)",
+        "sessions has column session_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "sessions",
+      "target_table": "projects",
+      "business_relationship": "Each session belongs to a project.",
+      "reason": "sessions includes project_id consistent with projects.project_id.",
+      "evidence": [
+        "sessions has column project_id (character varying)",
+        "projects has column project_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "transcripts",
+      "target_table": "sessions",
+      "business_relationship": "Each transcript is associated with a session.",
+      "reason": "transcripts includes session_id matching sessions.session_id.",
+      "evidence": [
+        "transcripts has column session_id (character varying)",
+        "sessions has column session_id (character varying)"
+      ],
+      "confidence": 0.6
+    },
+    {
+      "source_id": "db2",
+      "source_table": "projects",
+      "target_table": "companies",
+      "business_relationship": "Each project belongs to a company.",
+      "reason": "projects includes company_id that matches companies.id used to identify companies.",
+      "evidence": [
+        "projects has column company_id (character varying)",
+        "companies has primary key id (character varying)"
+      ],
+      "confidence": 0.5
+    },
+    {
+      "source_id": "db2",
+      "source_table": "users",
+      "target_table": "companies",
+      "business_relationship": "Each user belongs to a company.",
+      "reason": "users includes company_id consistent with companies.id used to identify the owning company.",
+      "evidence": [
+        "users has column company_id (character varying)",
+        "companies has primary key id (character varying)"
+      ],
+      "confidence": 0.5
     }
   ]
 }

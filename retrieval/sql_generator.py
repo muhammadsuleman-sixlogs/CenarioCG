@@ -4,10 +4,13 @@ from typing import Any
 from context.context_store import load_context
 from database.readonly_guard import validate_read_only_query
 from llm.openai_client import (
-    get_openai_client,
     OPENAI_MODEL,
+    get_openai_client,
 )
 from retrieval.sql_validator import validate_sql_syntax
+from security.sensitive_data_policy import (
+    sanitize_schema_context,
+)
 
 
 class SQLGenerator:
@@ -17,42 +20,69 @@ class SQLGenerator:
     No company table or column names are hardcoded.
     """
 
-    def __init__(self, context: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        context: dict[str, Any] | None = None,
+        source_id: str = "db1",
+    ):
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("source_id must be a non-empty string.")
+
+        self.source_id = source_id.strip().lower()
+
         self.context = (
             context
             if context is not None
-            else load_context()
+            else load_context(source_id=self.source_id)
         )
+
         self.client = get_openai_client()
 
     def _build_schema_context(self) -> dict[str, Any]:
         """
         Build the schema information available to the SQL generator.
+
+        Sensitive/credential fields are removed before this schema
+        is supplied to the LLM.
+
+        The original Context Layer is not modified.
         """
 
         tables = {}
 
         for table_name, table_info in self.context.get(
-            "tables", {}
+            "tables",
+            {},
         ).items():
+            if not isinstance(table_info, dict):
+                continue
+
+            columns = [
+                {
+                    "name": column.get("name"),
+                    "data_type": (
+                        column.get("data_type")
+                        if column.get("data_type") is not None
+                        else column.get("type")
+                    ),
+                }
+                for column in table_info.get(
+                    "columns",
+                    [],
+                )
+                if isinstance(column, dict)
+            ]
 
             tables[table_name] = {
-                "columns": [
-                    {
-                        "name": column.get("name"),
-                        "data_type": column.get("data_type"),
-                    }
-                    for column in table_info.get(
-                        "columns", []
-                    )
-                ],
+                "columns": columns,
                 "primary_keys": table_info.get(
                     "primary_keys",
                     [],
                 ),
             }
 
-        return {
+        schema_context = {
+            "source_id": self.source_id,
             "tables": tables,
             "relationships": self.context.get(
                 "relationships",
@@ -64,14 +94,24 @@ class SQLGenerator:
             ),
         }
 
+        # Defense in depth:
+        # remove sensitive fields before the schema reaches the LLM.
+        return sanitize_schema_context(schema_context)
+
     def generate(
         self,
         contract: dict[str, Any],
+        source_id: str | None = None,
     ) -> str:
         if not isinstance(contract, dict):
-            raise ValueError(
-                "Retrieval contract must be a dictionary."
-            )
+            raise ValueError("Retrieval contract must be a dictionary.")
+
+        if source_id is not None:
+            if not isinstance(source_id, str) or not source_id.strip():
+                raise ValueError("source_id must be a non-empty string.")
+            active_source_id = source_id.strip().lower()
+        else:
+            active_source_id = self.source_id
 
         schema_context = self._build_schema_context()
 
@@ -80,6 +120,22 @@ You are a PostgreSQL SQL generation system.
 
 Your task is to translate the supplied Retrieval Contract
 into exactly ONE efficient, read-only PostgreSQL SQL query.
+
+POSTGRESQL SOURCE:
+
+The SQL query will execute against this PostgreSQL source:
+
+{active_source_id}
+
+Use ONLY the tables, columns, relationships, and business relationships
+belonging to this PostgreSQL source.
+
+Do not combine schemas from another PostgreSQL source.
+
+Do not invent cross-source joins.
+
+If the retrieval requires another PostgreSQL source, that source must be
+retrieved separately by the calling pipeline.
 
 IMPORTANT SAFETY RULES:
 
@@ -270,9 +326,7 @@ RETRIEVAL CONTRACT:{json.dumps(contract, indent=2, default=str)}
         query = response.output_text.strip()
 
         if not query:
-            raise ValueError(
-                "SQL generator returned an empty query."
-            )
+            raise ValueError("SQL generator returned an empty query.")
 
         # Remove accidental markdown fences if the model
         # returns them despite the instruction.
@@ -298,6 +352,7 @@ RETRIEVAL CONTRACT:{json.dumps(contract, indent=2, default=str)}
         query: str,
         database_error: str,
         contract: dict[str, Any],
+        source_id: str | None = None,
     ) -> str:
         """
         Repair a generated read-only SQL query after PostgreSQL
@@ -308,14 +363,17 @@ RETRIEVAL CONTRACT:{json.dumps(contract, indent=2, default=str)}
         """
 
         if not query or not query.strip():
-            raise ValueError(
-                "SQL query cannot be empty."
-            )
+            raise ValueError("SQL query cannot be empty.")
 
         if not database_error or not database_error.strip():
-            raise ValueError(
-                "Database error cannot be empty."
-            )
+            raise ValueError("Database error cannot be empty.")
+
+        if source_id is not None:
+            if not isinstance(source_id, str) or not source_id.strip():
+                raise ValueError("source_id must be a non-empty string.")
+            active_source_id = source_id.strip().lower()
+        else:
+            active_source_id = self.source_id
 
         schema_context = self._build_schema_context()
 
@@ -327,6 +385,18 @@ The database rejected the generated query.
 
 Your task is to return ONE corrected, read-only PostgreSQL
 query that satisfies the same Retrieval Contract.
+
+POSTGRESQL SOURCE:
+
+The failed query was executed against:
+
+{active_source_id}
+
+Repair the query using ONLY the discovered schema belonging to this
+source.
+
+Do not introduce tables or columns from another PostgreSQL source.
+Do not create cross-source joins.
 
 IMPORTANT:
 
@@ -440,54 +510,39 @@ Do not provide explanations.
         repaired_query = response.output_text.strip()
 
         if not repaired_query:
-            raise ValueError(
-                "SQL repair returned an empty query."
-            )
+            raise ValueError("SQL repair returned an empty query.")
 
         # Remove accidental markdown fences.
         if repaired_query.startswith("```"):
             lines = repaired_query.splitlines()
 
-            if (
-                lines
-                and lines[0].strip().startswith("```")
-            ):
+            if lines and lines[0].strip().startswith("```"):
                 lines = lines[1:]
 
-            if (
-                lines
-                and lines[-1].strip() == "```"
-            ):
+            if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
 
-            repaired_query = "\n".join(
-                lines
-            ).strip()
+            repaired_query = "\n".join(lines).strip()
 
         # VERY IMPORTANT:
         # Validate repaired SQL before database execution.
-        validate_read_only_query(
-            repaired_query
-        )
-
-        validate_sql_syntax(
-            repaired_query
-        )
+        validate_read_only_query(repaired_query)
+        validate_sql_syntax(repaired_query)
 
         return repaired_query
 
 
 def generate_sql(
     contract: dict[str, Any],
+    source_id: str = "db1",
 ) -> str:
+    generator = SQLGenerator(source_id=source_id)
 
-    generator = SQLGenerator()
-
-    return generator.generate(contract)
+    return generator.generate(
+        contract=contract,
+        source_id=source_id,
+    )
 
 
 if __name__ == "__main__":
-
-    print(
-        "SQL generator initialized successfully."
-    )
+    print("SQL generator initialized successfully.")

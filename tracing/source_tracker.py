@@ -12,6 +12,7 @@ TABLE_PATTERN = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+
 COLUMN_PATTERN = re.compile(
     r"""
     \bSELECT\s+(.*?)\s+
@@ -30,13 +31,17 @@ class SourceTracker:
 
     It does not access or modify PostgreSQL.
     It does not make any LLM/API calls.
+
+    source_id identifies which PostgreSQL source produced
+    the retrieved data, for example:
+        db1
+        db2
     """
 
     def _extract_tables_from_sql(
         self,
         query: str,
     ) -> list[str]:
-
         matches = TABLE_PATTERN.findall(query)
 
         tables = []
@@ -53,17 +58,14 @@ class SourceTracker:
         self,
         query: str,
     ) -> list[str]:
-
         matches = COLUMN_PATTERN.findall(query)
 
         columns = []
 
         for select_section in matches:
-
             parts = select_section.split(",")
 
             for part in parts:
-
                 expression = part.strip()
 
                 if not expression:
@@ -71,7 +73,7 @@ class SourceTracker:
 
                 # Remove aliases.
                 expression = re.sub(
-                    r"\s+AS\s+[\w\"]+$",
+                    r'\s+AS\s+[\w"]+$',
                     "",
                     expression,
                     flags=re.IGNORECASE,
@@ -91,6 +93,7 @@ class SourceTracker:
         query: str,
         retrieval: dict[str, Any],
         contract: dict[str, Any] | None = None,
+        source_id: str = "db1",
     ) -> dict[str, Any]:
 
         if not query or not query.strip():
@@ -99,6 +102,11 @@ class SourceTracker:
         if not isinstance(retrieval, dict):
             raise ValueError(
                 "Retrieval result must be a dictionary."
+            )
+
+        if not source_id or not isinstance(source_id, str):
+            raise ValueError(
+                "source_id must be a non-empty string."
             )
 
         rows = retrieval.get("rows", [])
@@ -116,13 +124,16 @@ class SourceTracker:
                 [],
             )
 
-        entities = list(dict.fromkeys(
-            contract_tables + tables
-        ))
+        entities = list(
+            dict.fromkeys(
+                contract_tables + tables
+            )
+        )
 
         return {
             "source_type": "postgresql",
-            "source": "postgresql",
+            "source_id": source_id,
+            "source": source_id,
             "entities": entities,
             "tables": tables,
             "columns": columns,
@@ -137,12 +148,14 @@ class SourceTracker:
         query: str,
         retrieval: dict[str, Any],
         contract: dict[str, Any] | None = None,
+        source_id: str = "db1",
     ) -> list[dict[str, Any]]:
 
         source = self.build_source(
             query=query,
             retrieval=retrieval,
             contract=contract,
+            source_id=source_id,
         )
 
         return [source]

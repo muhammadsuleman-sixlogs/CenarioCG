@@ -46,16 +46,61 @@ def get_known_foreign_keys(
     }
 
 
+def validate_source_id(
+    relationship: dict[str, Any],
+    context: dict[str, Any],
+) -> tuple[bool, str]:
+    """
+    Validate that the relationship belongs to the
+    context source being validated.
+    """
+
+    context_source_id = context.get(
+        "source_id",
+        "db1",
+    )
+
+    relationship_source_id = relationship.get(
+        "source_id"
+    )
+
+    if not relationship_source_id:
+        return (
+            False,
+            "Missing source_id.",
+        )
+
+    if relationship_source_id != context_source_id:
+        return (
+            False,
+            "Relationship source_id does not match "
+            "the supplied context source.",
+        )
+
+    return True, "Source ID is valid."
+
+
 def validate_confidence(
     relationship: dict[str, Any],
 ) -> tuple[bool, str]:
-    confidence = relationship.get("confidence")
+    confidence = relationship.get(
+        "confidence"
+    )
 
-    if not isinstance(confidence, (int, float)):
-        return False, "Confidence must be numeric."
+    if not isinstance(
+        confidence,
+        (int, float),
+    ):
+        return (
+            False,
+            "Confidence must be numeric.",
+        )
 
     if not 0 <= confidence <= 1:
-        return False, "Confidence must be between 0 and 1."
+        return (
+            False,
+            "Confidence must be between 0 and 1.",
+        )
 
     return True, "Confidence is valid."
 
@@ -63,22 +108,37 @@ def validate_confidence(
 def validate_evidence(
     relationship: dict[str, Any],
 ) -> tuple[bool, str]:
-    evidence = relationship.get("evidence")
+    evidence = relationship.get(
+        "evidence"
+    )
 
     if not evidence:
-        return False, "Relationship must contain evidence."
+        return (
+            False,
+            "Relationship must contain evidence.",
+        )
 
-    if not isinstance(evidence, list):
-        return False, "Evidence must be a list."
+    if not isinstance(
+        evidence,
+        list,
+    ):
+        return (
+            False,
+            "Evidence must be a list.",
+        )
 
     valid_evidence = [
         item
         for item in evidence
-        if isinstance(item, str) and item.strip()
+        if isinstance(item, str)
+        and item.strip()
     ]
 
     if not valid_evidence:
-        return False, "Relationship evidence cannot be empty."
+        return (
+            False,
+            "Relationship evidence cannot be empty.",
+        )
 
     return True, "Evidence is valid."
 
@@ -88,17 +148,43 @@ def validate_relationship(
     context: dict[str, Any],
 ) -> tuple[bool, str]:
 
-    known_tables = get_known_tables(context)
-    known_columns = get_known_columns(context)
+    source_valid, source_reason = (
+        validate_source_id(
+            relationship,
+            context,
+        )
+    )
 
-    source_table = relationship.get("source_table")
-    target_table = relationship.get("target_table")
+    if not source_valid:
+        return False, source_reason
+
+    known_tables = get_known_tables(
+        context
+    )
+
+    known_columns = get_known_columns(
+        context
+    )
+
+    source_table = relationship.get(
+        "source_table"
+    )
+
+    target_table = relationship.get(
+        "target_table"
+    )
 
     if not source_table:
-        return False, "Missing source_table."
+        return (
+            False,
+            "Missing source_table.",
+        )
 
     if not target_table:
-        return False, "Missing target_table."
+        return (
+            False,
+            "Missing target_table.",
+        )
 
     if source_table not in known_tables:
         return (
@@ -113,24 +199,35 @@ def validate_relationship(
         )
 
     confidence_valid, confidence_reason = (
-        validate_confidence(relationship)
+        validate_confidence(
+            relationship
+        )
     )
 
     if not confidence_valid:
         return False, confidence_reason
 
     evidence_valid, evidence_reason = (
-        validate_evidence(relationship)
+        validate_evidence(
+            relationship
+        )
     )
 
     if not evidence_valid:
         return False, evidence_reason
 
-    source_column = relationship.get("source_column")
-    target_column = relationship.get("target_column")
+    source_column = relationship.get(
+        "source_column"
+    )
+
+    target_column = relationship.get(
+        "target_column"
+    )
 
     if source_column:
-        if source_column not in known_columns[source_table]:
+        if source_column not in known_columns[
+            source_table
+        ]:
             return (
                 False,
                 f"Unknown source column: "
@@ -138,7 +235,9 @@ def validate_relationship(
             )
 
     if target_column:
-        if target_column not in known_columns[target_table]:
+        if target_column not in known_columns[
+            target_table
+        ]:
             return (
                 False,
                 f"Unknown target column: "
@@ -157,13 +256,18 @@ def validate_relationships(
     invalid = []
 
     for relationship in relationships:
-        is_valid, reason = validate_relationship(
-            relationship,
-            context,
+
+        is_valid, reason = (
+            validate_relationship(
+                relationship,
+                context,
+            )
         )
 
         if is_valid:
-            valid.append(relationship)
+            valid.append(
+                relationship
+            )
         else:
             invalid.append(
                 {

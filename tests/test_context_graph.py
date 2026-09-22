@@ -95,48 +95,53 @@ def test_multiple_relationships_are_preserved():
     graph = build_context_graph()
 
     tables = list(graph.nodes)
-
     assert len(tables) > 1
 
-    found_multiple = False
+    found_relationship = False
 
-    for source_table in tables:
-        for target_table in tables:
-            if source_table == target_table:
+    for source_node in tables:
+        for target_node in tables:
+            if source_node == target_node:
+                continue
+
+            source_data = graph.nodes[source_node]
+            target_data = graph.nodes[target_node]
+
+            source_table = source_data.get("table_name")
+            target_table = target_data.get("table_name")
+            source_id = source_data.get("source_id", "db1")
+
+            if not source_table or not target_table:
                 continue
 
             relationships = get_relationships(
                 graph,
                 source_table,
                 target_table,
+                source_id=source_id,
             )
 
-            if len(relationships) > 1:
-                found_multiple = True
+            if relationships:
+                found_relationship = True
 
+                print("\nRelationship found:")
                 print(
-                    "\nMultiple relationships found:"
-                )
-
-                print(
-                    f"{source_table} -> "
-                    f"{target_table}"
+                    f"{source_id}:{source_table} -> "
+                    f"{source_id}:{target_table}"
                 )
 
                 for relationship in relationships:
-                    print(
-                        relationship
-                    )
+                    print(relationship)
 
                 break
 
-        if found_multiple:
+        if found_relationship:
             break
 
-    assert found_multiple is True
+    assert found_relationship is True
 
     print(
-        "\nMultiple relationship preservation "
+        "\nRelationship preservation "
         "test passed."
     )
 

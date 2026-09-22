@@ -1,7 +1,7 @@
-from database.connection import get_connection
+from database.connection import get_connection, get_db2_connection
 
 
-def discover_schema():
+def discover_schema(connection_factory=get_connection):
     """
     Read PostgreSQL metadata without modifying the database.
 
@@ -10,9 +10,11 @@ def discover_schema():
     - columns
     - primary keys
     - foreign keys
+
+    The connection_factory determines which database is inspected.
     """
 
-    connection = get_connection()
+    connection = connection_factory()
 
     try:
         with connection.cursor() as cursor:
@@ -79,7 +81,7 @@ def discover_schema():
         connection.close()
 
 
-def print_schema(schema):
+def print_schema(schema, source_name="PostgreSQL"):
     """Print discovered schema in a readable format."""
 
     columns = schema["columns"]
@@ -97,13 +99,12 @@ def print_schema(schema):
         )
 
     print("\n" + "=" * 70)
-    print("AUTOMATIC POSTGRESQL SCHEMA DISCOVERY")
+    print(f"AUTOMATIC {source_name.upper()} SCHEMA DISCOVERY")
     print("=" * 70)
 
     print(f"\nTables discovered: {len(tables)}")
 
     for table_name, table_columns in tables.items():
-
         print(f"\nTABLE: {table_name}")
 
         for column in table_columns:
@@ -135,4 +136,4 @@ def print_schema(schema):
 
 if __name__ == "__main__":
     schema = discover_schema()
-    print_schema(schema)
+    print_schema(schema, "Primary PostgreSQL")

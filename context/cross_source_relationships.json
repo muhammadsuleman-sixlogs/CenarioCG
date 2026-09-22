@@ -1,0 +1,646 @@
+{
+  "source_systems": [
+    "db1",
+    "db2"
+  ],
+  "candidate_count": 16,
+  "validated_count": 3,
+  "rejected_count": 13,
+  "error_count": 0,
+  "validated_relationships": [
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_tasks",
+      "source_column": "companion_epic_id",
+      "target_table": "epics",
+      "target_column": "epic_id",
+      "valid": true,
+      "relationship": "{'source_system': 'db1', 'target_system': 'db2', 'source_table': 'project_tasks', 'source_column': 'companion_epic_id', 'target_table': 'epics', 'target_column': 'epic_id', 'direction': 'source_to_target'}",
+      "reason": "Privacy-preserving evidence shows overlap (matching identifiers found) between db1.project_tasks.companion_epic_id and db2.epics.epic_id, and column types are compatible (both varchar), supporting a cross-source identifier relationship.",
+      "confidence": 0.7,
+      "evidence": [
+        "Schema: db1.project_tasks.companion_epic_id is character varying and db2.epics.epic_id is character varying; neither is declared as PK/FK, so schema alone is insufficient, but it does not contradict the mapping.",
+        "Data evidence: evidence_status=overlap_detected; source_distinct_count=3, target_distinct_count=5, matching_identifier_count=3."
+      ],
+      "candidate_strength": "strong",
+      "candidate_score": 11,
+      "candidate_table_similarity": 0.0,
+      "candidate_evidence": [
+        "companion_epic_id identifies the semantic entity represented by target table epics",
+        "Identifier semantics match: companion_epic_id <-> epic_id",
+        "Compatible data types: character varying <-> character varying"
+      ],
+      "source_column_type": "character varying",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": false,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "overlap_detected",
+        "source_distinct_count": 3,
+        "target_distinct_count": 5,
+        "matching_identifier_count": 3
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_team_stages",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "valid": true,
+      "relationship": "{'source_system': 'db1', 'target_system': 'db2', 'source_table': 'project_team_stages', 'source_column': 'project_id', 'target_table': 'projects', 'target_column': 'project_id', 'direction': 'source_to_target'}",
+      "reason": "Data evidence shows overlap (matching hashed identifiers found) between the two project identifier columns, supporting that they refer to the same logical entity across sources.",
+      "confidence": 0.55,
+      "evidence": [
+        "Schema: project_team_stages.project_id (uuid) and projects.project_id (character varying) are different physical types, but schema does not contradict the mapping.",
+        "Data evidence: evidence_status=overlap_detected; source_distinct_count=24, target_distinct_count=26, matching_identifier_count=7."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 10,
+      "candidate_table_similarity": 0.333,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_id identifies the semantic entity represented by source table project_team_stages",
+        "Identifier semantics match: project_id <-> project_id",
+        "Source and target tables have partial semantic overlap",
+        "Source column participates in a foreign-key relationship",
+        "Identifier column names match exactly",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "overlap_detected",
+        "source_distinct_count": 24,
+        "target_distinct_count": 26,
+        "matching_identifier_count": 7
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "user_access_profiles",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "user_id",
+      "valid": true,
+      "relationship": "{'source_system': 'db1', 'target_system': 'db2', 'source_table': 'user_access_profiles', 'source_column': 'user_id', 'target_table': 'users', 'target_column': 'user_id', 'direction': 'source_to_target'}",
+      "reason": "Privacy-preserving evidence indicates overlap with matching hashed identifiers between db1.user_access_profiles.user_id and db2.users.user_id; this supports a cross-source identifier relationship.",
+      "confidence": 0.6,
+      "evidence": [
+        "Schema: user_access_profiles.user_id is uuid and users.user_id is character varying (type mismatch), but schema does not provide contradictory constraints for cross-source equivalence.",
+        "Data evidence: evidence_status=overlap_detected; source_distinct_count=12, target_distinct_count=70, matching_identifier_count=5."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 10,
+      "candidate_table_similarity": 0.333,
+      "candidate_evidence": [
+        "user_id identifies the semantic entity represented by target table users",
+        "user_id identifies the semantic entity represented by source table user_access_profiles",
+        "Identifier semantics match: user_id <-> user_id",
+        "Source and target tables have partial semantic overlap",
+        "Source column participates in a foreign-key relationship",
+        "Identifier column names match exactly",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "overlap_detected",
+        "source_distinct_count": 12,
+        "target_distinct_count": 70,
+        "matching_identifier_count": 5
+      },
+      "source": "gpt_cross_source_validation"
+    }
+  ],
+  "rejected_candidates": [
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "pending_signups",
+      "source_column": "stripe_checkout_session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.pending_signups.stripe_checkout_session_id and db2.sessions.session_id (matching_identifier_count=0), so a cross-source identifier relationship is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: db1.pending_signups has stripe_checkout_session_id (varchar) and db2.sessions has session_id (varchar) but neither column is declared as a PK/FK; no cross-source relationship can be inferred from schema alone.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=11, target_distinct_count=41, matching_identifier_count=0."
+      ],
+      "candidate_strength": "strong",
+      "candidate_score": 11,
+      "candidate_table_similarity": 0.0,
+      "candidate_evidence": [
+        "stripe_checkout_session_id identifies the semantic entity represented by target table sessions",
+        "Identifier semantics match: stripe_checkout_session_id <-> session_id",
+        "Compatible data types: character varying <-> character varying"
+      ],
+      "source_column_type": "character varying",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": false,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 11,
+        "target_distinct_count": 41,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "pending_signups",
+      "source_column": "stripe_checkout_session_id",
+      "target_table": "usage_recall_sessions",
+      "target_column": "session_id",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.pending_signups.stripe_checkout_session_id and db2.usage_recall_sessions.session_id (matching_identifier_count=0), so the proposed relationship is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: db1.pending_signups.stripe_checkout_session_id (varchar) and db2.usage_recall_sessions.session_id (varchar) are not PK/FK based on provided metadata; schema alone does not establish cross-source linkage.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=11, target_distinct_count=0, matching_identifier_count=0."
+      ],
+      "candidate_strength": "strong",
+      "candidate_score": 11,
+      "candidate_table_similarity": 0.0,
+      "candidate_evidence": [
+        "stripe_checkout_session_id identifies the semantic entity represented by target table usage_recall_sessions",
+        "Identifier semantics match: stripe_checkout_session_id <-> session_id",
+        "Compatible data types: character varying <-> character varying"
+      ],
+      "source_column_type": "character varying",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": false,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 11,
+        "target_distinct_count": 0,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_sub_tasks",
+      "source_column": "companion_user_story_id",
+      "target_table": "users",
+      "target_column": "user_id",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.project_sub_tasks.companion_user_story_id and db2.users.user_id (matching_identifier_count=0); therefore the candidate relationship is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: db1.project_sub_tasks has companion_user_story_id (varchar) and db2.users has user_id (varchar) but neither is declared as PK/FK for this mapping in the provided metadata.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=11, target_distinct_count=70, matching_identifier_count=0."
+      ],
+      "candidate_strength": "strong",
+      "candidate_score": 11,
+      "candidate_table_similarity": 0.0,
+      "candidate_evidence": [
+        "companion_user_story_id identifies the semantic entity represented by target table users",
+        "Identifier semantics match: companion_user_story_id <-> user_id",
+        "Compatible data types: character varying <-> character varying"
+      ],
+      "source_column_type": "character varying",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": false,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 11,
+        "target_distinct_count": 70,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_milestones",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "valid": false,
+      "relationship": null,
+      "reason": "Although there is overlap evidence, the provided schema evidence is insufficient/contradictory for this specific mapping because db1.project_milestones.project_id is uuid while db2.projects.project_id is character varying; without stronger type reconciliation evidence beyond distinct overlap, the relationship cannot be validated.",
+      "confidence": 0.25,
+      "evidence": [
+        "Schema: project_milestones.project_id is uuid, while projects.project_id is character varying; the candidate relies on identifier name/type mismatch without supporting evidence that these represent the same identifier format.",
+        "Data evidence: evidence_status=overlap_detected; source_distinct_count=16, target_distinct_count=26, matching_identifier_count=4 (overlap alone does not fully resolve the uuid-vs-varchar representation mismatch)."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 11,
+      "candidate_table_similarity": 0.5,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_id identifies the semantic entity represented by source table project_milestones",
+        "Identifier semantics match: project_id <-> project_id",
+        "Source and target tables have matching semantic tokens",
+        "Source column participates in a foreign-key relationship",
+        "Identifier column names match exactly",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "overlap_detected",
+        "source_distinct_count": 16,
+        "target_distinct_count": 26,
+        "matching_identifier_count": 4
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_tasks",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "valid": false,
+      "relationship": null,
+      "reason": "The candidate relies on matching db1.project_tasks.project_id (uuid) to db2.projects.project_id (character varying), but schema provides no evidence that these incompatible data types represent the same logical identifier; while overlap is detected, it is not sufficient to validate the mapping under strict type-compatibility requirements.",
+      "confidence": 0.3,
+      "evidence": [
+        "Schema: uuid (project_tasks.project_id) vs character varying (projects.project_id) is a type mismatch; no additional schema metadata indicates normalization/casting or shared identifier format.",
+        "Data evidence: evidence_status=overlap_detected; source_distinct_count=13, target_distinct_count=26, matching_identifier_count=3 (overlap detected, but insufficient to confirm uuid<->varchar equivalence)."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 11,
+      "candidate_table_similarity": 0.5,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_id identifies the semantic entity represented by source table project_tasks",
+        "Identifier semantics match: project_id <-> project_id",
+        "Source and target tables have matching semantic tokens",
+        "Source column participates in a foreign-key relationship",
+        "Identifier column names match exactly",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "overlap_detected",
+        "source_distinct_count": 13,
+        "target_distinct_count": 26,
+        "matching_identifier_count": 3
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_change_orders",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.project_change_orders.project_id and db2.projects.project_id (matching_identifier_count=0), so the relationship is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: project_change_orders.project_id is uuid while projects.project_id is character varying, creating a representation/type mismatch; no additional schema support is provided.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=0, target_distinct_count=26, matching_identifier_count=0."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 10,
+      "candidate_table_similarity": 0.333,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_id identifies the semantic entity represented by source table project_change_orders",
+        "Identifier semantics match: project_id <-> project_id",
+        "Source and target tables have partial semantic overlap",
+        "Source column participates in a foreign-key relationship",
+        "Identifier column names match exactly",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 0,
+        "target_distinct_count": 26,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_stake_holders",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "valid": false,
+      "relationship": null,
+      "reason": "Despite overlap, the mapping depends on uuid (db1.project_stake_holders.project_id) matching varchar (db2.projects.project_id) without evidence that the identifier formats are equivalent across systems; thus the relationship cannot be validated.",
+      "confidence": 0.3,
+      "evidence": [
+        "Schema: uuid vs character varying mismatch for the mapped identifier columns; no schema-level evidence supports that they represent the same logical identifier.",
+        "Data evidence: evidence_status=overlap_detected; source_distinct_count=6, target_distinct_count=26, matching_identifier_count=2 (overlap alone does not confirm uuid<->varchar equivalence)."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 10,
+      "candidate_table_similarity": 0.333,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_id identifies the semantic entity represented by source table project_stake_holders",
+        "Identifier semantics match: project_id <-> project_id",
+        "Source and target tables have partial semantic overlap",
+        "Source column participates in a foreign-key relationship",
+        "Identifier column names match exactly",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "overlap_detected",
+        "source_distinct_count": 6,
+        "target_distinct_count": 26,
+        "matching_identifier_count": 2
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_milestones",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_code",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.project_milestones.project_id and db2.projects.project_code (matching_identifier_count=0); therefore the proposed mapping is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: mapping project_milestones.project_id (uuid) to projects.project_code (character varying) is a mismatch in both semantics and type.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=16, target_distinct_count=7, matching_identifier_count=0."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 9,
+      "candidate_table_similarity": 0.5,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_code identifies the semantic entity represented by source table project_milestones",
+        "Identifier semantics match: project_id <-> project_code",
+        "Source and target tables have matching semantic tokens",
+        "Source column participates in a foreign-key relationship",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 16,
+        "target_distinct_count": 7,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_tasks",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_code",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.project_tasks.project_id and db2.projects.project_code (matching_identifier_count=0); thus the mapping cannot be validated.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: mapping project_tasks.project_id (uuid) to projects.project_code (character varying) is a type mismatch and also maps to a different target column than project_id.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=13, target_distinct_count=7, matching_identifier_count=0."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 9,
+      "candidate_table_similarity": 0.5,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_code identifies the semantic entity represented by source table project_tasks",
+        "Identifier semantics match: project_id <-> project_code",
+        "Source and target tables have matching semantic tokens",
+        "Source column participates in a foreign-key relationship",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 13,
+        "target_distinct_count": 7,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_tasks",
+      "source_column": "companion_epic_id",
+      "target_table": "epics",
+      "target_column": "project_id",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.project_tasks.companion_epic_id and db2.epics.project_id (matching_identifier_count=0); therefore the candidate is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: companion_epic_id (varchar) is an epic identifier-like field, but the candidate maps it to epics.project_id (varchar), which is conceptually a different attribute than an epic id.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=3, target_distinct_count=4, matching_identifier_count=0."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 9,
+      "candidate_table_similarity": 0.0,
+      "candidate_evidence": [
+        "companion_epic_id identifies the semantic entity represented by target table epics",
+        "project_id identifies the semantic entity represented by source table project_tasks",
+        "Compatible data types: character varying <-> character varying"
+      ],
+      "source_column_type": "character varying",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": false,
+      "target_is_foreign_key": true,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 3,
+        "target_distinct_count": 4,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_change_orders",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_code",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.project_change_orders.project_id and db2.projects.project_code (matching_identifier_count=0); hence the relationship is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: project_change_orders.project_id (uuid) mapped to projects.project_code (character varying) is a type mismatch and points to a different target identifier column.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=0, target_distinct_count=7, matching_identifier_count=0."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 8,
+      "candidate_table_similarity": 0.333,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_code identifies the semantic entity represented by source table project_change_orders",
+        "Identifier semantics match: project_id <-> project_code",
+        "Source and target tables have partial semantic overlap",
+        "Source column participates in a foreign-key relationship",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 0,
+        "target_distinct_count": 7,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_stake_holders",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_code",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.project_stake_holders.project_id and db2.projects.project_code (matching_identifier_count=0); therefore the mapping is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: project_stake_holders.project_id is uuid, while projects.project_code is character varying; also maps to project_code rather than project_id.",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=6, target_distinct_count=7, matching_identifier_count=0."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 8,
+      "candidate_table_similarity": 0.333,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_code identifies the semantic entity represented by source table project_stake_holders",
+        "Identifier semantics match: project_id <-> project_code",
+        "Source and target tables have partial semantic overlap",
+        "Source column participates in a foreign-key relationship",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 6,
+        "target_distinct_count": 7,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    },
+    {
+      "source_system": "db1",
+      "target_system": "db2",
+      "source_table": "project_team_stages",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_code",
+      "valid": false,
+      "relationship": null,
+      "reason": "Data evidence shows no overlap between db1.project_team_stages.project_id and db2.projects.project_code (matching_identifier_count=0), so the relationship is not supported.",
+      "confidence": 0.05,
+      "evidence": [
+        "Schema: project_team_stages.project_id (uuid) mapped to projects.project_code (character varying) targets a different column than the one that holds the cross-referenced project identifier (project_id).",
+        "Data evidence: evidence_status=no_overlap; source_distinct_count=24, target_distinct_count=7, matching_identifier_count=0."
+      ],
+      "candidate_strength": "possible",
+      "candidate_score": 8,
+      "candidate_table_similarity": 0.333,
+      "candidate_evidence": [
+        "project_id identifies the semantic entity represented by target table projects",
+        "project_code identifies the semantic entity represented by source table project_team_stages",
+        "Identifier semantics match: project_id <-> project_code",
+        "Source and target tables have partial semantic overlap",
+        "Source column participates in a foreign-key relationship",
+        "Data types differ: uuid <-> character varying"
+      ],
+      "source_column_type": "uuid",
+      "target_column_type": "character varying",
+      "source_is_primary_key": false,
+      "target_is_primary_key": false,
+      "source_is_foreign_key": true,
+      "target_is_foreign_key": false,
+      "data_evidence": {
+        "evidence_status": "no_overlap",
+        "source_distinct_count": 24,
+        "target_distinct_count": 7,
+        "matching_identifier_count": 0
+      },
+      "source": "gpt_cross_source_validation"
+    }
+  ],
+  "errors": []
+}

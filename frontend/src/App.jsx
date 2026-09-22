@@ -1,7 +1,46 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import GraphView from "./components/GraphView";
 import "./App.css";
+
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+
+function getNodeSource(node) {
+  if (node?.source_id) {
+    return String(node.source_id);
+  }
+
+  const id = String(node?.id || "");
+
+  if (id.includes(":")) {
+    return id.split(":")[0];
+  }
+
+  return "unknown";
+}
+
+function getSourceLabel(sourceId) {
+  const source = String(sourceId || "").toLowerCase();
+
+  if (source === "db1") {
+    return "DB1";
+  }
+
+  if (source === "db2") {
+    return "DB2";
+  }
+
+  if (source === "security_logs") {
+    return "Security Logs";
+  }
+
+  if (source === "postgresql") {
+    return "PostgreSQL";
+  }
+
+  return sourceId || "Unknown";
+}
 
 function App() {
   const [selectedEntity, setSelectedEntity] = useState(null);
@@ -9,9 +48,6 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  /*
-   * Graph state and summary metrics
-   */
   const [graphData, setGraphData] = useState({
     nodes: [],
     edges: [],
@@ -21,6 +57,14 @@ function App() {
     nodes: [],
     edges: [],
     tables: [],
+    source_entities: [],
+    source_tables: [],
+    matched_graph_nodes: [],
+  });
+
+  const [sourceTrace, setSourceTrace] = useState({
+    data_sources: [],
+    external_sources: [],
   });
 
   const [graphSummary, setGraphSummary] = useState({
@@ -31,14 +75,66 @@ function App() {
   });
 
   /*
-   * Load the context graph on initial mount
+   * -------------------------------------------------------
+   * SOURCE SUMMARY
+   * -------------------------------------------------------
+   *
+   * Derived dynamically from graph node IDs.
+   *
+   * Examples:
+   * db1:project_tasks -> db1
+   * db2:projects      -> db2
+   */
+  const sourceSummary = useMemo(() => {
+    const counts = {};
+
+    (graphData?.nodes || []).forEach((node) => {
+      const sourceId = getNodeSource(node);
+
+      counts[sourceId] = (counts[sourceId] || 0) + 1;
+    });
+
+    return Object.entries(counts)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([sourceId, count]) => ({
+        sourceId,
+        label: getSourceLabel(sourceId),
+        count,
+      }));
+  }, [graphData]);
+
+  /*
+   * -------------------------------------------------------
+   * ANSWER SOURCES
+   * -------------------------------------------------------
+   */
+  const activeAnswerSources = useMemo(() => {
+    const sources = new Set();
+
+    (sourceTrace?.data_sources || []).forEach((source) => {
+      if (source) {
+        sources.add(String(source));
+      }
+    });
+
+    (sourceTrace?.external_sources || []).forEach((source) => {
+      if (source?.id) {
+        sources.add(String(source.id));
+      }
+    });
+
+    return Array.from(sources);
+  }, [sourceTrace]);
+
+  /*
+   * -------------------------------------------------------
+   * LOAD GRAPH
+   * -------------------------------------------------------
    */
   useEffect(() => {
     const loadGraph = async () => {
       try {
-        const response = await fetch(
-          "https://cenario-cg.vercel.app/api/graph"
-        );
+        const response = await fetch(`${API_BASE_URL}/api/graph`);
 
         if (!response.ok) {
           throw new Error("Failed to load graph");
@@ -46,8 +142,16 @@ function App() {
 
         const data = await response.json();
 
-        setGraphData(data.graph);
-        setGraphSummary(data.graph_summary);
+        setGraphData(data.graph || { nodes: [], edges: [] });
+
+        setGraphSummary(
+          data.graph_summary || {
+            nodes: 0,
+            edges: 0,
+            database_relationships: 0,
+            business_relationships: 0,
+          }
+        );
       } catch (error) {
         console.error("Failed to load context graph:", error);
       }
@@ -56,10 +160,20 @@ function App() {
     loadGraph();
   }, []);
 
+  /*
+   * -------------------------------------------------------
+   * ENTITY SELECTION
+   * -------------------------------------------------------
+   */
   const handleEntitySelect = (entity) => {
     setSelectedEntity(entity);
   };
 
+  /*
+   * -------------------------------------------------------
+   * CHAT
+   * -------------------------------------------------------
+   */
   const handleAsk = async () => {
     const trimmedQuestion = question.trim();
 
@@ -79,18 +193,15 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch(
-        "https://cenario-cg.vercel.app/api/chat",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            question: trimmedQuestion,
-          }),
-        }
-      );
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          question: trimmedQuestion,
+        }),
+      });
 
       const data = await response.json();
 
@@ -107,13 +218,42 @@ function App() {
           content:
             data.answer ||
             "I could not generate an answer.",
+          sources: data.source_trace || null,
         },
       ]);
 
-      // Update graph data and execution trace from response
-      setGraphData(data.graph || { nodes: [], edges: [] });
+      /*
+       * Update complete graph.
+       */
+      setGraphData(
+        data.graph || {
+          nodes: [],
+          edges: [],
+        }
+      );
+
+      /*
+       * Update actual retrieval trace.
+       */
       setGraphTrace(
-        data.graph_trace || { nodes: [], edges: [], tables: [] }
+        data.graph_trace || {
+          nodes: [],
+          edges: [],
+          tables: [],
+          source_entities: [],
+          source_tables: [],
+          matched_graph_nodes: [],
+        }
+      );
+
+      /*
+       * Update source provenance.
+       */
+      setSourceTrace(
+        data.source_trace || {
+          data_sources: [],
+          external_sources: [],
+        }
       );
 
       if (data.graph_summary) {
@@ -194,6 +334,7 @@ function App() {
             <div className="header-eyebrow">
               AI DATA INTELLIGENCE
             </div>
+
             <h1>CENARIO</h1>
           </div>
 
@@ -207,7 +348,6 @@ function App() {
           </div>
         </header>
 
-        {/* Dashboard */}
         <div className="page">
           {/* Stats */}
           <section className="stats-grid">
@@ -218,13 +358,14 @@ function App() {
                 <div className="stat-number">
                   {graphSummary.nodes}
                 </div>
+
                 <div className="stat-label">
                   Entities
                 </div>
               </div>
 
               <div className="stat-description">
-                Discovered tables
+                Discovered entities across sources
               </div>
             </div>
 
@@ -235,6 +376,7 @@ function App() {
                 <div className="stat-number">
                   {graphSummary.database_relationships}
                 </div>
+
                 <div className="stat-label">
                   Database Relationships
                 </div>
@@ -252,13 +394,14 @@ function App() {
                 <div className="stat-number">
                   {graphSummary.business_relationships}
                 </div>
+
                 <div className="stat-label">
                   Business Relationships
                 </div>
               </div>
 
               <div className="stat-description">
-                AI validated relationships
+                Validated relationships
               </div>
             </div>
 
@@ -269,6 +412,7 @@ function App() {
                 <div className="stat-number">
                   {graphSummary.edges}
                 </div>
+
                 <div className="stat-label">
                   Graph Connections
                 </div>
@@ -280,7 +424,80 @@ function App() {
             </div>
           </section>
 
-          {/* Main workspace */}
+          {/* SOURCE OVERVIEW */}
+          <section className="source-overview">
+            <div className="source-overview-header">
+              <div>
+                <div className="source-overview-title">
+                  Connected Data Sources
+                </div>
+
+                <div className="source-overview-subtitle">
+                  Dynamically discovered Context Layer sources
+                </div>
+              </div>
+
+              <div className="source-overview-live">
+                <span />
+                LIVE
+              </div>
+            </div>
+
+            <div className="source-list">
+              {sourceSummary.length > 0 ? (
+                sourceSummary.map((source) => (
+                  <div
+                    className="source-card"
+                    key={source.sourceId}
+                  >
+                    <div className="source-card-icon">
+                      ◉
+                    </div>
+
+                    <div className="source-card-content">
+                      <div className="source-card-title">
+                        {source.label}
+                      </div>
+
+                      <div className="source-card-meta">
+                        {source.count} entities
+                      </div>
+                    </div>
+
+                    <div className="source-card-status">
+                      Connected
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="source-empty">
+                  No graph sources available.
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Current answer source trace */}
+          {activeAnswerSources.length > 0 && (
+            <section className="answer-source-bar">
+              <span className="answer-source-label">
+                CURRENT QUERY SOURCES
+              </span>
+
+              <div className="answer-source-list">
+                {activeAnswerSources.map((source) => (
+                  <span
+                    className="answer-source-pill"
+                    key={source}
+                  >
+                    {getSourceLabel(source)}
+                  </span>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Workspace */}
           <section className="workspace">
             {/* Graph */}
             <div className="panel graph-panel">
@@ -296,8 +513,7 @@ function App() {
                   </div>
 
                   <p>
-                    Dynamically discovered entities and
-                    relationships
+                    Dynamically discovered entities and relationships
                   </p>
                 </div>
 
@@ -318,6 +534,7 @@ function App() {
                 <GraphView
                   graphData={graphData}
                   graphTrace={graphTrace}
+                  sourceTrace={sourceTrace}
                   onEntitySelect={handleEntitySelect}
                   loading={loading}
                 />
@@ -347,7 +564,9 @@ function App() {
               {selectedEntity ? (
                 <div className="entity-content">
                   <div className="entity-heading">
-                    <div className="entity-symbol">◈</div>
+                    <div className="entity-symbol">
+                      ◈
+                    </div>
 
                     <div>
                       <div className="entity-title">
@@ -356,6 +575,30 @@ function App() {
 
                       <div className="entity-type">
                         {selectedEntity.type}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* SOURCE */}
+                  <div className="entity-source-section">
+                    <div className="section-label">
+                      DATA SOURCE
+                    </div>
+
+                    <div className="entity-source-card">
+                      <span className="entity-source-dot" />
+
+                      <div>
+                        <div className="entity-source-name">
+                          {getSourceLabel(
+                            selectedEntity.source_id
+                          )}
+                        </div>
+
+                        <div className="entity-source-id">
+                          {selectedEntity.source_id ||
+                            "Unknown source"}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -393,13 +636,16 @@ function App() {
                 </div>
               ) : (
                 <div className="entity-empty">
-                  <div className="empty-symbol">◇</div>
+                  <div className="empty-symbol">
+                    ◇
+                  </div>
 
                   <h3>Select an entity</h3>
 
                   <p>
                     Click a node in the graph to inspect its
-                    dynamically discovered attributes.
+                    dynamically discovered attributes and
+                    source.
                   </p>
                 </div>
               )}
@@ -413,11 +659,13 @@ function App() {
                 <div className="panel-title-row">
                   <h2>AI Assistant</h2>
 
-                  <span className="ai-badge">AI</span>
+                  <span className="ai-badge">
+                    AI
+                  </span>
                 </div>
 
                 <p>
-                  Ask questions about your business data
+                  Ask questions across your connected data
                 </p>
               </div>
             </div>
@@ -425,7 +673,9 @@ function App() {
             <div className="chat-content">
               {messages.length === 0 ? (
                 <div className="chat-empty">
-                  <div className="chat-icon">✦</div>
+                  <div className="chat-icon">
+                    ✦
+                  </div>
 
                   <h3>Ask Cenario</h3>
 
@@ -489,6 +739,23 @@ function App() {
                           message.content
                         )}
                       </div>
+
+                      {message.role === "assistant" &&
+                        message.sources?.data_sources?.length >
+                          0 && (
+                          <div className="message-source-row">
+                            {message.sources.data_sources.map(
+                              (source) => (
+                                <span
+                                  className="message-source-pill"
+                                  key={source}
+                                >
+                                  {getSourceLabel(source)}
+                                </span>
+                              )
+                            )}
+                          </div>
+                        )}
                     </div>
                   ))}
 
@@ -499,7 +766,13 @@ function App() {
                       </div>
 
                       <div className="message-content">
-                        Thinking...
+                        <span className="thinking-indicator">
+                          <span />
+                          <span />
+                          <span />
+                        </span>
+
+                        Tracing connected sources...
                       </div>
                     </div>
                   )}
@@ -519,7 +792,7 @@ function App() {
                       handleAsk();
                     }
                   }}
-                  placeholder="Ask a question about your data..."
+                  placeholder="Ask a question about your connected data..."
                   disabled={loading}
                 />
 
@@ -529,8 +802,9 @@ function App() {
                   disabled={loading || !question.trim()}
                 >
                   <span>
-                    {loading ? "Thinking..." : "Send"}
+                    {loading ? "Tracing..." : "Send"}
                   </span>
+
                   <span>→</span>
                 </button>
               </div>

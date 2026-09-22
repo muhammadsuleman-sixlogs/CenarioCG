@@ -1,0 +1,1042 @@
+{
+  "source_id": "db2",
+  "tables": {
+    "action_items": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "meeting_id",
+          "type": "character varying"
+        },
+        {
+          "name": "item_type",
+          "type": "character varying"
+        },
+        {
+          "name": "data",
+          "type": "jsonb"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "companies": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "character varying"
+        },
+        {
+          "name": "name",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "created",
+          "type": "character varying"
+        },
+        {
+          "name": "website",
+          "type": "character varying"
+        },
+        {
+          "name": "phone",
+          "type": "character varying"
+        },
+        {
+          "name": "plan",
+          "type": "character varying"
+        },
+        {
+          "name": "quota_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "used_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "remaining_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "remaining_percentage",
+          "type": "double precision"
+        },
+        {
+          "name": "overage_usd",
+          "type": "double precision"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "document_logs": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "document_id",
+          "type": "integer"
+        },
+        {
+          "name": "edited_by",
+          "type": "character varying"
+        },
+        {
+          "name": "version_number",
+          "type": "character varying"
+        },
+        {
+          "name": "document_content",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "documents": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "document_id",
+          "type": "character varying"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "filename",
+          "type": "character varying"
+        },
+        {
+          "name": "filetype",
+          "type": "character varying"
+        },
+        {
+          "name": "size",
+          "type": "integer"
+        },
+        {
+          "name": "storage_path",
+          "type": "character varying"
+        },
+        {
+          "name": "industry",
+          "type": "character varying"
+        },
+        {
+          "name": "software",
+          "type": "character varying"
+        },
+        {
+          "name": "project_name",
+          "type": "character varying"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "pinecone_namespace",
+          "type": "character varying"
+        },
+        {
+          "name": "vector_count",
+          "type": "integer"
+        },
+        {
+          "name": "vector_ids",
+          "type": "text"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "cenario_email",
+          "type": "character varying"
+        },
+        {
+          "name": "titles",
+          "type": "text"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "epics": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "epic_id",
+          "type": "character varying"
+        },
+        {
+          "name": "title",
+          "type": "text"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "user_stories",
+          "type": "jsonb"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "gen_documents": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "document_name",
+          "type": "character varying"
+        },
+        {
+          "name": "document_type",
+          "type": "character varying"
+        },
+        {
+          "name": "document_description",
+          "type": "text"
+        },
+        {
+          "name": "generation_method",
+          "type": "character varying"
+        },
+        {
+          "name": "created_by",
+          "type": "character varying"
+        },
+        {
+          "name": "s3_uri",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "google_oauth_tokens": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "user_email",
+          "type": "character varying"
+        },
+        {
+          "name": "access_token",
+          "type": "text"
+        },
+        {
+          "name": "refresh_token",
+          "type": "text"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "cenario_email",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "key_insights": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "meeting_id",
+          "type": "character varying"
+        },
+        {
+          "name": "data",
+          "type": "jsonb"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "live_intelligence_snapshots": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "meeting_id",
+          "type": "character varying"
+        },
+        {
+          "name": "snapshot_index",
+          "type": "integer"
+        },
+        {
+          "name": "chunk_start_index",
+          "type": "integer"
+        },
+        {
+          "name": "chunk_end_index",
+          "type": "integer"
+        },
+        {
+          "name": "mini_summary",
+          "type": "character varying"
+        },
+        {
+          "name": "mini_action_items",
+          "type": "jsonb"
+        },
+        {
+          "name": "mini_key_insights",
+          "type": "jsonb"
+        },
+        {
+          "name": "source_chunk_ids",
+          "type": "jsonb"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "meeting_summaries": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "meeting_id",
+          "type": "character varying"
+        },
+        {
+          "name": "summary",
+          "type": "text"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "projects": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "project_title",
+          "type": "character varying"
+        },
+        {
+          "name": "client_name",
+          "type": "character varying"
+        },
+        {
+          "name": "issue_date",
+          "type": "character varying"
+        },
+        {
+          "name": "proposal_deadline",
+          "type": "character varying"
+        },
+        {
+          "name": "engagement_type",
+          "type": "character varying"
+        },
+        {
+          "name": "industry",
+          "type": "character varying"
+        },
+        {
+          "name": "software_type",
+          "type": "character varying"
+        },
+        {
+          "name": "client_introduction",
+          "type": "character varying"
+        },
+        {
+          "name": "pin",
+          "type": "boolean"
+        },
+        {
+          "name": "user_id",
+          "type": "integer"
+        },
+        {
+          "name": "status",
+          "type": "character varying"
+        },
+        {
+          "name": "source",
+          "type": "character varying"
+        },
+        {
+          "name": "project_code",
+          "type": "character varying"
+        },
+        {
+          "name": "priority",
+          "type": "character varying"
+        },
+        {
+          "name": "progress",
+          "type": "integer"
+        },
+        {
+          "name": "pm_data",
+          "type": "jsonb"
+        },
+        {
+          "name": "company_id",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "questions": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "question_id",
+          "type": "character varying"
+        },
+        {
+          "name": "answer_key",
+          "type": "character varying"
+        },
+        {
+          "name": "question_text",
+          "type": "text"
+        },
+        {
+          "name": "category",
+          "type": "character varying"
+        },
+        {
+          "name": "data_format",
+          "type": "character varying"
+        },
+        {
+          "name": "answer",
+          "type": "text"
+        },
+        {
+          "name": "source",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "requirements": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "requirement_id",
+          "type": "character varying"
+        },
+        {
+          "name": "description",
+          "type": "character varying"
+        },
+        {
+          "name": "category",
+          "type": "character varying"
+        },
+        {
+          "name": "priority",
+          "type": "character varying"
+        },
+        {
+          "name": "session_name",
+          "type": "character varying"
+        },
+        {
+          "name": "sources",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "sessions": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "meeting_title",
+          "type": "character varying"
+        },
+        {
+          "name": "stakeholders",
+          "type": "character varying"
+        },
+        {
+          "name": "session_objective",
+          "type": "character varying"
+        },
+        {
+          "name": "requirement_type",
+          "type": "character varying"
+        },
+        {
+          "name": "followup_questions",
+          "type": "boolean"
+        },
+        {
+          "name": "file_uploaded",
+          "type": "boolean"
+        },
+        {
+          "name": "meeting_id",
+          "type": "character varying"
+        },
+        {
+          "name": "meeting_platform",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "transcripts": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "meeting_id",
+          "type": "character varying"
+        },
+        {
+          "name": "transcript_data",
+          "type": "text"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "usage_llm_events": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "user_id",
+          "type": "integer"
+        },
+        {
+          "name": "feature",
+          "type": "character varying"
+        },
+        {
+          "name": "model",
+          "type": "character varying"
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "integer"
+        },
+        {
+          "name": "completion_tokens",
+          "type": "integer"
+        },
+        {
+          "name": "provider_cost_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "customer_charge_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "margin_multiplier",
+          "type": "double precision"
+        },
+        {
+          "name": "pricing_version",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "usage_recall_sessions": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "session_id",
+          "type": "character varying"
+        },
+        {
+          "name": "project_id",
+          "type": "character varying"
+        },
+        {
+          "name": "meeting_id",
+          "type": "character varying"
+        },
+        {
+          "name": "recall_bot_id",
+          "type": "character varying"
+        },
+        {
+          "name": "joined_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "left_at",
+          "type": "timestamp without time zone"
+        },
+        {
+          "name": "billable_seconds",
+          "type": "integer"
+        },
+        {
+          "name": "recall_provider_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "recall_customer_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "recall_price_usd_per_hour",
+          "type": "double precision"
+        },
+        {
+          "name": "margin_multiplier",
+          "type": "double precision"
+        },
+        {
+          "name": "pricing_version",
+          "type": "character varying"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp without time zone"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    },
+    "users": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "email",
+          "type": "character varying"
+        },
+        {
+          "name": "company_id",
+          "type": "character varying"
+        },
+        {
+          "name": "user_id",
+          "type": "character varying"
+        },
+        {
+          "name": "plan",
+          "type": "text"
+        },
+        {
+          "name": "quota_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "used_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "remaining_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "remaining_percentage",
+          "type": "double precision"
+        },
+        {
+          "name": "overage_usd",
+          "type": "double precision"
+        },
+        {
+          "name": "user_role",
+          "type": "character varying"
+        }
+      ],
+      "primary_keys": [
+        "id"
+      ]
+    }
+  },
+  "relationships": [
+    {
+      "source_table": "action_items",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "action_items",
+      "source_column": "session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "document_logs",
+      "source_column": "document_id",
+      "target_table": "gen_documents",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "documents",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "epics",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "epics",
+      "source_column": "session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "gen_documents",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "key_insights",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "key_insights",
+      "source_column": "session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "live_intelligence_snapshots",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "live_intelligence_snapshots",
+      "source_column": "session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "meeting_summaries",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "meeting_summaries",
+      "source_column": "session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "projects",
+      "source_column": "user_id",
+      "target_table": "users",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "questions",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "questions",
+      "source_column": "session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "requirements",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "requirements",
+      "source_column": "session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "sessions",
+      "source_column": "project_id",
+      "target_table": "projects",
+      "target_column": "project_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "transcripts",
+      "source_column": "session_id",
+      "target_table": "sessions",
+      "target_column": "session_id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    },
+    {
+      "source_table": "users",
+      "source_column": "company_id",
+      "target_table": "companies",
+      "target_column": "id",
+      "relationship_type": "FOREIGN_KEY",
+      "confidence": 1.0,
+      "source": "postgresql_foreign_key"
+    }
+  ]
+}
