@@ -6,13 +6,14 @@ from database.connection import (
     get_connection,
     get_db2_connection,
 )
+
 from database.readonly_guard import (
     validate_read_only_query,
 )
+
 from retrieval.sql_validator import (
     validate_sql_syntax,
 )
-
 
 
 class RetrievalExecutor:
@@ -22,8 +23,16 @@ class RetrievalExecutor:
     This is the final security boundary before SQL reaches
     PostgreSQL.
 
-    Both the read-only policy and SQL-level sensitive-data
-    validation are enforced immediately before execution.
+    Both the read-only policy and SQL-level validation are
+    enforced immediately before execution.
+
+    Retrieval outcomes are explicitly classified as:
+        - success_with_data
+        - success_empty
+
+    Actual database/execution failures are NOT converted into
+    empty results. They propagate to the caller so the pipeline
+    can classify them as retrieval_failed/source_unavailable.
     """
 
     CONNECTIONS = {
@@ -36,6 +45,14 @@ class RetrievalExecutor:
         query: str,
         source_id: str = "db1",
     ) -> dict[str, Any]:
+        """
+        Execute one validated read-only query against one
+        explicitly selected PostgreSQL source.
+        """
+
+        # ---------------------------------------------------------
+        # SOURCE VALIDATION
+        # ---------------------------------------------------------
 
         if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError(
@@ -50,19 +67,30 @@ class RetrievalExecutor:
             )
 
         # ---------------------------------------------------------
-        # FINAL SECURITY VALIDATION
+        # QUERY VALIDATION
         # ---------------------------------------------------------
         #
         # These checks happen immediately before obtaining a
-        # database connection and executing SQL.
+        # database connection.
         #
         # 1. Only read-only SQL is allowed.
         # 2. SQL must be syntactically valid.
-        # 3. Sensitive/credential fields are rejected.
         #
+        # The executor therefore remains the final SQL security
+        # boundary before PostgreSQL execution.
+        #
+
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError(
+                "query must be a non-empty string."
+            )
+
         validate_read_only_query(query)
         validate_sql_syntax(query)
-        
+
+        # ---------------------------------------------------------
+        # CONNECTION
+        # ---------------------------------------------------------
 
         connection_factory = self.CONNECTIONS[source_id]
         connection = connection_factory()
@@ -86,9 +114,18 @@ class RetrievalExecutor:
                     for row in rows
                 ]
 
+                row_count = len(result_rows)
+
+                retrieval_status = (
+                    "success_with_data"
+                    if row_count > 0
+                    else "success_empty"
+                )
+
                 return {
+                    "retrieval_status": retrieval_status,
                     "rows": result_rows,
-                    "row_count": len(result_rows),
+                    "row_count": row_count,
                     "columns": column_names,
                     "provenance": {
                         "query": query,
@@ -107,7 +144,7 @@ def execute_retrieval(
     source_id: str = "db1",
 ) -> dict[str, Any]:
     """
-    Convenience wrapper for read-only retrieval.
+    Convenience wrapper for read-only PostgreSQL retrieval.
     """
 
     executor = RetrievalExecutor()
@@ -116,3 +153,4 @@ def execute_retrieval(
         query=query,
         source_id=source_id,
     )
+

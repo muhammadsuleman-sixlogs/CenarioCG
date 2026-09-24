@@ -25,7 +25,8 @@ class RetrievalContract:
         self,
         question: str,
         required_tables: list[str],
-        required_columns: list[str],
+        postgresql_sources: list[str] | None = None,
+        required_columns: list[str] = None,
         relationships: list[dict[str, Any]] | None = None,
         filters: list[Any] | None = None,
         operations: list[str] | None = None,
@@ -41,6 +42,9 @@ class RetrievalContract:
 
         if not isinstance(required_tables, list):
             raise ValueError("required_tables must be a list.")
+
+        if required_columns is None:
+            required_columns = []
 
         if not isinstance(required_columns, list):
             raise ValueError("required_columns must be a list.")
@@ -109,34 +113,46 @@ class RetrievalContract:
                 "At least one data source is required."
             )
 
-        self.question = question.strip()
+        if postgresql_sources is None:
+            postgresql_sources = []
 
+        if not isinstance(postgresql_sources, list):
+            raise ValueError(
+                "postgresql_sources must be a list."
+            )
+
+        if any(
+            not isinstance(source, str) or not source.strip()
+            for source in postgresql_sources
+        ):
+            raise ValueError(
+                "postgresql_sources must contain non-empty strings."
+            )
+
+        self.question = question.strip()
+        self.postgresql_sources = postgresql_sources
         self.required_tables = required_tables
         self.required_columns = required_columns
-
         self.relationships = relationships or []
         self.filters = filters or []
         self.operations = operations or []
         self.grouping = grouping or []
         self.sorting = sorting or []
-
         self.limit = limit
         self.entities = entities or []
-
         self.needs_conversation_context = (
             needs_conversation_context
         )
-
         self.data_sources = data_sources
 
     def to_dict(self) -> dict[str, Any]:
         """
         Convert the contract into a plain dictionary.
         """
-
         return {
             "question": self.question,
             "data_sources": self.data_sources,
+            "postgresql_sources": self.postgresql_sources,
             "required_tables": self.required_tables,
             "required_columns": self.required_columns,
             "relationships": self.relationships,
@@ -162,7 +178,6 @@ class RetrievalContract:
         The caller is responsible for validating the plan before
         creating the contract.
         """
-
         if not isinstance(plan, dict):
             raise ValueError(
                 "Question plan must be a dictionary."
@@ -172,6 +187,10 @@ class RetrievalContract:
             question=plan.get(
                 "question",
                 "",
+            ),
+            postgresql_sources=plan.get(
+                "postgresql_sources",
+                [],
             ),
             data_sources=plan.get(
                 "data_sources",
@@ -218,35 +237,22 @@ class RetrievalContract:
             ),
         )
 
-
 def create_retrieval_contract(
     validated_plan: dict[str, Any],
 ) -> RetrievalContract:
     """
-    Create a retrieval contract from a validated question plan.
+    Create a retrieval contract from a question plan that has
+    already passed QuestionPlanValidator.
+
+    The caller is responsible for validating the plan before
+    calling this function.
     """
-
-    if not validated_plan.get(
-        "valid",
-        False,
-    ):
-        errors = validated_plan.get(
-            "errors",
-            ["Question plan is not valid."],
-        )
-
+    if not isinstance(validated_plan, dict):
         raise ValueError(
-            "Cannot create retrieval contract from "
-            f"invalid plan: {errors}"
+            "Validated question plan must be a dictionary."
         )
 
-    plan = validated_plan.get("plan")
-
-    if not isinstance(plan, dict):
-        raise ValueError(
-            "Validated result does not contain "
-            "a valid plan."
-        )
-
-    return RetrievalContract.from_plan(plan)
+    return RetrievalContract.from_plan(
+        validated_plan
+    )
 

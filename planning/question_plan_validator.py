@@ -15,7 +15,6 @@ class QuestionPlanValidator:
     discovered multi-source Context Layer.
 
     This validator:
-
     - does not access PostgreSQL
     - does not modify PostgreSQL
     - does not execute SQL
@@ -83,7 +82,6 @@ class QuestionPlanValidator:
         Initialize the validator.
 
         `context` supports a single Context Layer.
-
         `contexts` supports multiple Context Layer sources.
 
         When neither is supplied, all discovered contexts are loaded.
@@ -149,97 +147,71 @@ class QuestionPlanValidator:
 
     def _known_tables(
         self,
-        source_ids: list[str] | None = None,
-    ) -> set[str]:
-        """
-        Return dynamically discovered PostgreSQL table names.
-        """
-
-        tables: set[str] = set()
-
-        selected_sources = (
-            source_ids
-            if source_ids is not None
-            else self._available_postgresql_sources()
-        )
-
-        for source_id in selected_sources:
-            context = self.contexts.get(source_id)
-
-            if not isinstance(context, dict):
-                continue
-
-            context_tables = context.get(
-                "tables",
-                {},
-            )
-
-            if not isinstance(context_tables, dict):
-                continue
-
-            tables.update(
-                str(table_name)
-                for table_name in context_tables.keys()
-            )
-
-        return tables
-
-    def _known_columns(
-        self,
-        source_ids: list[str] | None = None,
+        source_ids: list[str],
     ) -> dict[str, set[str]]:
         """
-        Return dynamically discovered PostgreSQL columns.
+        Return discovered tables grouped by PostgreSQL source.
 
-        Sensitive fields are deliberately excluded from this catalog.
-
-        This prevents protected fields from being considered valid
-        retrieval targets.
+        Each source remains isolated so a table discovered in one
+        PostgreSQL database cannot accidentally validate a plan for
+        another database.
         """
 
-        columns_by_table: dict[str, set[str]] = {}
+        known: dict[str, set[str]] = {}
 
-        selected_sources = (
-            source_ids
-            if source_ids is not None
-            else self._available_postgresql_sources()
-        )
-
-        for source_id in selected_sources:
+        for source_id in source_ids:
             context = self.contexts.get(source_id)
 
             if not isinstance(context, dict):
                 continue
 
-            tables = context.get(
-                "tables",
-                {},
-            )
+            tables = context.get("tables", {})
 
             if not isinstance(tables, dict):
                 continue
+
+            known[source_id] = {
+                str(table_name)
+                for table_name in tables.keys()
+            }
+
+        return known
+
+    def _known_columns(
+        self,
+        source_ids: list[str],
+    ) -> dict[str, dict[str, set[str]]]:
+        """
+        Return discovered columns grouped by PostgreSQL source and table.
+
+        Sensitive fields are excluded from the usable retrieval schema.
+        """
+
+        known: dict[str, dict[str, set[str]]] = {}
+
+        for source_id in source_ids:
+            context = self.contexts.get(source_id)
+
+            if not isinstance(context, dict):
+                continue
+
+            tables = context.get("tables", {})
+
+            if not isinstance(tables, dict):
+                continue
+
+            source_columns: dict[str, set[str]] = {}
 
             for table_name, table_info in tables.items():
                 if not isinstance(table_info, dict):
                     continue
 
-                normalized_table = str(table_name).strip()
-
-                if not normalized_table:
-                    continue
-
-                columns = table_info.get(
-                    "columns",
-                    [],
-                )
+                columns = table_info.get("columns", [])
 
                 if not isinstance(columns, list):
                     continue
 
-                table_columns = columns_by_table.setdefault(
-                    normalized_table,
-                    set(),
-                )
+                usable_columns: set[str] = set()
 
                 for column in columns:
                     if not isinstance(column, dict):
@@ -247,22 +219,21 @@ class QuestionPlanValidator:
 
                     column_name = column.get("name")
 
-                    if not isinstance(column_name, str):
-                        continue
-
-                    column_name = column_name.strip()
-
                     if not column_name:
                         continue
 
-                    # Defense in depth:
-                    # never expose protected fields as valid columns.
+                    column_name = str(column_name)
+
                     if is_sensitive_field_name(column_name):
                         continue
 
-                    table_columns.add(column_name)
+                    usable_columns.add(column_name)
 
-        return columns_by_table
+                source_columns[str(table_name)] = usable_columns
+
+            known[source_id] = source_columns
+
+        return known
 
     def _known_relationships(
         self,
@@ -509,18 +480,25 @@ class QuestionPlanValidator:
         )
 
         for entity in entities:
-            entity_id = entity.get("id") if isinstance(entity, dict) else entity
+            entity_id = (
+                entity.get("id")
+                if isinstance(entity, dict)
+                else entity
+            )
+
             if isinstance(entity_id, bool):
                 errors.append(
                     "Entity id must be a non-empty string or numeric value: "
                     f"{entity!r}"
                 )
+
             elif isinstance(entity_id, str):
                 if not entity_id.strip():
                     errors.append(
                         "Entity id must be a non-empty string or numeric value: "
                         f"{entity!r}"
                     )
+
             elif not isinstance(entity_id, (int, float)):
                 errors.append(
                     "Entity id must be a non-empty string or numeric value: "
@@ -666,7 +644,7 @@ class QuestionPlanValidator:
     def _validate_field_reference(
         self,
         field_reference: Any,
-        known_columns: dict[str, set[str]],
+        known_columns: dict[str, dict[str, set[str]]],
         errors: list[str],
         field_type: str,
     ) -> bool:
@@ -697,18 +675,31 @@ class QuestionPlanValidator:
             )
             return False
 
-        if table_name not in known_columns:
-            errors.append(
-                f"Unknown table in {field_type}: "
-                f"{table_name}"
-            )
-            return False
+        matching_sources = [
+            source_id
+            for source_id, source_tables in known_columns.items()
+            if table_name in source_tables
+            and column_name in source_tables[table_name]
+        ]
 
-        if column_name not in known_columns[table_name]:
-            errors.append(
-                f"Unknown column in {field_type}: "
-                f"{table_name}.{column_name}"
-            )
+        if not matching_sources:
+            known_table_names = {
+                table
+                for source_tables in known_columns.values()
+                for table in source_tables
+            }
+
+            if table_name not in known_table_names:
+                errors.append(
+                    f"Unknown table in {field_type}: "
+                    f"{table_name}"
+                )
+            else:
+                errors.append(
+                    f"Unknown column in {field_type}: "
+                    f"{table_name}.{column_name}"
+                )
+
             return False
 
         return True
@@ -717,35 +708,28 @@ class QuestionPlanValidator:
         self,
         plan: dict[str, Any],
         errors: list[str],
-        known_columns: dict[str, set[str]],
+        known_columns: dict[str, dict[str, set[str]]],
     ) -> None:
-        required_columns = plan.get(
-            "required_columns",
-            [],
+        """
+        Backward-compatible wrapper for required column validation.
+        """
+
+        known_tables = self._known_tables(
+            plan.get("postgresql_sources", [])
         )
 
-        if not isinstance(
-            required_columns,
-            list,
-        ):
-            errors.append(
-                "required_columns must be a list."
-            )
-            return
-
-        for field_reference in required_columns:
-            self._validate_field_reference(
-                field_reference,
-                known_columns,
-                errors,
-                "required_columns",
-            )
+        self._validate_required_columns(
+            plan,
+            errors,
+            known_tables,
+            known_columns,
+        )
 
     def _validate_sorting(
         self,
         plan: dict[str, Any],
         errors: list[str],
-        known_columns: dict[str, set[str]],
+        known_columns: dict[str, dict[str, set[str]]],
     ) -> None:
         sorting = plan.get(
             "sorting",
@@ -804,7 +788,7 @@ class QuestionPlanValidator:
         self,
         plan: dict[str, Any],
         errors: list[str],
-        known_columns: dict[str, set[str]],
+        known_columns: dict[str, dict[str, set[str]]],
     ) -> None:
         """
         Validate PostgreSQL filter fields and operators.
@@ -874,7 +858,7 @@ class QuestionPlanValidator:
         self,
         plan: dict[str, Any],
         errors: list[str],
-        known_columns: dict[str, set[str]],
+        known_columns: dict[str, dict[str, set[str]]],
     ) -> None:
         if "postgresql" not in plan.get(
             "data_sources",
@@ -911,174 +895,326 @@ class QuestionPlanValidator:
     # Table / relationship validation
     # ------------------------------------------------------------------
 
-    def _validate_tables(
-        self,
-        plan: dict[str, Any],
-        errors: list[str],
-        known_tables: set[str],
-    ) -> None:
-        required_tables = plan.get(
-            "required_tables",
-            [],
-        )
-
-        if not isinstance(
-            required_tables,
-            list,
-        ):
-            errors.append(
-                "required_tables must be a list."
-            )
-            return
-
-        for table_name in required_tables:
-            if not isinstance(
-                table_name,
-                str,
-            ):
-                errors.append(
-                    "Each required table must be a string."
-                )
-                continue
-
-            if table_name not in known_tables:
-                errors.append(
-                    f"Unknown required table: {table_name}"
-                )
-
-    def _validate_relationships(
-        self,
-        plan: dict[str, Any],
-        errors: list[str],
-        known_relationships: list[dict[str, Any]],
-    ) -> None:
-        relationships = plan.get(
-            "relationships",
-            [],
-        )
-
-        if not isinstance(
-            relationships,
-            list,
-        ):
-            errors.append(
-                "relationships must be a list."
-            )
-            return
-
-        known_pairs: set[tuple[str, str]] = set()
-
-        for relationship in known_relationships:
-            if not isinstance(
-                relationship,
-                dict,
-            ):
-                continue
-
-            source_table = relationship.get(
-                "source_table"
-            )
-            target_table = relationship.get(
-                "target_table"
-            )
-
-            if source_table and target_table:
-                known_pairs.add(
-                    (
-                        str(source_table),
-                        str(target_table),
-                    )
-                )
-
-        for relationship in relationships:
-            if not isinstance(
-                relationship,
-                dict,
-            ):
-                errors.append(
-                    "Each relationship must be a dictionary."
-                )
-                continue
-
-            source_table = relationship.get(
-                "source_table"
-            )
-            target_table = relationship.get(
-                "target_table"
-            )
-
-            if not source_table or not target_table:
-                errors.append(
-                    "Relationship must contain "
-                    "source_table and target_table."
-                )
-                continue
-
-            pair = (
-                str(source_table),
-                str(target_table),
-            )
-
-            reverse_pair = (
-                str(target_table),
-                str(source_table),
-            )
-
-            if (
-                pair not in known_pairs
-                and reverse_pair not in known_pairs
-            ):
-                errors.append(
-                    "Unknown relationship: "
-                    f"{source_table} -> {target_table}"
-                )
-
     def _validate_table_column_consistency(
         self,
         plan: dict[str, Any],
         errors: list[str],
+        known_tables: dict[str, set[str]],
+        known_columns: dict[str, dict[str, set[str]]],
     ) -> None:
-        required_tables = plan.get(
-            "required_tables",
+        """
+        Validate every table.column reference against the selected
+        PostgreSQL source.
+
+        A table/column is valid only when it exists in the same
+        selected source.
+        """
+
+        source_ids = plan.get(
+            "postgresql_sources",
             [],
         )
+
+        if not isinstance(source_ids, list):
+            return
 
         required_columns = plan.get(
             "required_columns",
             [],
         )
 
-        if not isinstance(
-            required_tables,
-            list,
-        ):
+        if not isinstance(required_columns, list):
             return
 
-        if not isinstance(
-            required_columns,
-            list,
-        ):
-            return
-
-        table_set = set(
-            required_tables
-        )
-
-        for field_reference in required_columns:
-            parsed = self._parse_field_reference(
-                field_reference
-            )
-
-            if parsed is None:
+        for field in required_columns:
+            if not isinstance(field, str):
                 continue
 
-            table_name, _ = parsed
+            parts = field.split(
+                ".",
+                1,
+            )
 
-            if table_name not in table_set:
+            if len(parts) != 2:
+                continue
+
+            table_name, column_name = parts
+
+            matching_sources = [
+                source_id
+                for source_id in source_ids
+                if table_name
+                in known_tables.get(
+                    source_id,
+                    set(),
+                )
+                and column_name
+                in known_columns.get(
+                    source_id,
+                    {},
+                ).get(
+                    table_name,
+                    set(),
+                )
+            ]
+
+            if not matching_sources:
                 errors.append(
-                    "Required column references a table that "
-                    "is not included in required_tables: "
-                    f"{field_reference}"
+                    f"Unknown or unavailable column for selected "
+                    f"PostgreSQL sources: {field}"
+                )
+
+    def _validate_required_tables(
+        self,
+        plan: dict[str, Any],
+        errors: list[str],
+        known_tables: dict[str, set[str]],
+    ) -> None:
+        """
+        Validate required tables against the explicitly selected
+        PostgreSQL sources.
+        """
+
+        source_ids = plan.get(
+            "postgresql_sources",
+            [],
+        )
+
+        if not isinstance(source_ids, list):
+            return
+
+        required_tables = plan.get(
+            "required_tables",
+            [],
+        )
+
+        if not isinstance(required_tables, list):
+            return
+
+        for table_name in required_tables:
+            if not isinstance(table_name, str):
+                continue
+
+            exists = any(
+                table_name
+                in known_tables.get(
+                    source_id,
+                    set(),
+                )
+                for source_id in source_ids
+            )
+
+            if not exists:
+                errors.append(
+                    f"Unknown table for selected PostgreSQL sources: "
+                    f"{table_name}"
+                )
+
+    def _validate_required_columns(
+        self,
+        plan: dict[str, Any],
+        errors: list[str],
+        known_tables: dict[str, set[str]],
+        known_columns: dict[str, dict[str, set[str]]],
+    ) -> None:
+        """
+        Validate required_columns and ensure every referenced table
+        belongs to one of the selected PostgreSQL sources.
+        """
+
+        source_ids = plan.get(
+            "postgresql_sources",
+            [],
+        )
+
+        if not isinstance(source_ids, list):
+            return
+
+        required_tables = plan.get(
+            "required_tables",
+            [],
+        )
+
+        if not isinstance(required_tables, list):
+            required_tables = []
+
+        required_columns = plan.get(
+            "required_columns",
+            [],
+        )
+
+        if not isinstance(required_columns, list):
+            return
+
+        for field in required_columns:
+            if not isinstance(field, str):
+                continue
+
+            parts = field.split(
+                ".",
+                1,
+            )
+
+            if len(parts) != 2:
+                continue
+
+            table_name, column_name = parts
+
+            if table_name not in required_tables:
+                errors.append(
+                    f"Required column references a table that is not "
+                    f"in required_tables: {field}"
+                )
+                continue
+
+            valid = False
+
+            for source_id in source_ids:
+                source_tables = known_tables.get(
+                    source_id,
+                    set(),
+                )
+
+                if table_name not in source_tables:
+                    continue
+
+                source_table_columns = known_columns.get(
+                    source_id,
+                    {},
+                ).get(
+                    table_name,
+                    set(),
+                )
+
+                if column_name in source_table_columns:
+                    valid = True
+                    break
+
+            if not valid:
+                errors.append(
+                    f"Unknown required column for selected "
+                    f"PostgreSQL sources: {field}"
+                )
+
+    def _validate_relationships(
+        self,
+        plan: dict[str, Any],
+        errors: list[str],
+    ) -> None:
+        """
+        Validate discovered relationships while preserving PostgreSQL
+        source boundaries.
+
+        A relationship is valid only when its source and target tables
+        exist within the same selected PostgreSQL source.
+        """
+
+        source_ids = plan.get(
+            "postgresql_sources",
+            [],
+        )
+
+        if not isinstance(source_ids, list):
+            return
+
+        required_relationships = plan.get(
+            "relationships",
+            [],
+        )
+
+        if not isinstance(required_relationships, list):
+            return
+
+        for relationship in required_relationships:
+            if not isinstance(relationship, dict):
+                continue
+
+            source_table = relationship.get(
+                "source_table"
+            )
+
+            target_table = relationship.get(
+                "target_table"
+            )
+
+            if not source_table or not target_table:
+                continue
+
+            relationship_valid = False
+
+            for source_id in source_ids:
+                context = self.contexts.get(
+                    source_id
+                )
+
+                if not isinstance(context, dict):
+                    continue
+
+                tables = context.get(
+                    "tables",
+                    {},
+                )
+
+                if not isinstance(tables, dict):
+                    continue
+
+                if (
+                    source_table not in tables
+                    or target_table not in tables
+                ):
+                    continue
+
+                discovered_relationships = context.get(
+                    "relationships",
+                    [],
+                )
+
+                if not isinstance(
+                    discovered_relationships,
+                    list,
+                ):
+                    continue
+
+                for discovered in discovered_relationships:
+                    if not isinstance(
+                        discovered,
+                        dict,
+                    ):
+                        continue
+
+                    discovered_source = discovered.get(
+                        "source_table"
+                    )
+
+                    discovered_target = discovered.get(
+                        "target_table"
+                    )
+
+                    same_direction = (
+                        discovered_source == source_table
+                        and discovered_target == target_table
+                    )
+
+                    reverse_direction = (
+                        discovered_source == target_table
+                        and discovered_target == source_table
+                    )
+
+                    if (
+                        same_direction
+                        or reverse_direction
+                    ):
+                        relationship_valid = True
+                        break
+
+                if relationship_valid:
+                    break
+
+            if not relationship_valid:
+                errors.append(
+                    "Unknown relationship for selected "
+                    "PostgreSQL sources: "
+                    f"{source_table} -> {target_table}"
                 )
 
     # ------------------------------------------------------------------
@@ -1123,7 +1259,6 @@ class QuestionPlanValidator:
         Validate a question plan.
 
         Returns:
-
             {
                 "valid": bool,
                 "errors": [...],
@@ -1204,21 +1339,16 @@ class QuestionPlanValidator:
                 selected_postgresql_sources
             )
 
-            known_relationships = (
-                self._known_relationships(
-                    selected_postgresql_sources
-                )
-            )
-
-            self._validate_tables(
+            self._validate_required_tables(
                 plan,
                 errors,
                 known_tables,
             )
 
-            self._validate_columns(
+            self._validate_required_columns(
                 plan,
                 errors,
+                known_tables,
                 known_columns,
             )
 
@@ -1243,12 +1373,13 @@ class QuestionPlanValidator:
             self._validate_relationships(
                 plan,
                 errors,
-                known_relationships,
             )
 
             self._validate_table_column_consistency(
                 plan,
                 errors,
+                known_tables,
+                known_columns,
             )
 
         self._validate_security_only_consistency(

@@ -1,4 +1,5 @@
 import json
+
 from typing import Any
 
 from context.context_store import load_context
@@ -26,7 +27,9 @@ class SQLGenerator:
         source_id: str = "db1",
     ):
         if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("source_id must be a non-empty string.")
+            raise ValueError(
+                "source_id must be a non-empty string."
+            )
 
         self.source_id = source_id.strip().lower()
 
@@ -47,7 +50,6 @@ class SQLGenerator:
 
         The original Context Layer is not modified.
         """
-
         tables = {}
 
         for table_name, table_info in self.context.get(
@@ -104,14 +106,49 @@ class SQLGenerator:
         source_id: str | None = None,
     ) -> str:
         if not isinstance(contract, dict):
-            raise ValueError("Retrieval contract must be a dictionary.")
+            raise ValueError(
+                "Retrieval contract must be a dictionary."
+            )
 
         if source_id is not None:
             if not isinstance(source_id, str) or not source_id.strip():
-                raise ValueError("source_id must be a non-empty string.")
+                raise ValueError(
+                    "source_id must be a non-empty string."
+                )
+
             active_source_id = source_id.strip().lower()
+
+            if active_source_id != self.source_id:
+                raise ValueError(
+                    "SQLGenerator source mismatch: "
+                    f"generator is configured for '{self.source_id}' "
+                    f"but retrieval requested '{active_source_id}'."
+                )
         else:
             active_source_id = self.source_id
+
+        contract_sources = contract.get(
+            "postgresql_sources",
+            [],
+        )
+
+        if not isinstance(contract_sources, list):
+            raise ValueError(
+                "Retrieval contract postgresql_sources must be a list."
+            )
+
+        normalized_contract_sources = {
+            str(value).strip().lower()
+            for value in contract_sources
+            if isinstance(value, str) and value.strip()
+        }
+
+        if normalized_contract_sources:
+            if active_source_id not in normalized_contract_sources:
+                raise ValueError(
+                    "Retrieval contract does not authorize PostgreSQL "
+                    f"source '{active_source_id}'."
+                )
 
         schema_context = self._build_schema_context()
 
@@ -310,12 +347,16 @@ The Retrieval Contract has already been validated.
 Return ONLY the SQL query.
 
 Do not use markdown.
+
 Do not use ```sql.
+
 Do not provide explanations.
 
-CONTEXT LAYER:{json.dumps(schema_context, indent=2, default=str)}
+CONTEXT LAYER:
+{json.dumps(schema_context, indent=2, default=str)}
 
-RETRIEVAL CONTRACT:{json.dumps(contract, indent=2, default=str)}
+RETRIEVAL CONTRACT:
+{json.dumps(contract, indent=2, default=str)}
 """
 
         response = self.client.responses.create(
@@ -326,7 +367,9 @@ RETRIEVAL CONTRACT:{json.dumps(contract, indent=2, default=str)}
         query = response.output_text.strip()
 
         if not query:
-            raise ValueError("SQL generator returned an empty query.")
+            raise ValueError(
+                "SQL generator returned an empty query."
+            )
 
         # Remove accidental markdown fences if the model
         # returns them despite the instruction.
@@ -359,21 +402,63 @@ RETRIEVAL CONTRACT:{json.dumps(contract, indent=2, default=str)}
         reports a datatype or SQL execution problem.
 
         The repair happens only at query-generation time.
+
         No database schema or data is modified.
         """
-
         if not query or not query.strip():
-            raise ValueError("SQL query cannot be empty.")
+            raise ValueError(
+                "SQL query cannot be empty."
+            )
 
         if not database_error or not database_error.strip():
-            raise ValueError("Database error cannot be empty.")
+            raise ValueError(
+                "Database error cannot be empty."
+            )
+
+        if not isinstance(contract, dict):
+            raise ValueError(
+                "Retrieval contract must be a dictionary."
+            )
 
         if source_id is not None:
             if not isinstance(source_id, str) or not source_id.strip():
-                raise ValueError("source_id must be a non-empty string.")
+                raise ValueError(
+                    "source_id must be a non-empty string."
+                )
+
             active_source_id = source_id.strip().lower()
+
+            if active_source_id != self.source_id:
+                raise ValueError(
+                    "SQLGenerator source mismatch: "
+                    f"generator is configured for '{self.source_id}' "
+                    f"but repair requested '{active_source_id}'."
+                )
         else:
             active_source_id = self.source_id
+
+        contract_sources = contract.get(
+            "postgresql_sources",
+            [],
+        )
+
+        if not isinstance(contract_sources, list):
+            raise ValueError(
+                "Retrieval contract postgresql_sources must be a list."
+            )
+
+        normalized_contract_sources = {
+            str(value).strip().lower()
+            for value in contract_sources
+            if isinstance(value, str) and value.strip()
+        }
+
+        if normalized_contract_sources:
+            if active_source_id not in normalized_contract_sources:
+                raise ValueError(
+                    "Retrieval contract does not authorize PostgreSQL "
+                    f"source '{active_source_id}'."
+                )
 
         schema_context = self._build_schema_context()
 
@@ -396,6 +481,7 @@ Repair the query using ONLY the discovered schema belonging to this
 source.
 
 Do not introduce tables or columns from another PostgreSQL source.
+
 Do not create cross-source joins.
 
 IMPORTANT:
@@ -487,18 +573,24 @@ REPAIR REQUIREMENTS:
     The repair may ONLY modify the generated SQL query.
 42. Return exactly ONE valid read-only PostgreSQL query.
 
-ORIGINAL SQL:{query}
+ORIGINAL SQL:
+{query}
 
-POSTGRESQL ERROR:{database_error}
+POSTGRESQL ERROR:
+{database_error}
 
-CONTEXT LAYER:{json.dumps(schema_context, indent=2, default=str)}
+CONTEXT LAYER:
+{json.dumps(schema_context, indent=2, default=str)}
 
-RETRIEVAL CONTRACT:{json.dumps(contract, indent=2, default=str)}
+RETRIEVAL CONTRACT:
+{json.dumps(contract, indent=2, default=str)}
 
 Return ONLY the corrected SQL query.
 
 Do not use markdown.
+
 Do not use ```sql.
+
 Do not provide explanations.
 """
 
@@ -510,7 +602,9 @@ Do not provide explanations.
         repaired_query = response.output_text.strip()
 
         if not repaired_query:
-            raise ValueError("SQL repair returned an empty query.")
+            raise ValueError(
+                "SQL repair returned an empty query."
+            )
 
         # Remove accidental markdown fences.
         if repaired_query.startswith("```"):
@@ -546,3 +640,4 @@ def generate_sql(
 
 if __name__ == "__main__":
     print("SQL generator initialized successfully.")
+

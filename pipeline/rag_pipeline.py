@@ -1,72 +1,26 @@
 from copy import deepcopy
-
 from typing import Any
-
 from psycopg2 import errors
 
 from context.context_manager import ContextManager
-
-from security.output_security_policy import (
-sanitize_api_response,
-sanitize_evidence,
-)
-
-from context.context_store import (
-    load_all_contexts,
-    load_context,
-)
-
-from entity_resolution.entity_normalizer import (
-    normalize_entity_candidates,
-)
-
+from context.context_store import load_all_contexts, load_context
+from entity_resolution.entity_normalizer import normalize_entity_candidates
 from entity_resolution.entity_resolver import EntityResolver
-
-from entity_resolution.entity_search import (
-    extract_entity_search_text,
-)
-
+from entity_resolution.entity_search import extract_entity_search_text
 from entity_resolution.entity_selector import select_entity
-
 from llm.answer_generator import AnswerGenerator
-
 from llm.evidence_manager import EvidenceManager
-
 from planning.question_plan_validator import QuestionPlanValidator
-
 from planning.question_planner import QuestionPlanner
-
-from retrieval.retrieval_contract import (
-    create_retrieval_contract,
-)
-
+from retrieval.retrieval_contract import create_retrieval_contract
 from retrieval.retrieval_executor import RetrievalExecutor
-
 from retrieval.sql_generator import SQLGenerator
-
-from security.evidence_security import (
-    sanitize_api_response,
-    sanitize_evidence,
-)
-
+from security.output_security_policy import sanitize_api_response, sanitize_evidence
 from security_logs.retriever import SecurityLogRetriever
-
 from tracing.source_tracker import SourceTracker
 
 
 class RAGPipeline:
-    """
-    Orchestrate dynamic question planning and live retrieval.
-
-    Available retrieval sources:
-
-    - PostgreSQL through the strictly read-only RetrievalExecutor.
-    - Security/SIEM logs through SecurityLogRetriever.
-
-    No database schema, entity name, table name, column name,
-    or business relationship is hardcoded here.
-    """
-
     SQL_REPAIR_ERRORS = (
         errors.GroupingError,
         errors.DatatypeMismatch,
@@ -75,12 +29,7 @@ class RAGPipeline:
         errors.InvalidTextRepresentation,
         errors.UndefinedFunction,
     )
-
-    ALLOWED_DATA_SOURCES = {
-        "postgresql",
-        "security_logs",
-    }
-
+    ALLOWED_DATA_SOURCES = {"postgresql", "security_logs"}
     ALLOWED_SECURITY_RESOURCES = {
         "security_logs",
         "cli_audit_logs",
@@ -89,884 +38,561 @@ class RAGPipeline:
         "workspace_siem_status",
         "security_overview",
     }
-
     DEFAULT_SECURITY_RESOURCE = "security_logs"
 
-    def __init__(
-        self,
-        context_manager: ContextManager | None = None,
-    ):
-        self.context_manager = (
-            context_manager
-            if context_manager is not None
-            else ContextManager()
-        )
-
+    def __init__(self, context_manager: ContextManager | None = None):
+        self.context_manager = context_manager if context_manager is not None else ContextManager()
         self.entity_resolver = EntityResolver()
-
         self.planner = QuestionPlanner()
-
         self.plan_validator = QuestionPlanValidator()
-
-        # PostgreSQL retrieval
-        # SQL generators are created per PostgreSQL source so that
-        # each generator uses the correct discovered Context Layer.
         self.sql_generators: dict[str, SQLGenerator] = {}
-
         self.executor = RetrievalExecutor()
-
         self.source_tracker = SourceTracker()
-
-        # Security/SIEM retrieval
         self.security_log_retriever = SecurityLogRetriever()
-
-        # Evidence and answer generation
         self.evidence_manager = EvidenceManager()
-
         self.answer_generator = AnswerGenerator()
 
-    # --------------------------------------------------
-    # Input validation
-    # --------------------------------------------------
-
-    def _validate_question(
-        self,
-        question: str,
-    ) -> str:
-
+    def _validate_question(self, question: str) -> str:
         if not isinstance(question, str):
             raise ValueError("Question must be a string.")
-
         question = question.strip()
-
         if not question:
             raise ValueError("Question cannot be empty.")
-
-        # Prevent unnecessarily large prompts from entering
-        # the planning/retrieval pipeline.
         if len(question) > 4000:
             raise ValueError(
-                "Question is too long. "
-                "Please keep it under 4000 characters."
+                "Question is too long. Please keep it under 4000 characters."
             )
-
         return question
 
-    # --------------------------------------------------
-    # Conversation context
-    # --------------------------------------------------
-
-    def _get_conversation_context(
-        self,
-    ) -> dict[str, Any]:
-
+    def _get_conversation_context(self) -> dict[str, Any]:
         return {
             "history": self.context_manager.get_history(),
             "entities": self.context_manager.get_entities(),
         }
-
-    # --------------------------------------------------
-    # Entity resolution
-    # --------------------------------------------------
 
     def _resolve_entity(
         self,
         question: str,
         conversation_context: dict[str, Any],
     ) -> None:
-
         search_text = extract_entity_search_text(question)
-
         if not search_text:
             return
-
-        candidates = self.entity_resolver.resolve(
-            search_text
-        )
-
-        normalized_candidates = normalize_entity_candidates(
-            candidates
-        )
-
-        resolved_entity = select_entity(
-            normalized_candidates
-        )
-
+        candidates = self.entity_resolver.resolve(search_text)
+        normalized_candidates = normalize_entity_candidates(candidates)
+        resolved_entity = select_entity(normalized_candidates)
         if resolved_entity:
             conversation_context["entities"] = [
                 *conversation_context["entities"],
                 resolved_entity,
             ]
 
-    # --------------------------------------------------
-    # Data-source validation
-    # --------------------------------------------------
-
-    def _get_data_sources(
-        self,
-        plan: dict[str, Any],
-    ) -> list[str]:
-
-        data_sources = plan.get(
-            "data_sources",
-            ["postgresql"],
-        )
-
-        if not isinstance(
-            data_sources,
-            list,
-        ):
-            raise ValueError(
-                "Question plan data_sources must be a list."
-            )
-
+    def _get_data_sources(self, plan: dict[str, Any]) -> list[str]:
+        data_sources = plan.get("data_sources", ["postgresql"])
+        if not isinstance(data_sources, list):
+            raise ValueError("Question plan data_sources must be a list.")
         if not data_sources:
-            raise ValueError(
-                "Question plan did not select a data source."
-            )
-
+            raise ValueError("Question plan did not select a data source.")
         invalid_sources = [
-            source
-            for source in data_sources
+            source for source in data_sources
             if source not in self.ALLOWED_DATA_SOURCES
         ]
-
         if invalid_sources:
             raise ValueError(
-                "Question plan selected unsupported "
-                f"data source(s): {invalid_sources}"
+                f"Question plan selected unsupported data source(s): {invalid_sources}"
             )
-
-        # Preserve planner order while removing duplicates.
         return list(dict.fromkeys(data_sources))
-
-    # --------------------------------------------------
-    # Security-resource validation
-    # --------------------------------------------------
 
     def _get_security_resource(
         self,
         plan: dict[str, Any],
         data_sources: list[str],
     ) -> str | None:
-        """
-        Return the validated security resource selected by the
-        question planner.
-
-        The LLM selects only the logical resource name.
-
-        API URLs, authentication headers, bearer tokens, and
-        workspace identifiers are never generated here by the LLM.
-        """
-
         if "security_logs" not in data_sources:
             return None
-
-        resource = plan.get(
-            "security_resource",
-            self.DEFAULT_SECURITY_RESOURCE,
-        )
-
+        resource = plan.get("security_resource", self.DEFAULT_SECURITY_RESOURCE)
         if resource is None:
             resource = self.DEFAULT_SECURITY_RESOURCE
-
-        if not isinstance(
-            resource,
-            str,
-        ):
-            raise ValueError(
-                "Question plan security_resource must be a string."
-            )
-
+        if not isinstance(resource, str):
+            raise ValueError("Question plan security_resource must be a string.")
         resource = resource.strip()
-
         if not resource:
             resource = self.DEFAULT_SECURITY_RESOURCE
-
         if resource not in self.ALLOWED_SECURITY_RESOURCES:
             raise ValueError(
-                "Question plan selected unsupported "
-                f"security resource: {resource!r}"
+                f"Question plan selected unsupported security resource: {resource!r}"
             )
-
         return resource
 
-    # --------------------------------------------------
-    # PostgreSQL source validation
-    # --------------------------------------------------
-
-    def _get_postgresql_sources(
-        self,
-        plan: dict[str, Any],
-    ) -> list[str]:
-        """
-        Return the PostgreSQL Context Layer source IDs selected
-        by the validated question plan.
-
-        Source IDs must come from the discovered Context Layer.
-        """
-
-        sources = plan.get(
-            "postgresql_sources",
-            [],
-        )
-
-        if not isinstance(
-            sources,
-            list,
-        ):
-            raise ValueError(
-                "Question plan postgresql_sources must be a list."
-            )
-
-        sources = list(
-            dict.fromkeys(sources)
-        )
-
-        if "postgresql" not in plan.get(
-            "data_sources",
-            [],
-        ):
+    def _get_postgresql_sources(self, plan: dict[str, Any]) -> list[str]:
+        sources = plan.get("postgresql_sources", [])
+        if not isinstance(sources, list):
+            raise ValueError("Question plan postgresql_sources must be a list.")
+        sources = list(dict.fromkeys(sources))
+        if "postgresql" not in plan.get("data_sources", []):
             return []
-
         if not sources:
             raise ValueError(
-                "PostgreSQL was selected but no PostgreSQL "
-                "source was specified."
+                "PostgreSQL was selected but no PostgreSQL source was specified."
             )
-
-        available_sources = set(
-            load_all_contexts().keys()
-        )
-
+        available_sources = set(load_all_contexts().keys())
         invalid_sources = [
-            source
-            for source in sources
+            source for source in sources
             if source not in available_sources
         ]
-
         if invalid_sources:
             raise ValueError(
-                "Question plan selected unavailable PostgreSQL "
-                f"source(s): {invalid_sources}"
+                f"Question plan selected unavailable PostgreSQL source(s): {invalid_sources}"
             )
-
         return sources
 
-    # --------------------------------------------------
-    # Source-specific SQL generator
-    # --------------------------------------------------
-
-    def _get_sql_generator(
-        self,
-        source_id: str,
-    ) -> SQLGenerator:
-        """
-        Return a SQL generator configured for one PostgreSQL source.
-        """
-
+    def _get_sql_generator(self, source_id: str) -> SQLGenerator:
         if source_id not in self.sql_generators:
-            self.sql_generators[source_id] = SQLGenerator(
-                source_id=source_id
-            )
-
+            self.sql_generators[source_id] = SQLGenerator(source_id=source_id)
         return self.sql_generators[source_id]
-
-    # --------------------------------------------------
-    # Source-specific retrieval plan
-    # --------------------------------------------------
 
     def _build_source_validation(
         self,
-        validation: dict[str, Any],
+        plan: dict[str, Any],
         source_id: str,
-        total_selected_sources: int,
     ) -> dict[str, Any] | None:
-        """
-        Create a source-specific validation payload.
-
-        This allows DB1 and DB2 to be retrieved independently.
-
-        Tables, columns, and relationships are filtered using the
-        dynamically discovered source Context Layer.
-
-        No table or column names are hardcoded.
-        """
-
-        source_context = load_context(
-            source_id=source_id
-        )
-
-        known_tables = set(
-            source_context.get(
-                "tables",
-                {},
-            ).keys()
-        )
-
-        known_columns: dict[str, set[str]] = {}
-
-        for (
-            table_name,
-            table_info,
-        ) in source_context.get(
-            "tables",
-            {},
-        ).items():
-
-            known_columns[table_name] = {
-                column.get("name")
-                for column in table_info.get(
-                    "columns",
-                    [],
-                )
-                if (
-                    isinstance(column, dict)
-                    and column.get("name")
-                )
-            }
-
-        source_plan = deepcopy(
-            validation["plan"]
-        )
-
-        required_tables = source_plan.get(
-            "required_tables",
-            [],
-        )
-
-        required_columns = source_plan.get(
-            "required_columns",
-            [],
-        )
-
-        relationships = source_plan.get(
-            "relationships",
-            [],
-        )
-
-        # Only tables that actually exist in this source.
-        source_tables = [
-            table
-            for table in required_tables
-            if (
-                isinstance(table, str)
-                and table in known_tables
-            )
-        ]
-
-        # Only columns belonging to tables available in this source.
-        source_columns = []
-
-        for column_reference in required_columns:
-
-            if not isinstance(
-                column_reference,
-                str,
-            ):
-                continue
-
-            if "." not in column_reference:
-                continue
-
-            table_name, column_name = (
-                column_reference.split(".", 1)
-            )
-
-            if (
-                table_name in source_tables
-                and column_name
-                in known_columns.get(
-                    table_name,
-                    set(),
-                )
-            ):
-                source_columns.append(
-                    column_reference
-                )
-
-        # Only relationships entirely inside this PostgreSQL source.
-        source_relationships = []
-
-        for relationship in relationships:
-
-            if not isinstance(
-                relationship,
-                dict,
-            ):
-                continue
-
-            source_table = relationship.get(
-                "source_table"
-            )
-
-            target_table = relationship.get(
-                "target_table"
-            )
-
-            if (
-                source_table in source_tables
-                and target_table in source_tables
-            ):
-                source_relationships.append(
-                    relationship
-                )
-
-        source_plan["data_sources"] = [
-            "postgresql"
-        ]
-
-        source_plan["postgresql_sources"] = [
-            source_id
-        ]
-
-        source_plan["required_tables"] = (
-            source_tables
-        )
-
-        source_plan["required_columns"] = (
-            source_columns
-        )
-
-        source_plan["relationships"] = (
-            source_relationships
-        )
-
-        # If this source has no relevant table, don't execute SQL
-        # against it. This is especially useful when multiple sources
-        # were selected.
-        if (
-            required_tables
-            and not source_tables
-        ):
-
-            if total_selected_sources == 1:
-                raise ValueError(
-                    "The selected PostgreSQL source does not contain "
-                    "the required tables."
-                )
-
+        if not isinstance(source_id, str) or not source_id.strip():
             return None
 
-        source_validation = deepcopy(
-            validation
-        )
+        source_id = source_id.strip().lower()
+        contexts = load_all_contexts()
+        context = contexts.get(source_id)
+        if not isinstance(context, dict):
+            return None
 
-        source_validation["valid"] = True
+        tables = context.get("tables", {})
+        if not isinstance(tables, dict):
+            return None
 
-        source_validation["errors"] = []
+        source_tables = {str(table_name) for table_name in tables.keys()}
 
-        source_validation["plan"] = source_plan
+        required_tables = plan.get("required_tables", [])
+        if not isinstance(required_tables, list):
+            required_tables = []
 
-        return source_validation
+        normalized_required_tables = [
+            str(table_name).strip()
+            for table_name in required_tables
+            if isinstance(table_name, str) and table_name.strip()
+        ]
+        missing_tables = [
+            table_name
+            for table_name in normalized_required_tables
+            if table_name not in source_tables
+        ]
+        if missing_tables:
+            return None
 
-    # --------------------------------------------------
-    # PostgreSQL retrieval
-    # --------------------------------------------------
+        required_columns = plan.get("required_columns", [])
+        if not isinstance(required_columns, list):
+            required_columns = []
+
+        source_columns: dict[str, set[str]] = {}
+        for table_name, table_info in tables.items():
+            if not isinstance(table_info, dict):
+                continue
+            columns = table_info.get("columns", [])
+            if not isinstance(columns, list):
+                continue
+
+            usable_columns = set()
+            for column in columns:
+                if not isinstance(column, dict):
+                    continue
+                column_name = column.get("name")
+                if not column_name:
+                    continue
+                usable_columns.add(str(column_name))
+            source_columns[str(table_name)] = usable_columns
+
+        missing_columns = []
+        for field in required_columns:
+            if not isinstance(field, dict):
+                continue
+            table_name = field.get("table")
+            column_name = field.get("column")
+            if not table_name or not column_name:
+                continue
+
+            table_name = str(table_name)
+            column_name = str(column_name)
+            available_columns = source_columns.get(table_name, set())
+
+            if column_name not in available_columns:
+                missing_columns.append({
+                    "table": table_name,
+                    "column": column_name,
+                })
+
+        if missing_columns:
+            return None
+
+        relationships = plan.get("relationships", [])
+        if not isinstance(relationships, list):
+            relationships = []
+
+        context_relationships = context.get("relationships", [])
+        if not isinstance(context_relationships, list):
+            context_relationships = []
+
+        normalized_context_relationships = []
+        for relationship in context_relationships:
+            if not isinstance(relationship, dict):
+                continue
+
+            source_table = relationship.get("source_table")
+            target_table = relationship.get("target_table")
+            if not source_table or not target_table:
+                continue
+
+            normalized_context_relationships.append({
+                "source_table": str(source_table),
+                "target_table": str(target_table),
+            })
+
+        for relationship in relationships:
+            if not isinstance(relationship, dict):
+                continue
+
+            source_table = relationship.get("source_table")
+            target_table = relationship.get("target_table")
+            if not source_table or not target_table:
+                continue
+
+            source_table = str(source_table)
+            target_table = str(target_table)
+
+            relationship_exists = any(
+                item["source_table"] == source_table
+                and item["target_table"] == target_table
+                for item in normalized_context_relationships
+            )
+            if not relationship_exists:
+                return None
+
+        source_plan = deepcopy(plan)
+        source_plan["data_sources"] = ["postgresql"]
+        source_plan["postgresql_sources"] = [source_id]
+
+        return {
+            "valid": True,
+            "source_id": source_id,
+            "plan": source_plan,
+            "missing_tables": [],
+            "missing_columns": [],
+            "missing_relationships": [],
+        }
 
     def _retrieve_postgresql(
         self,
         contract_dict: dict[str, Any],
         source_id: str,
     ) -> dict[str, Any]:
-
-        if not source_id:
-            raise ValueError(
-                "PostgreSQL source_id cannot be empty."
-            )
-
-        sql_generator = self._get_sql_generator(
-            source_id
-        )
-
-        sql = sql_generator.generate(
-            contract=contract_dict,
-            source_id=source_id,
-        )
-
-        repaired = False
-
         try:
+            if not source_id:
+                raise ValueError("PostgreSQL source_id cannot be empty.")
 
-            retrieval = self.executor.execute(
-                query=sql,
-                source_id=source_id,
-            )
-
-        except self.SQL_REPAIR_ERRORS as exc:
-
-            repaired_sql = sql_generator.repair(
-                query=sql,
-                database_error=str(exc),
+            sql_generator = self._get_sql_generator(source_id)
+            sql = sql_generator.generate(
                 contract=contract_dict,
                 source_id=source_id,
             )
+            repaired = False
 
-            sql = repaired_sql
+            try:
+                retrieval = self.executor.execute(
+                    query=sql,
+                    source_id=source_id,
+                )
+            except self.SQL_REPAIR_ERRORS as exc:
+                repaired_sql = sql_generator.repair(
+                    query=sql,
+                    database_error=str(exc),
+                    contract=contract_dict,
+                    source_id=source_id,
+                )
+                sql = repaired_sql
+                repaired = True
+                retrieval = self.executor.execute(
+                    query=sql,
+                    source_id=source_id,
+                )
 
-            repaired = True
-
-            retrieval = self.executor.execute(
+            source = self.source_tracker.build_sources(
                 query=sql,
+                retrieval=retrieval,
+                contract=contract_dict,
                 source_id=source_id,
             )
+            retrieval_status = retrieval.get(
+                "retrieval_status",
+                "success_with_data"
+                if retrieval.get("row_count", 0) > 0
+                else "success_empty",
+            )
 
-        source = self.source_tracker.build_sources(
-            query=sql,
-            retrieval=retrieval,
-            contract=contract_dict,
-            source_id=source_id,
-        )
+            return {
+                "source_type": "postgresql",
+                "source_id": source_id,
+                "retrieval_status": retrieval_status,
+                "retrieval": retrieval,
+                "sql": sql,
+                "repaired": repaired,
+                "sources": source,
+            }
 
-        return {
-            "source_type": "postgresql",
-            "source_id": source_id,
-            "retrieval": retrieval,
-            "sql": sql,
-            "repaired": repaired,
-            "sources": source,
-        }
-
-    # --------------------------------------------------
-    # Security/SIEM retrieval
-    # --------------------------------------------------
+        except Exception as exc:
+            print(
+                "POSTGRESQL RETRIEVAL FAILED:",
+                source_id,
+                type(exc).__name__,
+                str(exc),
+            )
+            return {
+                "source_type": "postgresql",
+                "source_id": source_id,
+                "retrieval_status": "retrieval_failed",
+                "retrieval": {
+                    "rows": [],
+                    "row_count": 0,
+                    "columns": [],
+                },
+                "sql": None,
+                "repaired": False,
+                "sources": [],
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            }
 
     def _retrieve_security_logs(
         self,
         plan: dict[str, Any],
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
-        """
-        Retrieve from the security resource selected by the
-        validated question plan.
-
-        The planner only selects a logical resource.
-
-        Runtime configuration remains responsible for:
-
-        - API base URL
-        - authentication
-        - bearer token
-        - request headers
-        - workspace_id
-
-        The LLM never supplies those values.
-        """
-
         resource = plan.get(
             "security_resource",
             self.DEFAULT_SECURITY_RESOURCE,
         )
-
         if resource is None:
             resource = self.DEFAULT_SECURITY_RESOURCE
-
-        if not isinstance(
-            resource,
-            str,
-        ):
-            raise ValueError(
-                "security_resource must be a string."
-            )
+        if not isinstance(resource, str):
+            raise ValueError("security_resource must be a string.")
 
         resource = resource.strip()
-
         if not resource:
             resource = self.DEFAULT_SECURITY_RESOURCE
 
         if resource not in self.ALLOWED_SECURITY_RESOURCES:
-            raise ValueError(
-                "Unsupported security resource: "
-                f"{resource!r}"
-            )
+            raise ValueError(f"Unsupported security resource: {resource!r}")
 
         limit = plan.get("limit")
-
-        if (
-            not isinstance(limit, int)
-            or limit <= 0
-        ):
+        if not isinstance(limit, int) or limit <= 0:
             limit = 100
 
-        # --------------------------------------------------
-        # General security logs
-        # --------------------------------------------------
+        try:
+            if resource == "security_logs":
+                security_retrieval = self.security_log_retriever.retrieve(limit=limit)
 
-        if resource == "security_logs":
-
-            security_retrieval = (
-                self.security_log_retriever.retrieve(
-                    limit=limit,
+            elif resource == "cli_audit_logs":
+                retriever_method = getattr(
+                    self.security_log_retriever,
+                    "retrieve_cli_audit_logs",
+                    None,
                 )
-            )
+                if not callable(retriever_method):
+                    raise RuntimeError(
+                        "SecurityLogRetriever does not expose retrieve_cli_audit_logs()."
+                    )
+                security_retrieval = retriever_method(limit=limit)
 
-        # --------------------------------------------------
-        # CLI / Git / shell / audit logs
-        # --------------------------------------------------
-
-        elif resource == "cli_audit_logs":
-
-            retriever_method = getattr(
-                self.security_log_retriever,
-                "retrieve_cli_audit_logs",
-                None,
-            )
-
-            if not callable(retriever_method):
-                raise RuntimeError(
-                    "SecurityLogRetriever does not expose "
-                    "retrieve_cli_audit_logs()."
+            elif resource == "security_logs_summary":
+                retriever_method = getattr(
+                    self.security_log_retriever,
+                    "retrieve_security_logs_summary",
+                    None,
                 )
+                if not callable(retriever_method):
+                    raise RuntimeError(
+                        "SecurityLogRetriever does not expose "
+                        "retrieve_security_logs_summary()."
+                    )
+                security_retrieval = retriever_method()
 
-            security_retrieval = retriever_method(
-                limit=limit,
-            )
-
-        # --------------------------------------------------
-        # Security-log summary
-        # --------------------------------------------------
-
-        elif resource == "security_logs_summary":
-
-            retriever_method = getattr(
-                self.security_log_retriever,
-                "retrieve_security_logs_summary",
-                None,
-            )
-
-            if not callable(retriever_method):
-                raise RuntimeError(
-                    "SecurityLogRetriever does not expose "
-                    "retrieve_security_logs_summary()."
+            elif resource == "workspace_security_logs":
+                if not workspace_id:
+                    raise ValueError(
+                        "workspace_id is required for workspace_security_logs."
+                    )
+                security_retrieval = (
+                    self.security_log_retriever.retrieve_workspace_security_logs(
+                        workspace_id=workspace_id,
+                        limit=limit,
+                    )
                 )
 
-            security_retrieval = retriever_method()
-
-        # --------------------------------------------------
-        # Workspace security logs
-        # --------------------------------------------------
-
-        elif resource == "workspace_security_logs":
-
-            if not workspace_id:
-                raise ValueError(
-                    "workspace_id is required for "
-                    "workspace_security_logs."
+            elif resource == "workspace_siem_status":
+                if not workspace_id:
+                    raise ValueError(
+                        "workspace_id is required for workspace_siem_status."
+                    )
+                retriever_method = getattr(
+                    self.security_log_retriever,
+                    "retrieve_workspace_siem_status",
+                    None,
                 )
-
-            security_retrieval = (
-                self.security_log_retriever
-                .retrieve_workspace_security_logs(
+                if not callable(retriever_method):
+                    raise RuntimeError(
+                        "SecurityLogRetriever does not expose "
+                        "retrieve_workspace_siem_status()."
+                    )
+                security_retrieval = retriever_method(
                     workspace_id=workspace_id,
-                    limit=limit,
                 )
-            )
 
-        # --------------------------------------------------
-        # Workspace SIEM status
-        # --------------------------------------------------
+            elif resource == "security_overview":
+                retriever_method = getattr(
+                    self.security_log_retriever,
+                    "retrieve_security_overview",
+                    None,
+                )
+                if not callable(retriever_method):
+                    raise RuntimeError(
+                        "SecurityLogRetriever does not expose "
+                        "retrieve_security_overview()."
+                    )
+                security_retrieval = retriever_method()
 
-        elif resource == "workspace_siem_status":
-
-            if not workspace_id:
+            else:
                 raise ValueError(
-                    "workspace_id is required for "
-                    "workspace_siem_status."
+                    f"Unsupported security resource: {resource!r}"
                 )
 
-            retriever_method = getattr(
-                self.security_log_retriever,
-                "retrieve_workspace_siem_status",
-                None,
-            )
-
-            if not callable(retriever_method):
-                raise RuntimeError(
-                    "SecurityLogRetriever does not expose "
-                    "retrieve_workspace_siem_status()."
+            if not isinstance(security_retrieval, dict):
+                raise ValueError(
+                    "SecurityLogRetriever must return a dictionary."
                 )
 
-            security_retrieval = retriever_method(
-                workspace_id=workspace_id,
+            events = security_retrieval.get("events", [])
+            if not isinstance(events, list):
+                events = []
+
+            data = security_retrieval.get("data")
+            meaningful_keys = {
+                key
+                for key, value in security_retrieval.items()
+                if key not in {
+                    "source",
+                    "source_id",
+                    "resource",
+                    "retrieved_at",
+                    "workspace_id",
+                }
+                and value not in (None, {}, [], "")
+            }
+
+            meaningful_data = bool(
+                events
+                or data not in (None, {}, [], "")
+                or meaningful_keys
+            )
+            retrieval_status = (
+                "success_with_data"
+                if meaningful_data
+                else "success_empty"
             )
 
-        # --------------------------------------------------
-        # Security overview
-        # --------------------------------------------------
+            source = {
+                "source_type": "security_logs_api",
+                "source_id": security_retrieval.get(
+                    "source_id",
+                    "security_logs",
+                ),
+                "source": security_retrieval.get(
+                    "source",
+                    "security_logs_api",
+                ),
+                "resource": security_retrieval.get(
+                    "resource",
+                    resource,
+                ),
+                "entities": [],
+                "tables": [],
+                "columns": [],
+            }
 
-        elif resource == "security_overview":
+            if "workspace_id" in security_retrieval:
+                source["workspace_id"] = security_retrieval["workspace_id"]
+            if "retrieved_at" in security_retrieval:
+                source["retrieved_at"] = security_retrieval["retrieved_at"]
+            if "events" in security_retrieval:
+                source["event_count"] = len(events)
 
-            retriever_method = getattr(
-                self.security_log_retriever,
-                "retrieve_security_overview",
-                None,
-            )
+            return {
+                "source_type": "security_logs_api",
+                "source_id": "security_logs",
+                "resource": resource,
+                "retrieval_status": retrieval_status,
+                "retrieval": security_retrieval,
+                "sources": [source],
+            }
 
-            if not callable(retriever_method):
-                raise RuntimeError(
-                    "SecurityLogRetriever does not expose "
-                    "retrieve_security_overview()."
-                )
-
-            security_retrieval = retriever_method()
-
-        else:
-
-            # This should already be prevented by the validation above.
-            raise ValueError(
-                "Unsupported security resource: "
-                f"{resource!r}"
-            )
-
-        if not isinstance(
-            security_retrieval,
-            dict,
-        ):
-            raise ValueError(
-                "SecurityLogRetriever must return a dictionary."
-            )
-
-        events = security_retrieval.get(
-            "events",
-            [],
-        )
-
-        if not isinstance(
-            events,
-            list,
-        ):
-            events = []
-
-        source = {
-            "source_type": "security_logs_api",
-            "source_id": security_retrieval.get(
-                "source_id",
-                "security_logs",
-            ),
-            "source": security_retrieval.get(
-                "source",
-                "security_logs_api",
-            ),
-            "resource": security_retrieval.get(
-                "resource",
+        except Exception as exc:
+            print(
+                "SECURITY LOG RETRIEVAL FAILED:",
                 resource,
-            ),
-            "entities": [],
-            "tables": [],
-            "columns": [],
-        }
-
-        if "workspace_id" in security_retrieval:
-
-            source["workspace_id"] = (
-                security_retrieval["workspace_id"]
+                type(exc).__name__,
+                str(exc),
             )
-
-        if "retrieved_at" in security_retrieval:
-
-            source["retrieved_at"] = (
-                security_retrieval["retrieved_at"]
-            )
-
-        if "events" in security_retrieval:
-
-            source["event_count"] = len(events)
-
-        return {
-            "source_type": "security_logs_api",
-            "resource": resource,
-            "retrieval": security_retrieval,
-            "sources": [source],
-        }
-
-    # --------------------------------------------------
-    # Evidence preparation
-    # --------------------------------------------------
+            return {
+                "source_type": "security_logs_api",
+                "source_id": "security_logs",
+                "resource": resource,
+                "retrieval_status": "retrieval_failed",
+                "retrieval": {},
+                "sources": [],
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            }
 
     def _prepare_evidence(
         self,
         postgres_results: list[dict[str, Any]],
         security_result: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """
-        Normalize evidence from all selected sources.
-
-        PostgreSQL sources are retrieved independently and their
-        bounded results are combined only at the evidence layer.
-
-        No cross-database SQL is generated.
-        """
-
-        evidence: dict[str, Any] = {
-            "sources": [],
-        }
-
-        # ------------------------------
-        # PostgreSQL evidence
-        # ------------------------------
+        evidence: dict[str, Any] = {"sources": []}
 
         if postgres_results:
-
             combined_rows: list[dict[str, Any]] = []
-
             combined_columns: list[str] = []
-
             combined_provenance: list[dict[str, Any]] = []
 
             for postgres_result in postgres_results:
-
-                retrieval = postgres_result.get(
-                    "retrieval",
-                    {},
-                )
-
-                rows = retrieval.get(
-                    "rows",
-                    [],
-                )
-
-                if isinstance(
-                    rows,
-                    list,
-                ):
+                retrieval = postgres_result.get("retrieval", {})
+                rows = retrieval.get("rows", [])
+                if isinstance(rows, list):
                     combined_rows.extend(rows)
 
-                columns = retrieval.get(
-                    "columns",
-                    [],
-                )
-
-                if isinstance(
-                    columns,
-                    list,
-                ):
-
+                columns = retrieval.get("columns", [])
+                if isinstance(columns, list):
                     for column in columns:
-
                         if column not in combined_columns:
+                            combined_columns.append(column)
 
-                            combined_columns.append(
-                                column
-                            )
-
-                provenance = retrieval.get(
-                    "provenance"
-                )
-
-                if isinstance(
-                    provenance,
-                    dict,
-                ):
-
-                    combined_provenance.append(
-                        provenance
-                    )
+                provenance = retrieval.get("provenance")
+                if isinstance(provenance, dict):
+                    combined_provenance.append(provenance)
 
                 evidence["sources"].extend(
-                    postgres_result.get(
-                        "sources",
-                        [],
-                    )
+                    postgres_result.get("sources", [])
                 )
 
             combined_retrieval = {
@@ -980,125 +606,51 @@ class RAGPipeline:
             }
 
             combined_sources = []
-
             for postgres_result in postgres_results:
-
                 combined_sources.extend(
-                    postgres_result.get(
-                        "sources",
-                        [],
-                    )
+                    postgres_result.get("sources", [])
                 )
 
-            postgres_evidence = (
-                self.evidence_manager.prepare(
-                    retrieval=combined_retrieval,
-                    sources=combined_sources,
-                )
+            postgres_evidence = self.evidence_manager.prepare(
+                retrieval=combined_retrieval,
+                sources=combined_sources,
             )
-
-            evidence["postgresql"] = (
-                postgres_evidence
-            )
-
-        # ------------------------------
-        # Security/SIEM evidence
-        # ------------------------------
+            evidence["postgresql"] = postgres_evidence
 
         if security_result is not None:
+            security_retrieval = security_result.get("retrieval", {})
+            security_sources = security_result.get("sources", [])
 
-            security_retrieval = (
-                security_result.get(
-                    "retrieval",
-                    {},
-                )
-            )
-
-            security_sources = (
-                security_result.get(
-                    "sources",
-                    [],
-                )
-            )
-
-            # Keep the complete security retrieval payload so
-            # summary/status/overview resources are not reduced
-            # to "events" only.
             evidence["security_logs"] = {
                 "source_type": "security_logs_api",
-                "resource": security_result.get(
-                    "resource"
-                ),
+                "resource": security_result.get("resource"),
                 "retrieval": security_retrieval,
             }
-
-            evidence["sources"].extend(
-                security_sources
-            )
+            evidence["sources"].extend(security_sources)
 
         return evidence
-
-    # --------------------------------------------------
-    # Retrieval status
-    # --------------------------------------------------
 
     def _has_retrieved_data(
         self,
         postgres_results: list[dict[str, Any]],
         security_result: dict[str, Any] | None,
     ) -> bool:
-
         for postgres_result in postgres_results:
-
-            retrieval = postgres_result.get(
-                "retrieval",
-                {},
-            )
-
-            rows = retrieval.get(
-                "rows",
-                [],
-            )
-
+            retrieval = postgres_result.get("retrieval", {})
+            rows = retrieval.get("rows", [])
             if rows:
                 return True
 
         if security_result is not None:
-
-            retrieval = security_result.get(
-                "retrieval",
-                {},
-            )
-
-            events = retrieval.get(
-                "events"
-            )
-
-            if isinstance(
-                events,
-                list,
-            ) and events:
-
+            retrieval = security_result.get("retrieval", {})
+            events = retrieval.get("events")
+            if isinstance(events, list) and events:
                 return True
 
-            # Some security resources return structured
-            # data instead of an events list.
-            data = retrieval.get(
-                "data"
-            )
-
-            if data not in (
-                None,
-                {},
-                [],
-                "",
-            ):
-
+            data = retrieval.get("data")
+            if data not in (None, {}, [], ""):
                 return True
 
-            # Also support direct summary/status/overview
-            # payloads where the retriever returns the useful
-            # values at the top level.
             meaningful_keys = {
                 key
                 for key, value in retrieval.items()
@@ -1109,113 +661,122 @@ class RAGPipeline:
                     "retrieved_at",
                     "workspace_id",
                 }
-                and value not in (
-                    None,
-                    {},
-                    [],
-                    "",
-                )
+                and value not in (None, {}, [], "")
             }
-
             if meaningful_keys:
                 return True
 
         return False
 
-    # --------------------------------------------------
-    # Workspace ID validation
-    # --------------------------------------------------
-
     def _validate_workspace_id(
         self,
         workspace_id: str | None,
     ) -> str | None:
-        """
-        Normalize a runtime workspace ID.
-
-        The workspace ID is not generated by the LLM.
-
-        It must be supplied by the trusted application/request
-        context when a workspace-scoped security operation is
-        required.
-        """
-
         if workspace_id is None:
             return None
-
-        if not isinstance(
-            workspace_id,
-            str,
-        ):
-            raise ValueError(
-                "workspace_id must be a string or null."
-            )
+        if not isinstance(workspace_id, str):
+            raise ValueError("workspace_id must be a string or null.")
 
         workspace_id = workspace_id.strip()
-
         if not workspace_id:
             return None
-
         if len(workspace_id) > 256:
-            raise ValueError(
-                "workspace_id is too long."
-            )
+            raise ValueError("workspace_id is too long.")
 
         return workspace_id
 
-    # --------------------------------------------------
-    # Execution Pipeline
-    # --------------------------------------------------
+    def _build_source_status(
+        self,
+        postgres_results: list[dict[str, Any]],
+        security_result: dict[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        source_status: dict[str, dict[str, Any]] = {}
+
+        for postgres_result in postgres_results:
+            source_id = postgres_result.get("source_id")
+            if not source_id:
+                continue
+
+            retrieval = postgres_result.get("retrieval", {})
+            rows = retrieval.get("rows", [])
+
+            source_status[source_id] = {
+                "source_type": "postgresql",
+                "source_id": source_id,
+                "context_available": True,
+                "retrieval_status": postgres_result.get(
+                    "retrieval_status",
+                    "retrieval_failed",
+                ),
+                "data_available": bool(rows),
+                "error": postgres_result.get("error"),
+            }
+
+        if security_result is not None:
+            retrieval = security_result.get("retrieval", {})
+            events = retrieval.get("events")
+            data_available = False
+
+            if isinstance(events, list) and events:
+                data_available = True
+
+            data = retrieval.get("data")
+            if data not in (None, {}, [], ""):
+                data_available = True
+
+            meaningful_keys = {
+                key
+                for key, value in retrieval.items()
+                if key not in {
+                    "source",
+                    "source_id",
+                    "retrieved_at",
+                    "workspace_id",
+                }
+                and value not in (None, {}, [], "")
+            }
+
+            if meaningful_keys:
+                data_available = True
+
+            source_status["security_logs"] = {
+                "source_type": "security_logs_api",
+                "source_id": "security_logs",
+                "context_available": True,
+                "retrieval_status": security_result.get(
+                    "retrieval_status",
+                    "retrieval_failed",
+                ),
+                "data_available": data_available,
+                "error": security_result.get("error"),
+            }
+
+        return source_status
 
     def ask(
         self,
         question: str,
         workspace_id: str | None = None,
     ) -> dict[str, Any]:
+        clean_question = self._validate_question(question)
+        workspace_id = self._validate_workspace_id(workspace_id)
 
-        # 1. Input validation
-        clean_question = self._validate_question(
-            question
-        )
+        conversation_context = self._get_conversation_context()
+        self._resolve_entity(clean_question, conversation_context)
 
-        workspace_id = self._validate_workspace_id(
-            workspace_id
-        )
-
-        # 2. Conversation context
-        conversation_context = (
-            self._get_conversation_context()
-        )
-
-        # 3. Entity resolution
-        self._resolve_entity(
-            clean_question,
-            conversation_context,
-        )
-
-        # 4. Question planning
         raw_plan = self.planner.plan(
             question=clean_question,
             conversation_context=conversation_context,
         )
 
-        # 5. Question plan validation + one repair attempt
-        validation = self.plan_validator.validate(
-            raw_plan
-        )
+        validation = self.plan_validator.validate(raw_plan)
+        print("RAW QUESTION PLAN:", raw_plan)
+        print("QUESTION PLAN VALIDATION:", validation)
 
         plan_repaired = False
 
-        if not validation.get(
-            "valid",
-            False,
-        ):
-
-            validation_errors = validation.get(
-                "errors",
-                [],
-            )
-
+        if not validation.get("valid", False):
+            validation_errors = validation.get("errors", [])
             print(
                 "QUESTION PLAN INVALID - attempting one "
                 "schema-based repair."
@@ -1228,235 +789,235 @@ class RAGPipeline:
                 conversation_context=conversation_context,
             )
 
-            repaired_validation = (
-                self.plan_validator.validate(
-                    repaired_plan
-                )
+            repaired_validation = self.plan_validator.validate(
+                repaired_plan
+            )
+            print("REPAIRED QUESTION PLAN:", repaired_plan)
+            print(
+                "REPAIRED PLAN VALIDATION:",
+                repaired_validation,
             )
 
-            if not repaired_validation.get(
-                "valid",
-                False,
-            ):
-
-                print(
-                    "QUESTION PLAN REPAIR FAILED."
-                )
-
-                raise ValueError(
-                    "Question plan could not be validated after one "
-                    "schema-based repair attempt."
-                )
+            if not repaired_validation.get("valid", False):
+                print("QUESTION PLAN REPAIR FAILED.")
+                return sanitize_api_response({
+                    "question": clean_question,
+                    "plan": raw_plan,
+                    "plan_repaired": False,
+                    "data_sources": [],
+                    "postgresql_source_ids": [],
+                    "retrieval_status": "planning_failed",
+                    "source_status": {},
+                    "evidence": {},
+                    "sources": [],
+                    "answer": (
+                        "I could not create a valid retrieval "
+                        "plan for this question."
+                    ),
+                    "error": {
+                        "type": "planning_failed",
+                        "details": repaired_validation.get(
+                            "errors",
+                            [],
+                        ),
+                    },
+                })
 
             validation = repaired_validation
-
             plan_repaired = True
 
         validated_plan = validation["plan"]
 
-        # 6. Data source validation
-        data_sources = self._get_data_sources(
-            validated_plan
-        )
+        data_sources = self._get_data_sources(validated_plan)
 
-        # 6b. Security resource validation
         security_resource = self._get_security_resource(
             validated_plan,
             data_sources,
         )
+        validated_plan["security_resource"] = security_resource
 
-        # Make the normalized resource explicit in the
-        # execution plan.
-        validated_plan["security_resource"] = (
-            security_resource
+        postgresql_sources = self._get_postgresql_sources(
+            validated_plan
         )
 
-        # ----------------------------------------------
-        # 7. Determine PostgreSQL source(s)
-        # ----------------------------------------------
-
-        postgresql_sources = (
-            self._get_postgresql_sources(
-                validated_plan
-            )
-        )
-
-        print(
-            "SELECTED POSTGRESQL SOURCES:",
-            postgresql_sources,
-        )
-
-        print(
-            "SELECTED SECURITY RESOURCE:",
-            security_resource,
-        )
-
-        # ----------------------------------------------
-        # 8. Create source-specific retrieval contracts
-        # ----------------------------------------------
+        print("SELECTED POSTGRESQL SOURCES:", postgresql_sources)
+        print("SELECTED SECURITY RESOURCE:", security_resource)
 
         postgres_results: list[dict[str, Any]] = []
-
-        retrieval_contracts: dict[
-            str,
-            dict[str, Any],
-        ] = {}
+        retrieval_contracts: dict[str, dict[str, Any]] = {}
 
         if postgresql_sources:
-
-            total_selected_sources = len(
-                postgresql_sources
-            )
-
             for source_id in postgresql_sources:
-
-                source_validation = (
-                    self._build_source_validation(
-                        validation=validation,
+                try:
+                    source_validation = self._build_source_validation(
+                        plan=validated_plan,
                         source_id=source_id,
-                        total_selected_sources=(
-                            total_selected_sources
-                        ),
                     )
-                )
 
-                if source_validation is None:
-                    continue
+                    if source_validation is None:
+                        postgres_results.append({
+                            "source_type": "postgresql",
+                            "source_id": source_id,
+                            "retrieval_status": "retrieval_failed",
+                            "retrieval": {
+                                "rows": [],
+                                "row_count": 0,
+                                "columns": [],
+                            },
+                            "sql": None,
+                            "repaired": False,
+                            "sources": [],
+                            "error": {
+                                "type": "source_context_unavailable",
+                                "message": (
+                                    "The selected PostgreSQL source "
+                                    "did not contain the required "
+                                    "retrieval context."
+                                ),
+                            },
+                        })
+                        continue
 
-                contract = create_retrieval_contract(
-                    source_validation
-                )
+                    source_plan = source_validation["plan"]
+                    contract = create_retrieval_contract(source_plan)
+                    source_contract_dict = contract.to_dict()
 
-                source_contract_dict = (
-                    contract.to_dict()
-                )
+                    retrieval_contracts[source_id] = source_contract_dict
 
-                retrieval_contracts[
-                    source_id
-                ] = source_contract_dict
-
-                postgres_result = (
-                    self._retrieve_postgresql(
+                    postgres_result = self._retrieve_postgresql(
                         contract_dict=source_contract_dict,
                         source_id=source_id,
                     )
-                )
+                    postgres_results.append(postgres_result)
 
-                postgres_results.append(
-                    postgres_result
-                )
-
-            if not postgres_results:
-
-                raise ValueError(
-                    "No selected PostgreSQL source contained "
-                    "the required retrieval context."
-                )
-
-        # ----------------------------------------------
-        # 9. Retrieve Security/SIEM resource if required
-        # ----------------------------------------------
+                except Exception as exc:
+                    print(
+                        "POSTGRESQL SOURCE PIPELINE FAILED:",
+                        source_id,
+                        type(exc).__name__,
+                        str(exc),
+                    )
+                    postgres_results.append({
+                        "source_type": "postgresql",
+                        "source_id": source_id,
+                        "retrieval_status": "retrieval_failed",
+                        "retrieval": {
+                            "rows": [],
+                            "row_count": 0,
+                            "columns": [],
+                        },
+                        "sql": None,
+                        "repaired": False,
+                        "sources": [],
+                        "error": {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    })
 
         security_result = None
-
         if "security_logs" in data_sources:
-
-            security_result = (
-                self._retrieve_security_logs(
-                    plan=validated_plan,
-                    workspace_id=workspace_id,
-                )
+            security_result = self._retrieve_security_logs(
+                plan=validated_plan,
+                workspace_id=workspace_id,
             )
 
-        # ----------------------------------------------
-        # 10. Prepare combined evidence
-        # ----------------------------------------------
-
-        evidence = self._prepare_evidence(
+        source_status = self._build_source_status(
             postgres_results=postgres_results,
             security_result=security_result,
         )
 
-        # Security boundary:
-        # protect retrieved evidence before it reaches
-        # the LLM.
-        evidence = sanitize_evidence(
-            evidence
-        )
-
-        # ----------------------------------------------
-        # 11. Evaluate data existence
-        # ----------------------------------------------
+        retrieval_states = [
+            item.get("retrieval_status")
+            for item in source_status.values()
+        ]
+        successful_sources = [
+            state
+            for state in retrieval_states
+            if state in {"success_with_data", "success_empty"}
+        ]
+        failed_sources = [
+            state
+            for state in retrieval_states
+            if state == "retrieval_failed"
+        ]
 
         has_data = self._has_retrieved_data(
             postgres_results=postgres_results,
             security_result=security_result,
         )
 
-        # ----------------------------------------------
-        # 12. Generate answer
-        # ----------------------------------------------
+        if has_data:
+            if failed_sources:
+                overall_retrieval_status = "partial_source_failure"
+            else:
+                overall_retrieval_status = "success_with_data"
+        elif successful_sources:
+            if failed_sources:
+                overall_retrieval_status = "partial_source_failure"
+            else:
+                overall_retrieval_status = "success_empty"
+        elif failed_sources:
+            overall_retrieval_status = "source_unavailable"
+        else:
+            overall_retrieval_status = "success_empty"
+
+        if overall_retrieval_status == "source_unavailable":
+            result = {
+                "question": clean_question,
+                "plan": validated_plan,
+                "plan_repaired": plan_repaired,
+                "data_sources": data_sources,
+                "security_resource": security_resource,
+                "postgresql_source_ids": postgresql_sources,
+                "retrieval_contract": retrieval_contracts,
+                "evidence": {},
+                "answer": (
+                    "I could not retrieve live data from the "
+                    "selected data source(s), so I cannot "
+                    "provide an authoritative answer."
+                ),
+                "sources": [],
+                "source_status": source_status,
+                "retrieval_status": overall_retrieval_status,
+            }
+            return sanitize_api_response(result)
+
+        evidence = self._prepare_evidence(
+            postgres_results=postgres_results,
+            security_result=security_result,
+        )
+        evidence = sanitize_evidence(evidence)
 
         answer = self.answer_generator.generate(
             question=clean_question,
             evidence=evidence,
         )
 
-        # ----------------------------------------------
-        # 13. Persist conversation turn
-        # ----------------------------------------------
-
         self.context_manager.add_turn(
             question=clean_question,
             answer=answer,
-            entities=validated_plan.get(
-                "entities",
-                [],
-            ),
+            entities=validated_plan.get("entities", []),
         )
-
-        # ----------------------------------------------
-        # 14. Build response
-        # ----------------------------------------------
 
         all_sources: list[dict[str, Any]] = []
 
         for postgres_result in postgres_results:
-
             all_sources.extend(
-                postgres_result.get(
-                    "sources",
-                    [],
-                )
+                postgres_result.get("sources", [])
             )
 
         if security_result is not None:
-
             all_sources.extend(
-                security_result.get(
-                    "sources",
-                    [],
-                )
+                security_result.get("sources", [])
             )
 
-        # Preserve the old single-source contract shape,
-        # while exposing a source->contract mapping for
-        # multiple PostgreSQL sources.
         if len(retrieval_contracts) == 1:
-
-            retrieval_contract_output = (
-                next(
-                    iter(
-                        retrieval_contracts.values()
-                    )
-                )
+            retrieval_contract_output = next(
+                iter(retrieval_contracts.values())
             )
-
         else:
-
-            retrieval_contract_output = (
-                retrieval_contracts
-            )
+            retrieval_contract_output = retrieval_contracts
 
         result: dict[str, Any] = {
             "question": clean_question,
@@ -1476,47 +1037,36 @@ class RAGPipeline:
             "evidence": evidence,
             "answer": answer,
             "sources": all_sources,
-            "retrieval_status": (
-                "success_with_data"
-                if has_data
-                else "success_empty"
-            ),
+            "source_status": source_status,
+            "retrieval_status": overall_retrieval_status,
         }
 
-        # ----------------------------------------------
-        # PostgreSQL response details
-        # ----------------------------------------------
-
         if len(postgres_results) == 1:
-
             postgres_result = postgres_results[0]
-
-            result["sql"] = postgres_result["sql"]
-
-            result["postgresql_retrieval"] = (
-                postgres_result["retrieval"]
+            result["sql"] = postgres_result.get("sql")
+            result["postgresql_retrieval"] = postgres_result.get(
+                "retrieval",
+                {},
             )
-
-            result["postgresql_sources"] = (
-                postgres_result["sources"]
+            result["postgresql_sources"] = postgres_result.get(
+                "sources",
+                [],
             )
-
-            result["sql_repaired"] = (
-                postgres_result["repaired"]
+            result["sql_repaired"] = postgres_result.get(
+                "repaired",
+                False,
             )
 
         elif len(postgres_results) > 1:
-
             result["sql_by_source"] = {
-                postgres_result["source_id"]: (
-                    postgres_result["sql"]
-                )
+                postgres_result["source_id"]: postgres_result.get("sql")
                 for postgres_result in postgres_results
             }
 
             result["postgresql_retrievals"] = {
-                postgres_result["source_id"]: (
-                    postgres_result["retrieval"]
+                postgres_result["source_id"]: postgres_result.get(
+                    "retrieval",
+                    {},
                 )
                 for postgres_result in postgres_results
             }
@@ -1524,42 +1074,33 @@ class RAGPipeline:
             result["postgresql_sources"] = []
 
             for postgres_result in postgres_results:
-
                 result["postgresql_sources"].extend(
-                    postgres_result.get(
-                        "sources",
-                        []
-                    )
+                    postgres_result.get("sources", [])
                 )
 
             result["sql_repaired"] = {
-                postgres_result["source_id"]: (
-                    postgres_result["repaired"]
+                postgres_result["source_id"]: postgres_result.get(
+                    "repaired",
+                    False,
                 )
                 for postgres_result in postgres_results
             }
 
-        # ----------------------------------------------
-        # Security-log response details
-        # ----------------------------------------------
-
         if security_result is not None:
-
-            result["security_logs_retrieval"] = (
-                security_result["retrieval"]
+            result["security_logs_retrieval"] = security_result.get(
+                "retrieval",
+                {},
+            )
+            result["security_logs_sources"] = security_result.get(
+                "sources",
+                [],
+            )
+            result["security_logs_retrieval_status"] = security_result.get(
+                "retrieval_status"
+            )
+            result["security_logs_error"] = security_result.get(
+                "error"
             )
 
-            result["security_logs_sources"] = (
-                security_result["sources"]
-            )
-
-        # ----------------------------------------------
-        # Final API security boundary
-        # ----------------------------------------------
-        #
-        # Protect raw retrieval/evidence payloads before
-        # they are returned to the frontend/API consumer.
-        #
-        # This does not modify PostgreSQL or any source.
-        #
         return sanitize_api_response(result)
+
