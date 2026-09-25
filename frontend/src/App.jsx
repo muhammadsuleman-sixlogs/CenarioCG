@@ -7,15 +7,11 @@ const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
 function getNodeSource(node) {
-  if (node?.source_id) {
-    return String(node.source_id);
-  }
+  if (node?.source_id) return String(node.source_id);
 
   const id = String(node?.id || "");
 
-  if (id.includes(":")) {
-    return id.split(":")[0];
-  }
+  if (id.includes(":")) return id.split(":")[0];
 
   return "unknown";
 }
@@ -23,27 +19,74 @@ function getNodeSource(node) {
 function getSourceLabel(sourceId) {
   const source = String(sourceId || "").toLowerCase();
 
-  if (source === "db1") {
-    return "DB1";
-  }
-
-  if (source === "db2") {
-    return "DB2";
-  }
-
-  if (source === "security_logs") {
-    return "Security Logs";
-  }
-
-  if (source === "postgresql") {
-    return "PostgreSQL";
-  }
+  if (source === "db1") return "DB1";
+  if (source === "db2") return "DB2";
+  if (source === "security_logs") return "Security Logs";
+  if (source === "postgresql") return "PostgreSQL";
 
   return sourceId || "Unknown";
 }
 
+function getSourceDetails(message, sourceId) {
+  const sources = Array.isArray(message?.response_data?.sources)
+    ? message.response_data.sources
+    : [];
+
+  const normalizedSource = String(sourceId || "").toLowerCase();
+
+  const postgresSource = sources.find(
+    (source) =>
+      source?.source_type === "postgresql" &&
+      String(source?.source_id || "").toLowerCase() === normalizedSource
+  );
+
+  if (postgresSource) return postgresSource;
+
+  if (normalizedSource === "security_logs") {
+    return (
+      sources.find(
+        (source) => source?.source_type === "security_logs_api"
+      ) ||
+      message?.response_data?.source_trace?.external_sources?.find(
+        (source) =>
+          String(source?.id || "").toLowerCase() === normalizedSource
+      ) ||
+      null
+    );
+  }
+
+  return null;
+}
+
+function getSourceStatus(details) {
+  if (!details) return "No retrieval details available";
+
+  if (details.retrieval_status) {
+    return details.retrieval_status;
+  }
+
+  if (details.status) {
+    return details.status;
+  }
+
+  if (typeof details.row_count === "number") {
+    return details.row_count > 0
+      ? "Retrieved"
+      : "No rows returned";
+  }
+
+  if (typeof details.event_count === "number") {
+    return details.event_count > 0
+      ? "Retrieved"
+      : "No events returned";
+  }
+
+  return "Retrieved";
+}
+
 function App() {
   const [selectedEntity, setSelectedEntity] = useState(null);
+  const [selectedSource, setSelectedSource] = useState(null);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -74,23 +117,11 @@ function App() {
     business_relationships: 0,
   });
 
-  /*
-   * -------------------------------------------------------
-   * SOURCE SUMMARY
-   * -------------------------------------------------------
-   *
-   * Derived dynamically from graph node IDs.
-   *
-   * Examples:
-   * db1:project_tasks -> db1
-   * db2:projects      -> db2
-   */
   const sourceSummary = useMemo(() => {
     const counts = {};
 
     (graphData?.nodes || []).forEach((node) => {
       const sourceId = getNodeSource(node);
-
       counts[sourceId] = (counts[sourceId] || 0) + 1;
     });
 
@@ -103,34 +134,20 @@ function App() {
       }));
   }, [graphData]);
 
-  /*
-   * -------------------------------------------------------
-   * ANSWER SOURCES
-   * -------------------------------------------------------
-   */
   const activeAnswerSources = useMemo(() => {
     const sources = new Set();
 
     (sourceTrace?.data_sources || []).forEach((source) => {
-      if (source) {
-        sources.add(String(source));
-      }
+      if (source) sources.add(String(source));
     });
 
     (sourceTrace?.external_sources || []).forEach((source) => {
-      if (source?.id) {
-        sources.add(String(source.id));
-      }
+      if (source?.id) sources.add(String(source.id));
     });
 
     return Array.from(sources);
   }, [sourceTrace]);
 
-  /*
-   * -------------------------------------------------------
-   * LOAD GRAPH
-   * -------------------------------------------------------
-   */
   useEffect(() => {
     const loadGraph = async () => {
       try {
@@ -160,26 +177,14 @@ function App() {
     loadGraph();
   }, []);
 
-  /*
-   * -------------------------------------------------------
-   * ENTITY SELECTION
-   * -------------------------------------------------------
-   */
   const handleEntitySelect = (entity) => {
     setSelectedEntity(entity);
   };
 
-  /*
-   * -------------------------------------------------------
-   * CHAT
-   * -------------------------------------------------------
-   */
   const handleAsk = async () => {
     const trimmedQuestion = question.trim();
 
-    if (!trimmedQuestion || loading) {
-      return;
-    }
+    if (!trimmedQuestion || loading) return;
 
     setMessages((previous) => [
       ...previous,
@@ -191,6 +196,7 @@ function App() {
 
     setQuestion("");
     setLoading(true);
+    setSelectedSource(null);
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/chat`, {
@@ -216,15 +222,12 @@ function App() {
         {
           role: "assistant",
           content:
-            data.answer ||
-            "I could not generate an answer.",
+            data.answer || "I could not generate an answer.",
           sources: data.source_trace || null,
+          response_data: data,
         },
       ]);
 
-      /*
-       * Update complete graph.
-       */
       setGraphData(
         data.graph || {
           nodes: [],
@@ -232,9 +235,6 @@ function App() {
         }
       );
 
-      /*
-       * Update actual retrieval trace.
-       */
       setGraphTrace(
         data.graph_trace || {
           nodes: [],
@@ -246,9 +246,6 @@ function App() {
         }
       );
 
-      /*
-       * Update source provenance.
-       */
       setSourceTrace(
         data.source_trace || {
           data_sources: [],
@@ -281,7 +278,6 @@ function App() {
 
   return (
     <div className="app">
-      {/* Sidebar */}
       <aside className="sidebar">
         <div className="sidebar-logo">
           <span>C</span>
@@ -326,9 +322,7 @@ function App() {
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="content">
-        {/* Header */}
         <header className="header">
           <div>
             <div className="header-eyebrow">
@@ -349,7 +343,6 @@ function App() {
         </header>
 
         <div className="page">
-          {/* Stats */}
           <section className="stats-grid">
             <div className="stat-card">
               <div className="stat-icon">◈</div>
@@ -359,9 +352,7 @@ function App() {
                   {graphSummary.nodes}
                 </div>
 
-                <div className="stat-label">
-                  Entities
-                </div>
+                <div className="stat-label">Entities</div>
               </div>
 
               <div className="stat-description">
@@ -424,7 +415,6 @@ function App() {
             </div>
           </section>
 
-          {/* SOURCE OVERVIEW */}
           <section className="source-overview">
             <div className="source-overview-header">
               <div>
@@ -450,9 +440,7 @@ function App() {
                     className="source-card"
                     key={source.sourceId}
                   >
-                    <div className="source-card-icon">
-                      ◉
-                    </div>
+                    <div className="source-card-icon">◉</div>
 
                     <div className="source-card-content">
                       <div className="source-card-title">
@@ -477,7 +465,6 @@ function App() {
             </div>
           </section>
 
-          {/* Current answer source trace */}
           {activeAnswerSources.length > 0 && (
             <section className="answer-source-bar">
               <span className="answer-source-label">
@@ -497,9 +484,7 @@ function App() {
             </section>
           )}
 
-          {/* Workspace */}
           <section className="workspace">
-            {/* Graph */}
             <div className="panel graph-panel">
               <div className="panel-header">
                 <div>
@@ -513,7 +498,8 @@ function App() {
                   </div>
 
                   <p>
-                    Dynamically discovered entities and relationships
+                    Dynamically discovered entities and
+                    relationships
                   </p>
                 </div>
 
@@ -552,7 +538,6 @@ function App() {
               </div>
             </div>
 
-            {/* Entity details */}
             <aside className="panel entity-panel">
               <div className="panel-header">
                 <div>
@@ -564,9 +549,7 @@ function App() {
               {selectedEntity ? (
                 <div className="entity-content">
                   <div className="entity-heading">
-                    <div className="entity-symbol">
-                      ◈
-                    </div>
+                    <div className="entity-symbol">◈</div>
 
                     <div>
                       <div className="entity-title">
@@ -579,7 +562,6 @@ function App() {
                     </div>
                   </div>
 
-                  {/* SOURCE */}
                   <div className="entity-source-section">
                     <div className="section-label">
                       DATA SOURCE
@@ -636,9 +618,7 @@ function App() {
                 </div>
               ) : (
                 <div className="entity-empty">
-                  <div className="empty-symbol">
-                    ◇
-                  </div>
+                  <div className="empty-symbol">◇</div>
 
                   <h3>Select an entity</h3>
 
@@ -652,16 +632,12 @@ function App() {
             </aside>
           </section>
 
-          {/* AI Assistant */}
           <section className="panel chat-panel">
             <div className="panel-header chat-header">
               <div>
                 <div className="panel-title-row">
                   <h2>AI Assistant</h2>
-
-                  <span className="ai-badge">
-                    AI
-                  </span>
+                  <span className="ai-badge">AI</span>
                 </div>
 
                 <p>
@@ -673,9 +649,7 @@ function App() {
             <div className="chat-content">
               {messages.length === 0 ? (
                 <div className="chat-empty">
-                  <div className="chat-icon">
-                    ✦
-                  </div>
+                  <div className="chat-icon">✦</div>
 
                   <h3>Ask Cenario</h3>
 
@@ -741,17 +715,56 @@ function App() {
                       </div>
 
                       {message.role === "assistant" &&
-                        message.sources?.data_sources?.length >
-                          0 && (
+                        (
+                          message.sources?.postgresql_sources
+                            ?.length > 0 ||
+                          message.sources?.external_sources
+                            ?.length > 0
+                        ) && (
                           <div className="message-source-row">
-                            {message.sources.data_sources.map(
+                            {message.sources?.postgresql_sources?.map(
                               (source) => (
-                                <span
+                                <button
+                                  type="button"
                                   className="message-source-pill"
                                   key={source}
+                                  onClick={() =>
+                                    setSelectedSource({
+                                      source,
+                                      message,
+                                      details:
+                                        getSourceDetails(
+                                          message,
+                                          source
+                                        ),
+                                    })
+                                  }
                                 >
                                   {getSourceLabel(source)}
-                                </span>
+                                </button>
+                              )
+                            )}
+
+                            {message.sources?.external_sources?.map(
+                              (source) => (
+                                <button
+                                  type="button"
+                                  className="message-source-pill"
+                                  key={source.id}
+                                  onClick={() =>
+                                    setSelectedSource({
+                                      source: source.id,
+                                      message,
+                                      details:
+                                        getSourceDetails(
+                                          message,
+                                          source.id
+                                        ),
+                                    })
+                                  }
+                                >
+                                  {getSourceLabel(source.id)}
+                                </button>
                               )
                             )}
                           </div>
@@ -811,6 +824,218 @@ function App() {
             </div>
           </section>
         </div>
+
+        {selectedSource && (
+          <div
+            className="source-overlay-backdrop"
+            onClick={() => setSelectedSource(null)}
+          >
+            <div
+              className="source-overlay-card"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="source-overlay-header">
+                <div>
+                  <div className="source-overlay-title">
+                    {getSourceLabel(selectedSource.source)}
+                  </div>
+
+                  <div className="source-overlay-subtitle">
+                    Retrieval & provenance
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="source-overlay-close"
+                  onClick={() => setSelectedSource(null)}
+                  aria-label="Close source details"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="source-overlay-body">
+                {selectedSource.details ? (
+                  <>
+                    <div className="source-detail-section">
+                      <div className="section-label">
+                        RETRIEVAL STATUS
+                      </div>
+
+                      <div className="source-detail-status">
+                        ✓{" "}
+                        {getSourceStatus(
+                          selectedSource.details
+                        )}
+                      </div>
+                    </div>
+
+                    {selectedSource.details.source_type && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          SOURCE TYPE
+                        </div>
+
+                        <div className="source-detail-value">
+                          {selectedSource.details.source_type}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedSource.details.source_id && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          SOURCE ID
+                        </div>
+
+                        <div className="source-detail-value">
+                          {selectedSource.details.source_id}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedSource.details.tables?.length >
+                      0 && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          TABLES
+                        </div>
+
+                        <div className="source-tag-list">
+                          {selectedSource.details.tables.map(
+                            (table) => (
+                              <span
+                                className="source-tag"
+                                key={String(table)}
+                              >
+                                {String(table)}
+                              </span>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedSource.details.entities?.length >
+                      0 && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          ENTITIES
+                        </div>
+
+                        <div className="source-tag-list">
+                          {selectedSource.details.entities.map(
+                            (entity) => (
+                              <span
+                                className="source-tag"
+                                key={String(entity)}
+                              >
+                                {String(entity)}
+                              </span>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedSource.details.columns?.length >
+                      0 && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          COLUMNS USED
+                        </div>
+
+                        <div className="source-column-list">
+                          {selectedSource.details.columns.map(
+                            (column) => (
+                              <span
+                                className="source-column"
+                                key={String(column)}
+                              >
+                                {String(column)}
+                              </span>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedSource.details.query && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          SQL QUERY
+                        </div>
+
+                        <pre className="source-query">
+                          {selectedSource.details.query}
+                        </pre>
+                      </div>
+                    )}
+
+                    {typeof selectedSource.details.row_count ===
+                      "number" && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          ROWS RETRIEVED
+                        </div>
+
+                        <div className="source-detail-value">
+                          {selectedSource.details.row_count}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedSource.details.resource && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          RESOURCE
+                        </div>
+
+                        <div className="source-detail-value">
+                          {selectedSource.details.resource}
+                        </div>
+                      </div>
+                    )}
+
+                    {typeof selectedSource.details.event_count ===
+                      "number" && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          EVENTS RETRIEVED
+                        </div>
+
+                        <div className="source-detail-value">
+                          {selectedSource.details.event_count}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedSource.details.truncated !==
+                      undefined && (
+                      <div className="source-detail-section">
+                        <div className="section-label">
+                          RESULT STATUS
+                        </div>
+
+                        <div className="source-detail-value">
+                          {selectedSource.details.truncated
+                            ? "Results truncated"
+                            : "Complete result set"}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="source-empty-state">
+                    No detailed retrieval information is
+                    available for this source.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );
