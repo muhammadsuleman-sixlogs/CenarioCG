@@ -4,13 +4,36 @@ import GraphView from "./components/GraphView";
 import "./App.css";
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  "http://127.0.0.1:8000";
+  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+
+const EMPTY_GRAPH = {
+  nodes: [],
+  edges: [],
+};
+
+const EMPTY_GRAPH_TRACE = {
+  nodes: [],
+  edges: [],
+  tables: [],
+  source_entities: [],
+  source_tables: [],
+  matched_graph_nodes: [],
+};
+
+const EMPTY_SOURCE_TRACE = {
+  data_sources: [],
+  external_sources: [],
+};
+
+const EMPTY_GRAPH_SUMMARY = {
+  nodes: 0,
+  edges: 0,
+  database_relationships: 0,
+  business_relationships: 0,
+};
 
 function getNodeSource(node) {
-  if (node?.source_id) {
-    return String(node.source_id);
-  }
+  if (node?.source_id) return String(node.source_id);
 
   const id = String(node?.id || "");
 
@@ -24,63 +47,108 @@ function getNodeSource(node) {
 function getSourceLabel(sourceId) {
   const source = String(sourceId || "").toLowerCase();
 
-  if (source === "db1") {
-    return "DB1";
-  }
-
-  if (source === "db2") {
-    return "DB2";
-  }
-
-  if (source === "security_logs") {
-    return "Security Logs";
-  }
-
-  if (source === "postgresql") {
-    return "PostgreSQL";
-  }
+  if (source === "db1") return "DB1";
+  if (source === "db2") return "DB2";
+  if (source === "security_logs") return "Security Logs";
+  if (source === "security_logs_api") return "Security Logs";
+  if (source === "postgresql") return "PostgreSQL";
 
   return sourceId || "Unknown";
 }
 
+function normalizeSourceId(source) {
+  if (!source) return "";
+
+  if (typeof source === "string") {
+    return source;
+  }
+
+  return (
+    source.source_id ||
+    source.id ||
+    source.name ||
+    source.source ||
+    ""
+  );
+}
+
 function getSourceDetails(message, sourceId) {
-  const sources = Array.isArray(
-    message?.response_data?.sources
-  )
-    ? message.response_data.sources
+  const normalizedSource = String(sourceId || "").toLowerCase();
+
+  const responseData = message?.response_data || {};
+
+  const responseSources = Array.isArray(responseData.sources)
+    ? responseData.sources
     : [];
 
-  const normalizedSource = String(
-    sourceId || ""
-  ).toLowerCase();
+  const responseSourceTrace = responseData.source_trace || {};
 
-  const postgresSource = sources.find(
-    (source) =>
-      source?.source_type === "postgresql" &&
-      String(source?.source_id || "").toLowerCase() ===
-        normalizedSource
-  );
+  const traceDataSources = Array.isArray(
+    responseSourceTrace.data_sources
+  )
+    ? responseSourceTrace.data_sources
+    : [];
 
-  if (postgresSource) {
-    return postgresSource;
-  }
+  const traceExternalSources = Array.isArray(
+    responseSourceTrace.external_sources
+  )
+    ? responseSourceTrace.external_sources
+    : [];
 
-  if (normalizedSource === "security_logs") {
-    return (
-      sources.find(
-        (source) =>
-          source?.source_type === "security_logs_api"
-      ) ||
-      message?.response_data?.source_trace?.external_sources?.find(
-        (source) =>
-          String(source?.id || "").toLowerCase() ===
-          normalizedSource
-      ) ||
-      null
-    );
-  }
+  const messageSourceTrace = message?.sources || {};
 
-  return null;
+  const messageDataSources = Array.isArray(
+    messageSourceTrace.data_sources
+  )
+    ? messageSourceTrace.data_sources
+    : [];
+
+  const messageExternalSources = Array.isArray(
+    messageSourceTrace.external_sources
+  )
+    ? messageSourceTrace.external_sources
+    : [];
+
+  const allSources = [
+    ...responseSources,
+    ...traceDataSources,
+    ...traceExternalSources,
+    ...messageDataSources,
+    ...messageExternalSources,
+  ];
+
+  const matchingSource = allSources.find((source) => {
+    const candidates = [
+      source?.source_id,
+      source?.id,
+      source?.source,
+      source?.name,
+    ]
+      .filter(Boolean)
+      .map((value) => String(value).toLowerCase());
+
+    if (candidates.includes(normalizedSource)) {
+      return true;
+    }
+
+    if (
+      normalizedSource === "security_logs" &&
+      candidates.includes("security_logs_api")
+    ) {
+      return true;
+    }
+
+    if (
+      normalizedSource === "security_logs_api" &&
+      candidates.includes("security_logs")
+    ) {
+      return true;
+    }
+
+    return false;
+  });
+
+  return matchingSource || null;
 }
 
 function getSourceStatus(details) {
@@ -94,6 +162,10 @@ function getSourceStatus(details) {
 
   if (details.status) {
     return details.status;
+  }
+
+  if (details.error) {
+    return `Retrieval error: ${details.error}`;
   }
 
   if (typeof details.row_count === "number") {
@@ -111,9 +183,114 @@ function getSourceStatus(details) {
   return "Retrieved";
 }
 
+function normalizeSourceTrace(trace) {
+  if (!trace || typeof trace !== "object") {
+    return EMPTY_SOURCE_TRACE;
+  }
+
+  return {
+    data_sources: Array.isArray(trace.data_sources)
+      ? trace.data_sources
+      : [],
+    external_sources: Array.isArray(trace.external_sources)
+      ? trace.external_sources
+      : [],
+  };
+}
+
+function LoginScreen({
+  username,
+  setUsername,
+  password,
+  setPassword,
+  loginError,
+  loginLoading,
+  onSubmit,
+}) {
+  return (
+    <div className="app login-app">
+      <main className="login-page">
+        <div className="login-card">
+          <div className="login-logo">
+            <span>C</span>
+          </div>
+
+          <div className="login-header">
+            <div className="header-eyebrow">
+              AI DATA INTELLIGENCE
+            </div>
+
+            <h1>CENARIO</h1>
+
+            <p>
+              Sign in to access the Context Layer.
+            </p>
+          </div>
+
+          <form
+            className="login-form"
+            onSubmit={onSubmit}
+          >
+            <label className="login-field">
+              <span>USERNAME</span>
+
+              <input
+                type="text"
+                value={username}
+                onChange={(event) =>
+                  setUsername(event.target.value)
+                }
+                autoComplete="username"
+                placeholder="Admin username"
+                disabled={loginLoading}
+              />
+            </label>
+
+            <label className="login-field">
+              <span>PASSWORD</span>
+
+              <input
+                type="password"
+                value={password}
+                onChange={(event) =>
+                  setPassword(event.target.value)
+                }
+                autoComplete="current-password"
+                placeholder="Password"
+                disabled={loginLoading}
+              />
+            </label>
+
+            {loginError && (
+              <div className="login-error">
+                {loginError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="login-submit"
+              disabled={
+                loginLoading ||
+                !username.trim() ||
+                !password
+              }
+            >
+              {loginLoading
+                ? "Signing in..."
+                : "Sign in"}
+            </button>
+          </form>
+        </div>
+      </main>
+    </div>
+  );
+}
+
 function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
+
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
@@ -121,94 +298,135 @@ function App() {
 
   const [selectedEntity, setSelectedEntity] = useState(null);
   const [selectedSource, setSelectedSource] = useState(null);
+
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const [graphData, setGraphData] = useState({
-    nodes: [],
-    edges: [],
-  });
+  const [graphData, setGraphData] = useState(EMPTY_GRAPH);
 
-  const [graphTrace, setGraphTrace] = useState({
-    nodes: [],
-    edges: [],
-    tables: [],
-    source_entities: [],
-    source_tables: [],
-    matched_graph_nodes: [],
-  });
+  const [graphTrace, setGraphTrace] =
+    useState(EMPTY_GRAPH_TRACE);
 
-  const [sourceTrace, setSourceTrace] = useState({
-    data_sources: [],
-    external_sources: [],
-  });
+  const [sourceTrace, setSourceTrace] =
+    useState(EMPTY_SOURCE_TRACE);
 
-  const [graphSummary, setGraphSummary] = useState({
-    nodes: 0,
-    edges: 0,
-    database_relationships: 0,
-    business_relationships: 0,
-  });
+  const [graphSummary, setGraphSummary] =
+    useState(EMPTY_GRAPH_SUMMARY);
 
-  // -------------------------------------------------------
-  // Authentication
-  // -------------------------------------------------------
+  const sourceSummary = useMemo(() => {
+    const counts = {};
 
-  useEffect(() => {
-    let mounted = true;
+    (graphData?.nodes || []).forEach((node) => {
+      const sourceId = getNodeSource(node);
 
-    const checkAuthentication = async () => {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/api/auth/me`,
-          {
-            method: "GET",
-            credentials: "include",
-            cache: "no-store",
-            headers: {
-              Accept: "application/json",
-            },
-          }
-        );
+      counts[sourceId] =
+        (counts[sourceId] || 0) + 1;
+    });
 
-        if (!mounted) {
-          return;
-        }
+    return Object.entries(counts)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([sourceId, count]) => ({
+        sourceId,
+        label: getSourceLabel(sourceId),
+        count,
+      }));
+  }, [graphData]);
 
-        setAuthenticated(response.ok);
-      } catch (error) {
-        if (!mounted) {
-          return;
-        }
+  const activeAnswerSources = useMemo(() => {
+    const sources = new Set();
 
-        console.error(
-          "Authentication check failed:",
-          error
-        );
+    (sourceTrace?.data_sources || []).forEach(
+      (source) => {
+        const normalized = normalizeSourceId(source);
 
-        setAuthenticated(false);
-      } finally {
-        if (mounted) {
-          setAuthChecking(false);
+        if (normalized) {
+          sources.add(String(normalized));
         }
       }
-    };
+    );
 
-    checkAuthentication();
+    (sourceTrace?.external_sources || []).forEach(
+      (source) => {
+        const normalized = normalizeSourceId(source);
 
-    return () => {
-      mounted = false;
-    };
-  }, []);
+        if (normalized) {
+          sources.add(String(normalized));
+        }
+      }
+    );
+
+    return Array.from(sources);
+  }, [sourceTrace]);
+
+  const clearApplicationState = () => {
+    setAuthenticated(false);
+
+    setUsername("");
+    setPassword("");
+    setLoginError("");
+
+    setSelectedEntity(null);
+    setSelectedSource(null);
+
+    setQuestion("");
+    setMessages([]);
+    setLoading(false);
+    setRefreshing(false);
+
+    setGraphData(EMPTY_GRAPH);
+    setGraphTrace(EMPTY_GRAPH_TRACE);
+    setSourceTrace(EMPTY_SOURCE_TRACE);
+    setGraphSummary(EMPTY_GRAPH_SUMMARY);
+  };
+
+  const clearChatState = () => {
+    setMessages([]);
+    setQuestion("");
+    setLoading(false);
+    setSelectedSource(null);
+
+    setGraphTrace(EMPTY_GRAPH_TRACE);
+    setSourceTrace(EMPTY_SOURCE_TRACE);
+  };
+
+  const checkAuthentication = async () => {
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/auth/me`,
+        {
+          method: "GET",
+          credentials: "include",
+        }
+      );
+
+      if (!response.ok) {
+        clearApplicationState();
+        return false;
+      }
+
+      setAuthenticated(true);
+      return true;
+    } catch (error) {
+      console.error(
+        "Authentication check failed:",
+        error
+      );
+
+      clearApplicationState();
+      return false;
+    }
+  };
 
   const handleLogin = async (event) => {
     event.preventDefault();
 
-    if (!username.trim() || !password) {
-      setLoginError(
-        "Please enter your username and password."
-      );
+    if (
+      loginLoading ||
+      !username.trim() ||
+      !password
+    ) {
       return;
     }
 
@@ -221,10 +439,8 @@ function App() {
         {
           method: "POST",
           credentials: "include",
-          cache: "no-store",
           headers: {
             "Content-Type": "application/json",
-            Accept: "application/json",
           },
           body: JSON.stringify({
             username: username.trim(),
@@ -233,13 +449,9 @@ function App() {
         }
       );
 
-      let data = {};
-
-      try {
-        data = await response.json();
-      } catch {
-        data = {};
-      }
+      const data = await response
+        .json()
+        .catch(() => ({}));
 
       if (!response.ok) {
         throw new Error(
@@ -248,16 +460,25 @@ function App() {
         );
       }
 
-      setAuthenticated(true);
-      setUsername("");
+      const authenticatedNow =
+        await checkAuthentication();
+
+      if (!authenticatedNow) {
+        throw new Error(
+          "Login succeeded, but the authentication session could not be verified."
+        );
+      }
+
       setPassword("");
       setLoginError("");
     } catch (error) {
       console.error("Login failed:", error);
 
       setAuthenticated(false);
+
       setLoginError(
-        error.message || "Unable to sign in."
+        error?.message ||
+          "Unable to sign in right now."
       );
     } finally {
       setLoginLoading(false);
@@ -271,202 +492,131 @@ function App() {
         {
           method: "POST",
           credentials: "include",
-          cache: "no-store",
-          headers: {
-            Accept: "application/json",
-          },
         }
       );
     } catch (error) {
       console.error(
-        "Logout failed:",
+        "Logout request failed:",
         error
       );
     } finally {
-      setAuthenticated(false);
-      setMessages([]);
-      setSelectedEntity(null);
-      setSelectedSource(null);
-      setQuestion("");
-
-      setGraphData({
-        nodes: [],
-        edges: [],
-      });
-
-      setGraphTrace({
-        nodes: [],
-        edges: [],
-        tables: [],
-        source_entities: [],
-        source_tables: [],
-        matched_graph_nodes: [],
-      });
-
-      setSourceTrace({
-        data_sources: [],
-        external_sources: [],
-      });
-
-      setGraphSummary({
-        nodes: 0,
-        edges: 0,
-        database_relationships: 0,
-        business_relationships: 0,
-      });
-
-      /*
-       * Force a clean application load after logout.
-       *
-       * This guarantees that even if the user immediately
-       * pastes/opens the application URL again, the frontend
-       * starts from the authentication check instead of
-       * relying on an already-mounted application state.
-       */
-      window.location.replace(
-        window.location.origin
-      );
+      clearApplicationState();
     }
   };
 
-  // -------------------------------------------------------
-  // Graph source summary
-  // -------------------------------------------------------
+  const loadGraph = async () => {
+    if (refreshing) {
+      return;
+    }
 
-  const sourceSummary = useMemo(() => {
-    const counts = {};
+    setRefreshing(true);
 
-    (graphData?.nodes || []).forEach((node) => {
-      const sourceId = getNodeSource(node);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/graph`,
+        {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+        }
+      );
 
-      counts[sourceId] =
-        (counts[sourceId] || 0) + 1;
-    });
-
-    return Object.entries(counts)
-      .sort(([a], [b]) =>
-        a.localeCompare(b)
-      )
-      .map(([sourceId, count]) => ({
-        sourceId,
-        label: getSourceLabel(sourceId),
-        count,
-      }));
-  }, [graphData]);
-
-  // -------------------------------------------------------
-  // Current query sources
-  // -------------------------------------------------------
-
-  const activeAnswerSources = useMemo(() => {
-    const sources = new Set();
-
-    (
-      sourceTrace?.data_sources || []
-    ).forEach((source) => {
-      if (source) {
-        sources.add(String(source));
+      if (response.status === 401) {
+        clearApplicationState();
+        return;
       }
-    });
 
-    (
-      sourceTrace?.external_sources || []
-    ).forEach((source) => {
-      if (source?.id) {
-        sources.add(String(source.id));
+      if (!response.ok) {
+        throw new Error(
+          `Failed to load graph (${response.status})`
+        );
       }
-    });
 
-    return Array.from(sources);
-  }, [sourceTrace]);
+      const data = await response.json();
 
-  // -------------------------------------------------------
-  // Load graph
-  // -------------------------------------------------------
+      setGraphData(
+        data?.graph || EMPTY_GRAPH
+      );
+
+      setGraphSummary(
+        data?.graph_summary ||
+          EMPTY_GRAPH_SUMMARY
+      );
+    } catch (error) {
+      console.error(
+        "Failed to load context graph:",
+        error
+      );
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    await loadGraph();
+  };
+
+  const handleNewChat = () => {
+    clearChatState();
+
+    setSelectedEntity(null);
+  };
+
+  useEffect(() => {
+    let mounted = true;
+
+    const initializeAuthentication =
+      async () => {
+        try {
+          const response = await fetch(
+            `${API_BASE_URL}/api/auth/me`,
+            {
+              method: "GET",
+              credentials: "include",
+            }
+          );
+
+          if (!mounted) return;
+
+          if (response.ok) {
+            setAuthenticated(true);
+          } else {
+            setAuthenticated(false);
+          }
+        } catch (error) {
+          if (!mounted) return;
+
+          console.error(
+            "Initial authentication check failed:",
+            error
+          );
+
+          setAuthenticated(false);
+        } finally {
+          if (mounted) {
+            setAuthChecking(false);
+          }
+        }
+      };
+
+    initializeAuthentication();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!authenticated) {
       return;
     }
 
-    let mounted = true;
-
-    const loadGraph = async () => {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/api/graph`,
-          {
-            method: "GET",
-            credentials: "include",
-            cache: "no-store",
-            headers: {
-              Accept: "application/json",
-            },
-          }
-        );
-
-        if (response.status === 401) {
-          if (mounted) {
-            setAuthenticated(false);
-          }
-          return;
-        }
-
-        if (!response.ok) {
-          throw new Error(
-            "Failed to load graph"
-          );
-        }
-
-        const data = await response.json();
-
-        if (!mounted) {
-          return;
-        }
-
-        setGraphData(
-          data.graph || {
-            nodes: [],
-            edges: [],
-          }
-        );
-
-        setGraphSummary(
-          data.graph_summary || {
-            nodes: 0,
-            edges: 0,
-            database_relationships: 0,
-            business_relationships: 0,
-          }
-        );
-      } catch (error) {
-        if (mounted) {
-          console.error(
-            "Failed to load context graph:",
-            error
-          );
-        }
-      }
-    };
-
     loadGraph();
-
-    return () => {
-      mounted = false;
-    };
   }, [authenticated]);
-
-  // -------------------------------------------------------
-  // Entity selection
-  // -------------------------------------------------------
 
   const handleEntitySelect = (entity) => {
     setSelectedEntity(entity);
   };
-
-  // -------------------------------------------------------
-  // Ask Cenario
-  // -------------------------------------------------------
 
   const handleAsk = async () => {
     const trimmedQuestion = question.trim();
@@ -495,7 +645,6 @@ function App() {
           credentials: "include",
           headers: {
             "Content-Type": "application/json",
-            Accept: "application/json",
           },
           body: JSON.stringify({
             question: trimmedQuestion,
@@ -503,60 +652,75 @@ function App() {
         }
       );
 
-      const data = await response.json();
+      const data = await response
+        .json()
+        .catch(() => ({}));
 
       if (response.status === 401) {
-        setAuthenticated(false);
-        setMessages([]);
-        return;
+        clearApplicationState();
+
+        throw new Error(
+          "Your session has expired. Please sign in again."
+        );
       }
 
       if (!response.ok) {
         throw new Error(
-          data.detail ||
+          data?.detail ||
             "Unable to process the question."
         );
       }
+
+      /*
+       * IMPORTANT:
+       * source_trace is the actual provenance object.
+       *
+       * Some backend responses may place it at:
+       *   data.source_trace
+       *
+       * while retrieval metadata may additionally exist at:
+       *   data.sources
+       *
+       * We preserve BOTH.
+       */
+
+      const answerSourceTrace =
+        normalizeSourceTrace(
+          data?.source_trace
+        );
+
+      const responseWithTrace = {
+        ...data,
+        source_trace: answerSourceTrace,
+        sources: Array.isArray(data?.sources)
+          ? data.sources
+          : [],
+      };
 
       setMessages((previous) => [
         ...previous,
         {
           role: "assistant",
           content:
-            data.answer ||
+            data?.answer ||
             "I could not generate an answer.",
-          sources:
-            data.source_trace || null,
-          response_data: data,
+          sources: answerSourceTrace,
+          response_data: responseWithTrace,
         },
       ]);
 
       setGraphData(
-        data.graph || {
-          nodes: [],
-          edges: [],
-        }
+        data?.graph || EMPTY_GRAPH
       );
 
       setGraphTrace(
-        data.graph_trace || {
-          nodes: [],
-          edges: [],
-          tables: [],
-          source_entities: [],
-          source_tables: [],
-          matched_graph_nodes: [],
-        }
+        data?.graph_trace ||
+          EMPTY_GRAPH_TRACE
       );
 
-      setSourceTrace(
-        data.source_trace || {
-          data_sources: [],
-          external_sources: [],
-        }
-      );
+      setSourceTrace(answerSourceTrace);
 
-      if (data.graph_summary) {
+      if (data?.graph_summary) {
         setGraphSummary(
           data.graph_summary
         );
@@ -572,141 +736,73 @@ function App() {
         {
           role: "assistant",
           content:
+            error?.message ||
             "Sorry, I could not process your question right now.",
+          sources: EMPTY_SOURCE_TRACE,
+          response_data: null,
         },
       ]);
     } finally {
+      /*
+       * IMPORTANT:
+       * Always stop the tracing/loading state,
+       * including failed requests and API errors.
+       */
       setLoading(false);
     }
   };
-
-  // -------------------------------------------------------
-  // Suggestions
-  // -------------------------------------------------------
 
   const handleSuggestion = (suggestion) => {
     setQuestion(suggestion);
   };
 
-  // -------------------------------------------------------
-  // Authentication loading screen
-  // -------------------------------------------------------
-
   if (authChecking) {
     return (
-      <div className="auth-screen">
-        <div className="auth-card">
-          <div className="auth-logo">
-            C
+      <div className="app login-app">
+        <main className="login-page">
+          <div className="login-card">
+            <div className="login-logo">
+              <span>C</span>
+            </div>
+
+            <div className="login-header">
+              <div className="header-eyebrow">
+                AI DATA INTELLIGENCE
+              </div>
+
+              <h1>CENARIO</h1>
+
+              <p>
+                Verifying authentication session...
+              </p>
+            </div>
+
+            <div className="login-loading">
+              <span className="thinking-indicator">
+                <span />
+                <span />
+                <span />
+              </span>
+            </div>
           </div>
-
-          <div className="auth-eyebrow">
-            AI DATA INTELLIGENCE
-          </div>
-
-          <h1>CENARIO</h1>
-
-          <p className="auth-subtitle">
-            Sign in to access the
-            Context Layer.
-          </p>
-
-          <div className="auth-loading">
-            Checking authentication...
-          </div>
-        </div>
+        </main>
       </div>
     );
   }
-
-  // -------------------------------------------------------
-  // Login screen
-  // -------------------------------------------------------
 
   if (!authenticated) {
     return (
-      <div className="auth-screen">
-        <form
-          className="auth-card"
-          onSubmit={handleLogin}
-        >
-          <div className="auth-logo">
-            C
-          </div>
-
-          <div className="auth-eyebrow">
-            AI DATA INTELLIGENCE
-          </div>
-
-          <h1>CENARIO</h1>
-
-          <p className="auth-subtitle">
-            Sign in to access the
-            Context Layer.
-          </p>
-
-          <div className="auth-field">
-            <label htmlFor="username">
-              Username
-            </label>
-
-            <input
-              id="username"
-              type="text"
-              value={username}
-              onChange={(event) =>
-                setUsername(
-                  event.target.value
-                )
-              }
-              autoComplete="username"
-              disabled={loginLoading}
-              autoFocus
-            />
-          </div>
-
-          <div className="auth-field">
-            <label htmlFor="password">
-              Password
-            </label>
-
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(event) =>
-                setPassword(
-                  event.target.value
-                )
-              }
-              autoComplete="current-password"
-              disabled={loginLoading}
-            />
-          </div>
-
-          {loginError && (
-            <div className="auth-error">
-              {loginError}
-            </div>
-          )}
-
-          <button
-            className="auth-button"
-            type="submit"
-            disabled={loginLoading}
-          >
-            {loginLoading
-              ? "Signing in..."
-              : "Sign In"}
-          </button>
-        </form>
-      </div>
+      <LoginScreen
+        username={username}
+        setUsername={setUsername}
+        password={password}
+        setPassword={setPassword}
+        loginError={loginError}
+        loginLoading={loginLoading}
+        onSubmit={handleLogin}
+      />
     );
   }
-
-  // -------------------------------------------------------
-  // Main CenarioCG application
-  // -------------------------------------------------------
 
   return (
     <div className="app">
@@ -720,37 +816,38 @@ function App() {
             className="sidebar-button active"
             type="button"
             title="Context Graph"
+            onClick={() => {
+              window.scrollTo({
+                top: 0,
+                behavior: "smooth",
+              });
+            }}
           >
             <span>◈</span>
+            <span className="sidebar-button-text">
+              Context Graph
+            </span>
           </button>
 
           <button
-            className="sidebar-button"
+            className="sidebar-button new-chat-button"
             type="button"
-            title="AI Assistant"
+            title="New Chat"
+            onClick={handleNewChat}
           >
-            <span>✦</span>
-          </button>
-
-          <button
-            className="sidebar-button"
-            type="button"
-            title="Analytics"
-          >
-            <span>◫</span>
-          </button>
-
-          <button
-            className="sidebar-button"
-            type="button"
-            title="Settings"
-          >
-            <span>⚙</span>
+            <span>＋</span>
+            <span className="sidebar-button-text">
+              New Chat
+            </span>
           </button>
         </nav>
 
         <div className="sidebar-bottom">
           <div className="status-dot" />
+
+          <span className="sidebar-status-text">
+            Connected
+          </span>
         </div>
       </aside>
 
@@ -772,15 +869,13 @@ function App() {
 
             <button
               type="button"
-              className="logout-button"
+              className="header-avatar header-logout-button"
               onClick={handleLogout}
+              title="Logout"
+              aria-label="Logout"
             >
               Logout
             </button>
-
-            <div className="header-avatar">
-              C
-            </div>
           </div>
         </header>
 
@@ -802,8 +897,7 @@ function App() {
               </div>
 
               <div className="stat-description">
-                Discovered entities
-                across sources
+                Discovered entities across sources
               </div>
             </div>
 
@@ -820,14 +914,12 @@ function App() {
                 </div>
 
                 <div className="stat-label">
-                  Database
-                  Relationships
+                  Database Relationships
                 </div>
               </div>
 
               <div className="stat-description">
-                PostgreSQL
-                relationships
+                PostgreSQL relationships
               </div>
             </div>
 
@@ -844,14 +936,12 @@ function App() {
                 </div>
 
                 <div className="stat-label">
-                  Business
-                  Relationships
+                  Business Relationships
                 </div>
               </div>
 
               <div className="stat-description">
-                Validated
-                relationships
+                Validated relationships
               </div>
             </div>
 
@@ -880,13 +970,12 @@ function App() {
             <div className="source-overview-header">
               <div>
                 <div className="source-overview-title">
-                  Connected Data
-                  Sources
+                  Connected Data Sources
                 </div>
 
                 <div className="source-overview-subtitle">
-                  Dynamically discovered
-                  Context Layer sources
+                  Dynamically discovered Context
+                  Layer sources
                 </div>
               </div>
 
@@ -898,37 +987,33 @@ function App() {
 
             <div className="source-list">
               {sourceSummary.length > 0 ? (
-                sourceSummary.map(
-                  (source) => (
-                    <div
-                      className="source-card"
-                      key={source.sourceId}
-                    >
-                      <div className="source-card-icon">
-                        ◉
+                sourceSummary.map((source) => (
+                  <div
+                    className="source-card"
+                    key={source.sourceId}
+                  >
+                    <div className="source-card-icon">
+                      ◉
+                    </div>
+
+                    <div className="source-card-content">
+                      <div className="source-card-title">
+                        {source.label}
                       </div>
 
-                      <div className="source-card-content">
-                        <div className="source-card-title">
-                          {source.label}
-                        </div>
-
-                        <div className="source-card-meta">
-                          {source.count}{" "}
-                          entities
-                        </div>
-                      </div>
-
-                      <div className="source-card-status">
-                        Connected
+                      <div className="source-card-meta">
+                        {source.count} entities
                       </div>
                     </div>
-                  )
-                )
+
+                    <div className="source-card-status">
+                      Connected
+                    </div>
+                  </div>
+                ))
               ) : (
                 <div className="source-empty">
-                  No graph sources
-                  available.
+                  No graph sources available.
                 </div>
               )}
             </div>
@@ -937,8 +1022,7 @@ function App() {
           {activeAnswerSources.length > 0 && (
             <section className="answer-source-bar">
               <span className="answer-source-label">
-                CURRENT QUERY
-                SOURCES
+                CURRENT QUERY SOURCES
               </span>
 
               <div className="answer-source-list">
@@ -948,9 +1032,7 @@ function App() {
                       className="answer-source-pill"
                       key={source}
                     >
-                      {getSourceLabel(
-                        source
-                      )}
+                      {getSourceLabel(source)}
                     </span>
                   )
                 )}
@@ -963,9 +1045,7 @@ function App() {
               <div className="panel-header">
                 <div>
                   <div className="panel-title-row">
-                    <h2>
-                      Context Graph
-                    </h2>
+                    <h2>Context Graph</h2>
 
                     <span className="live-badge">
                       <span />
@@ -974,10 +1054,8 @@ function App() {
                   </div>
 
                   <p>
-                    Dynamically
-                    discovered
-                    entities and
-                    relationships
+                    Dynamically discovered entities
+                    and relationships
                   </p>
                 </div>
 
@@ -999,9 +1077,7 @@ function App() {
                   graphData={graphData}
                   graphTrace={graphTrace}
                   sourceTrace={sourceTrace}
-                  onEntitySelect={
-                    handleEntitySelect
-                  }
+                  onEntitySelect={handleEntitySelect}
                   loading={loading}
                 />
 
@@ -1011,14 +1087,8 @@ function App() {
                   </div>
 
                   <div className="graph-overlay-text">
-                    {
-                      (
-                        graphData.nodes ||
-                        []
-                      ).length
-                    }{" "}
-                    visible
-                    entities
+                    {(graphData.nodes || []).length}{" "}
+                    visible entities
                   </div>
                 </div>
               </div>
@@ -1027,13 +1097,10 @@ function App() {
             <aside className="panel entity-panel">
               <div className="panel-header">
                 <div>
-                  <h2>
-                    Entity Details
-                  </h2>
+                  <h2>Entity Details</h2>
 
                   <p>
-                    Inspect discovered
-                    schema
+                    Inspect discovered schema
                   </p>
                 </div>
               </div>
@@ -1047,15 +1114,11 @@ function App() {
 
                     <div>
                       <div className="entity-title">
-                        {
-                          selectedEntity.label
-                        }
+                        {selectedEntity.label}
                       </div>
 
                       <div className="entity-type">
-                        {
-                          selectedEntity.type
-                        }
+                        {selectedEntity.type}
                       </div>
                     </div>
                   </div>
@@ -1076,9 +1139,8 @@ function App() {
                         </div>
 
                         <div className="entity-source-id">
-                          {
-                            selectedEntity.source_id
-                          }
+                          {selectedEntity.source_id ||
+                            "Unknown source"}
                         </div>
                       </div>
                     </div>
@@ -1089,28 +1151,19 @@ function App() {
                   </div>
 
                   <div className="attributes">
-                    {(
-                      selectedEntity.columns ||
-                      []
-                    ).map(
+                    {(selectedEntity.columns || []).map(
                       (column) => (
                         <div
                           className="attribute"
-                          key={
-                            column.name
-                          }
+                          key={column.name}
                         >
                           <div className="attribute-left">
                             <div className="attribute-name">
-                              {
-                                column.name
-                              }
+                              {column.name}
                             </div>
 
                             <div className="attribute-type">
-                              {
-                                column.type
-                              }
+                              {column.type}
                             </div>
                           </div>
 
@@ -1130,17 +1183,12 @@ function App() {
                     ◇
                   </div>
 
-                  <h3>
-                    Select an entity
-                  </h3>
+                  <h3>Select an entity</h3>
 
                   <p>
-                    Click a node in the
-                    graph to inspect
-                    its dynamically
-                    discovered
-                    attributes and
-                    source.
+                    Click a node in the graph to
+                    inspect its dynamically discovered
+                    attributes and source.
                   </p>
                 </div>
               )}
@@ -1151,9 +1199,7 @@ function App() {
             <div className="panel-header chat-header">
               <div>
                 <div className="panel-title-row">
-                  <h2>
-                    AI Assistant
-                  </h2>
+                  <h2>AI Assistant</h2>
 
                   <span className="ai-badge">
                     AI
@@ -1161,9 +1207,38 @@ function App() {
                 </div>
 
                 <p>
-                  Ask questions across
-                  your connected data
+                  Ask questions across your connected
+                  data
                 </p>
+              </div>
+
+              <div className="chat-header-actions">
+                <button
+                  type="button"
+                  className="chat-action-button"
+                  onClick={handleNewChat}
+                  disabled={loading}
+                  title="Start a new chat"
+                >
+                  <span>＋</span>
+                  New Chat
+                </button>
+
+                <button
+                  type="button"
+                  className="chat-action-button"
+                  onClick={handleRefresh}
+                  disabled={loading || refreshing}
+                  title="Refresh context graph"
+                >
+                  <span className="refresh-icon">
+                    ↻
+                  </span>
+
+                  {refreshing
+                    ? "Refreshing..."
+                    : "Refresh"}
+                </button>
               </div>
             </div>
 
@@ -1174,15 +1249,11 @@ function App() {
                     ✦
                   </div>
 
-                  <h3>
-                    Ask Cenario
-                  </h3>
+                  <h3>Ask Cenario</h3>
 
                   <p>
-                    Query your
-                    connected data
-                    using natural
-                    language.
+                    Query your connected data using
+                    natural language.
                   </p>
 
                   <div className="suggestions">
@@ -1216,35 +1287,27 @@ function App() {
                         )
                       }
                     >
-                      Entity
-                      relationships
+                      Entity relationships
                     </button>
                   </div>
                 </div>
               ) : (
                 <div className="messages">
                   {messages.map(
-                    (
-                      message,
-                      index
-                    ) => (
+                    (message, index) => (
                       <div
                         key={`msg-${index}`}
                         className={`message ${message.role}`}
                       >
                         <div className="message-role">
-                          {
-                            message.role
-                          }
+                          {message.role}
                         </div>
 
                         <div className="message-content">
                           {message.role ===
                           "assistant" ? (
                             <ReactMarkdown>
-                              {
-                                message.content
-                              }
+                              {message.content}
                             </ReactMarkdown>
                           ) : (
                             message.content
@@ -1253,83 +1316,109 @@ function App() {
 
                         {message.role ===
                           "assistant" &&
-                          (
-                            message
-                              .sources
-                              ?.postgresql_sources
-                              ?.length >
-                              0 ||
-                            message
-                              .sources
-                              ?.external_sources
-                              ?.length >
-                              0
-                          ) && (
-                            <div className="message-source-row">
-                              {message.sources?.postgresql_sources?.map(
-                                (
-                                  source
-                                ) => (
-                                  <button
-                                    type="button"
-                                    className="message-source-pill"
-                                    key={
-                                      source
-                                    }
-                                    onClick={() =>
-                                      setSelectedSource(
-                                        {
-                                          source,
-                                          message,
-                                          details:
-                                            getSourceDetails(
-                                              message,
-                                              source
-                                            ),
-                                        }
-                                      )
-                                    }
-                                  >
-                                    {getSourceLabel(
-                                      source
-                                    )}
-                                  </button>
-                                )
-                              )}
+                          (() => {
+                            const trace =
+                              normalizeSourceTrace(
+                                message.sources
+                              );
 
-                              {message.sources?.external_sources?.map(
-                                (
-                                  source
-                                ) => (
-                                  <button
-                                    type="button"
-                                    className="message-source-pill"
-                                    key={
-                                      source.id
+                            const dataSources =
+                              trace.data_sources;
+
+                            const externalSources =
+                              trace.external_sources;
+
+                            if (
+                              dataSources.length ===
+                                0 &&
+                              externalSources.length ===
+                                0
+                            ) {
+                              return null;
+                            }
+
+                            return (
+                              <div className="message-source-row">
+                                {dataSources.map(
+                                  (source) => {
+                                    const sourceId =
+                                      normalizeSourceId(
+                                        source
+                                      );
+
+                                    if (!sourceId) {
+                                      return null;
                                     }
-                                    onClick={() =>
-                                      setSelectedSource(
-                                        {
-                                          source:
-                                            source.id,
-                                          message,
-                                          details:
-                                            getSourceDetails(
+
+                                    return (
+                                      <button
+                                        type="button"
+                                        className="message-source-pill"
+                                        key={sourceId}
+                                        onClick={() =>
+                                          setSelectedSource(
+                                            {
+                                              source:
+                                                sourceId,
                                               message,
-                                              source.id
-                                            ),
+                                              details:
+                                                getSourceDetails(
+                                                  message,
+                                                  sourceId
+                                                ),
+                                            }
+                                          )
                                         }
-                                      )
+                                      >
+                                        {getSourceLabel(
+                                          sourceId
+                                        )}
+                                      </button>
+                                    );
+                                  }
+                                )}
+
+                                {externalSources.map(
+                                  (source) => {
+                                    const sourceId =
+                                      normalizeSourceId(
+                                        source
+                                      );
+
+                                    if (!sourceId) {
+                                      return null;
                                     }
-                                  >
-                                    {getSourceLabel(
-                                      source.id
-                                    )}
-                                  </button>
-                                )
-                              )}
-                            </div>
-                          )}
+
+                                    return (
+                                      <button
+                                        type="button"
+                                        className="message-source-pill"
+                                        key={sourceId}
+                                        onClick={() =>
+                                          setSelectedSource(
+                                            {
+                                              source:
+                                                sourceId,
+                                              message,
+                                              details:
+                                                getSourceDetails(
+                                                  message,
+                                                  sourceId
+                                                ),
+                                            }
+                                          )
+                                        }
+                                      >
+                                        {getSourceLabel(
+                                          sourceId
+                                        )}
+                                      </button>
+                                    );
+                                  }
+                                )}
+                              </div>
+                            );
+                          })()}
                       </div>
                     )
                   )}
@@ -1347,9 +1436,7 @@ function App() {
                           <span />
                         </span>
 
-                        Tracing
-                        connected
-                        sources...
+                        Tracing connected sources...
                       </div>
                     </div>
                   )}
@@ -1366,10 +1453,7 @@ function App() {
                     )
                   }
                   onKeyDown={(event) => {
-                    if (
-                      event.key ===
-                      "Enter"
-                    ) {
+                    if (event.key === "Enter") {
                       event.preventDefault();
                       handleAsk();
                     }
@@ -1421,8 +1505,7 @@ function App() {
                   </div>
 
                   <div className="source-overlay-subtitle">
-                    Retrieval &
-                    provenance
+                    Retrieval & provenance
                   </div>
                 </div>
 
@@ -1430,9 +1513,7 @@ function App() {
                   type="button"
                   className="source-overlay-close"
                   onClick={() =>
-                    setSelectedSource(
-                      null
-                    )
+                    setSelectedSource(null)
                   }
                   aria-label="Close source details"
                 >
@@ -1445,8 +1526,7 @@ function App() {
                   <>
                     <div className="source-detail-section">
                       <div className="section-label">
-                        RETRIEVAL
-                        STATUS
+                        RETRIEVAL STATUS
                       </div>
 
                       <div className="source-detail-status">
@@ -1466,8 +1546,7 @@ function App() {
 
                         <div className="source-detail-value">
                           {
-                            selectedSource
-                              .details
+                            selectedSource.details
                               .source_type
                           }
                         </div>
@@ -1483,8 +1562,7 @@ function App() {
 
                         <div className="source-detail-value">
                           {
-                            selectedSource
-                              .details
+                            selectedSource.details
                               .source_id
                           }
                         </div>
@@ -1492,8 +1570,7 @@ function App() {
                     )}
 
                     {selectedSource.details
-                      .tables?.length >
-                      0 && (
+                      .tables?.length > 0 && (
                       <div className="source-detail-section">
                         <div className="section-label">
                           TABLES
@@ -1501,18 +1578,12 @@ function App() {
 
                         <div className="source-tag-list">
                           {selectedSource.details.tables.map(
-                            (
-                              table
-                            ) => (
+                            (table) => (
                               <span
                                 className="source-tag"
-                                key={String(
-                                  table
-                                )}
+                                key={String(table)}
                               >
-                                {String(
-                                  table
-                                )}
+                                {String(table)}
                               </span>
                             )
                           )}
@@ -1521,8 +1592,7 @@ function App() {
                     )}
 
                     {selectedSource.details
-                      .entities?.length >
-                      0 && (
+                      .entities?.length > 0 && (
                       <div className="source-detail-section">
                         <div className="section-label">
                           ENTITIES
@@ -1530,18 +1600,12 @@ function App() {
 
                         <div className="source-tag-list">
                           {selectedSource.details.entities.map(
-                            (
-                              entity
-                            ) => (
+                            (entity) => (
                               <span
                                 className="source-tag"
-                                key={String(
-                                  entity
-                                )}
+                                key={String(entity)}
                               >
-                                {String(
-                                  entity
-                                )}
+                                {String(entity)}
                               </span>
                             )
                           )}
@@ -1550,8 +1614,7 @@ function App() {
                     )}
 
                     {selectedSource.details
-                      .columns?.length >
-                      0 && (
+                      .columns?.length > 0 && (
                       <div className="source-detail-section">
                         <div className="section-label">
                           COLUMNS USED
@@ -1559,18 +1622,12 @@ function App() {
 
                         <div className="source-column-list">
                           {selectedSource.details.columns.map(
-                            (
-                              column
-                            ) => (
+                            (column) => (
                               <span
                                 className="source-column"
-                                key={String(
-                                  column
-                                )}
+                                key={String(column)}
                               >
-                                {String(
-                                  column
-                                )}
+                                {String(column)}
                               </span>
                             )
                           )}
@@ -1578,8 +1635,7 @@ function App() {
                       </div>
                     )}
 
-                    {selectedSource.details
-                      .query && (
+                    {selectedSource.details.query && (
                       <div className="source-detail-section">
                         <div className="section-label">
                           SQL QUERY
@@ -1587,28 +1643,24 @@ function App() {
 
                         <pre className="source-query">
                           {
-                            selectedSource
-                              .details
+                            selectedSource.details
                               .query
                           }
                         </pre>
                       </div>
                     )}
 
-                    {typeof selectedSource
-                      .details
+                    {typeof selectedSource.details
                       .row_count ===
                       "number" && (
                       <div className="source-detail-section">
                         <div className="section-label">
-                          ROWS
-                          RETRIEVED
+                          ROWS RETRIEVED
                         </div>
 
                         <div className="source-detail-value">
                           {
-                            selectedSource
-                              .details
+                            selectedSource.details
                               .row_count
                           }
                         </div>
@@ -1624,28 +1676,24 @@ function App() {
 
                         <div className="source-detail-value">
                           {
-                            selectedSource
-                              .details
+                            selectedSource.details
                               .resource
                           }
                         </div>
                       </div>
                     )}
 
-                    {typeof selectedSource
-                      .details
+                    {typeof selectedSource.details
                       .event_count ===
                       "number" && (
                       <div className="source-detail-section">
                         <div className="section-label">
-                          EVENTS
-                          RETRIEVED
+                          EVENTS RETRIEVED
                         </div>
 
                         <div className="source-detail-value">
                           {
-                            selectedSource
-                              .details
+                            selectedSource.details
                               .event_count
                           }
                         </div>
@@ -1661,8 +1709,7 @@ function App() {
                         </div>
 
                         <div className="source-detail-value">
-                          {selectedSource
-                            .details
+                          {selectedSource.details
                             .truncated
                             ? "Results truncated"
                             : "Complete result set"}
@@ -1672,11 +1719,8 @@ function App() {
                   </>
                 ) : (
                   <div className="source-empty-state">
-                    No detailed
-                    retrieval
-                    information is
-                    available for
-                    this source.
+                    No detailed retrieval information
+                    is available for this source.
                   </div>
                 )}
               </div>
@@ -1689,4 +1733,3 @@ function App() {
 }
 
 export default App;
-

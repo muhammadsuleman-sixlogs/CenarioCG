@@ -1,5 +1,6 @@
 import os
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -12,12 +13,13 @@ from auth.authentication import (
 )
 
 
-app = FastAPI(title="AI Context Layer API")
+load_dotenv()
 
 
-# ---------------------------------------------------------
-# CORS
-# ---------------------------------------------------------
+app = FastAPI(
+    title="AI Context Layer API"
+)
+
 
 allow_origins_raw = os.getenv(
     "ALLOW_ORIGINS",
@@ -40,10 +42,6 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------
-# Authentication middleware
-# ---------------------------------------------------------
-
 PUBLIC_PATHS = {
     "/",
     "/api/health",
@@ -53,7 +51,10 @@ PUBLIC_PATHS = {
 
 
 @app.middleware("http")
-async def authentication_middleware(request: Request, call_next):
+async def authentication_middleware(
+    request: Request,
+    call_next,
+):
     if request.method == "OPTIONS":
         return await call_next(request)
 
@@ -67,27 +68,38 @@ async def authentication_middleware(request: Request, call_next):
             if hasattr(exc, "status_code"):
                 return JSONResponse(
                     status_code=exc.status_code,
-                    content={"detail": exc.detail},
+                    content={
+                        "detail": exc.detail
+                    },
                 )
 
             return JSONResponse(
                 status_code=401,
-                content={"detail": "Authentication required."},
+                content={
+                    "detail": "Authentication required."
+                },
             )
 
     return await call_next(request)
 
 
-# ---------------------------------------------------------
-# Authentication routes
-# ---------------------------------------------------------
-
 @app.post("/api/auth/login")
 async def login(request: Request):
     body = await request.json()
 
-    username = str(body.get("username", ""))
-    password = str(body.get("password", ""))
+    username = str(
+        body.get(
+            "username",
+            "",
+        )
+    )
+
+    password = str(
+        body.get(
+            "password",
+            "",
+        )
+    )
 
     response = JSONResponse(
         content={
@@ -123,10 +135,6 @@ async def logout():
 
     return response
 
-
-# ---------------------------------------------------------
-# API routes
-# ---------------------------------------------------------
 
 app.include_router(
     chat_router,

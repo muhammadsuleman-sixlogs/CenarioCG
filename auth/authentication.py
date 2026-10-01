@@ -5,15 +5,15 @@ import json
 import os
 import time
 
-from fastapi import HTTPException, Request, status
-from fastapi.responses import Response
 from dotenv import load_dotenv
+from fastapi import HTTPException, Request, Response, status
+
 
 load_dotenv()
 
 
 SESSION_COOKIE_NAME = "cenariocg_session"
-SESSION_MAX_AGE = 60 * 60 * 8  # 8 hours
+SESSION_MAX_AGE = 60 * 60 * 8
 
 
 def _get_auth_config():
@@ -31,13 +31,11 @@ def _get_auth_config():
 
 
 def _sign_payload(payload: str, secret: str) -> str:
-    signature = hmac.new(
+    return hmac.new(
         secret.encode("utf-8"),
         payload.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-
-    return signature
 
 
 def create_session(username: str) -> str:
@@ -49,10 +47,16 @@ def create_session(username: str) -> str:
     }
 
     payload = base64.urlsafe_b64encode(
-        json.dumps(payload_data, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            payload_data,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).decode("utf-8")
 
-    signature = _sign_payload(payload, secret)
+    signature = _sign_payload(
+        payload,
+        secret,
+    )
 
     return f"{payload}.{signature}"
 
@@ -69,9 +73,15 @@ def validate_session(session: str | None) -> bool:
     try:
         _, _, secret = _get_auth_config()
 
-        expected_signature = _sign_payload(payload, secret)
+        expected_signature = _sign_payload(
+            payload,
+            secret,
+        )
 
-        if not hmac.compare_digest(signature, expected_signature):
+        if not hmac.compare_digest(
+            signature,
+            expected_signature,
+        ):
             return False
 
         decoded = base64.urlsafe_b64decode(
@@ -80,7 +90,12 @@ def validate_session(session: str | None) -> bool:
 
         data = json.loads(decoded)
 
-        expires_at = int(data.get("expires_at", 0))
+        expires_at = int(
+            data.get(
+                "expires_at",
+                0,
+            )
+        )
 
         if expires_at <= int(time.time()):
             return False
@@ -91,8 +106,16 @@ def validate_session(session: str | None) -> bool:
         return False
 
 
+def get_session_from_request(
+    request: Request,
+) -> str | None:
+    return request.cookies.get(
+        SESSION_COOKIE_NAME
+    )
+
+
 def authenticate_request(request: Request):
-    session = request.cookies.get(SESSION_COOKIE_NAME)
+    session = get_session_from_request(request)
 
     if not validate_session(session):
         raise HTTPException(
@@ -101,8 +124,14 @@ def authenticate_request(request: Request):
         )
 
 
-def login_user(username: str, password: str, response: Response):
-    configured_username, configured_password, _ = _get_auth_config()
+def login_user(
+    username: str,
+    password: str,
+    response: Response,
+):
+    configured_username, configured_password, _ = (
+        _get_auth_config()
+    )
 
     valid_username = hmac.compare_digest(
         username,
@@ -122,19 +151,34 @@ def login_user(username: str, password: str, response: Response):
 
     session = create_session(username)
 
+    cookie_secure = (
+        os.getenv(
+            "COOKIE_SECURE",
+            "true",
+        ).strip().lower()
+        == "true"
+    )
+
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session,
         max_age=SESSION_MAX_AGE,
         httponly=True,
-        secure=True,
+        secure=cookie_secure,
         samesite="none",
         path="/",
     )
 
 
 def logout_user(response: Response):
+    cookie_secure = (
+        os.getenv("COOKIE_SECURE", "true").strip().lower() == "true"
+    )
+
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path="/",
+        secure=cookie_secure,
+        httponly=True,
+        samesite="none",
     )
