@@ -1,32 +1,107 @@
-import json
+from __future__ import annotations
 
+from collections import deque
+from copy import deepcopy
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from context.context_store import load_context
 from database.readonly_guard import validate_read_only_query
-from llm.openai_client import (
-    OPENAI_MODEL,
-    get_openai_client,
-)
 from retrieval.sql_validator import validate_sql_syntax
-from security.sensitive_data_policy import (
-    sanitize_schema_context,
-)
+from security.sensitive_data_policy import sanitize_schema_context
 
 
 class SQLGenerator:
     """
-    Generate read-only SQL dynamically from a validated retrieval contract.
+    Deterministic PostgreSQL SQL compiler.
 
-    No company table or column names are hardcoded.
+    The semantic interpretation of the user's question has already happened
+    in QuestionPlanner.
+
+    This class decides HOW to execute that validated intent:
+
+        RetrievalContract
+            ->
+        schema-grounded SQL
+            ->
+        read-only validation
+
+    It does not:
+        - call an LLM
+        - reinterpret the question
+        - invent tables
+        - invent columns
+        - invent relationships
+        - join different PostgreSQL sources
+        - store runtime values
+        - modify PostgreSQL
+
+    PostgreSQL remains strictly READ-ONLY.
     """
+
+    ALLOWED_OPERATORS = {
+        "=",
+        "!=",
+        "<>",
+        ">",
+        ">=",
+        "<",
+        "<=",
+        "in",
+        "not_in",
+        "contains",
+        "starts_with",
+        "ends_with",
+        "is_null",
+        "is_not_null",
+    }
+
+    OPERATOR_ALIASES = {
+        "eq": "=",
+        "equals": "=",
+        "==": "=",
+        "neq": "!=",
+        "not_equals": "!=",
+        "gt": ">",
+        "gte": ">=",
+        "lt": "<",
+        "lte": "<=",
+    }
+
+    AGGREGATE_OPERATIONS = {
+        "count",
+        "sum",
+        "average",
+        "avg",
+        "mean",
+        "minimum",
+        "min",
+        "maximum",
+        "max",
+    }
+
+    AGGREGATE_ALIASES = {
+        "avg": "average",
+        "mean": "average",
+        "min": "minimum",
+        "max": "maximum",
+    }
+
+    SORT_DIRECTIONS = {
+        "asc",
+        "desc",
+    }
 
     def __init__(
         self,
         context: dict[str, Any] | None = None,
         source_id: str = "db1",
     ):
-        if not isinstance(source_id, str) or not source_id.strip():
+        if (
+            not isinstance(source_id, str)
+            or not source_id.strip()
+        ):
             raise ValueError(
                 "source_id must be a non-empty string."
             )
@@ -36,50 +111,405 @@ class SQLGenerator:
         self.context = (
             context
             if context is not None
-            else load_context(source_id=self.source_id)
+            else load_context(
+                source_id=self.source_id
+            )
         )
 
-        self.client = get_openai_client()
+        if (
+            not isinstance(self.context, dict)
+            or not self.context
+        ):
+            raise ValueError(
+                f"No Context Layer is available for "
+                f"PostgreSQL source '{self.source_id}'."
+            )
 
-    def _build_schema_context(self) -> dict[str, Any]:
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def generate(
+        self,
+        contract: dict[str, Any],
+        source_id: str | None = None,
+        runtime_bindings: dict[str, Any] | None = None,
+    ) -> str:
         """
-        Build the schema information available to the SQL generator.
+        Compile a validated RetrievalContract into one read-only SQL query.
 
-        Sensitive/credential fields are removed before this schema
-        is supplied to the LLM.
+        Runtime values are never embedded into the SQL string.
 
-        The original Context Layer is not modified.
+        Runtime binding placeholders are represented with PostgreSQL
+        parameter markers and their actual values are handled by the
+        execution layer.
         """
-        tables = {}
 
-        for table_name, table_info in self.context.get(
-            "tables",
-            {},
-        ).items():
-            if not isinstance(table_info, dict):
+        self._validate_contract(contract)
+
+        active_source_id = self._resolve_source_id(
+            source_id=source_id,
+            contract=contract,
+        )
+
+        if active_source_id != self.source_id:
+            raise ValueError(
+                "SQLGenerator source mismatch: "
+                f"generator is bound to '{self.source_id}', "
+                f"but execution requested '{active_source_id}'."
+            )
+
+        self._validate_contract_source(
+            contract=contract,
+            active_source_id=active_source_id,
+        )
+
+        bindings = self._normalize_runtime_bindings(
+            runtime_bindings
+        )
+
+        schema_context = self._build_schema_context()
+
+        sql = self._compile_query(
+            contract=contract,
+            schema_context=schema_context,
+            runtime_bindings=bindings,
+        )
+
+        sql = self._normalize_sql(sql)
+
+        validate_read_only_query(sql)
+        validate_sql_syntax(sql)
+
+        return sql
+
+    def repair(
+        self,
+        query: str,
+        database_error: str,
+        contract: dict[str, Any],
+        source_id: str | None = None,
+        runtime_bindings: dict[str, Any] | None = None,
+    ) -> str:
+        """
+        Deterministic compatibility method.
+
+        The previous implementation sent the failed query and database error
+        to an LLM. That created a second semantic authority.
+
+        The optimized architecture does not do that.
+
+        Instead, the contract is compiled again deterministically. Known SQL
+        classes such as aggregation/GROUP BY and runtime bindings are already
+        handled by the compiler itself.
+
+        If deterministic recompilation still fails, the caller receives the
+        actual error instead of receiving an LLM-invented repair.
+        """
+
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError(
+                "SQL query cannot be empty."
+            )
+
+        if (
+            not isinstance(database_error, str)
+            or not database_error.strip()
+        ):
+            raise ValueError(
+                "Database error cannot be empty."
+            )
+
+        self._validate_contract(contract)
+
+        return self.generate(
+            contract=contract,
+            source_id=source_id,
+            runtime_bindings=runtime_bindings,
+        )
+
+    # ------------------------------------------------------------------
+    # Contract validation
+    # ------------------------------------------------------------------
+
+    def _validate_contract(
+        self,
+        contract: dict[str, Any],
+    ) -> None:
+        if not isinstance(contract, dict):
+            raise ValueError(
+                "Retrieval contract must be a dictionary."
+            )
+
+        question = contract.get("question")
+
+        if question is not None and (
+            not isinstance(question, str)
+            or not question.strip()
+        ):
+            raise ValueError(
+                "Retrieval contract question must be a "
+                "non-empty string."
+            )
+
+        for field_name in (
+            "required_tables",
+            "required_columns",
+            "relationships",
+            "filters",
+            "operations",
+            "grouping",
+            "sorting",
+            "entities",
+            "requested_metrics",
+        ):
+            value = contract.get(field_name, [])
+
+            if value is None:
                 continue
 
-            columns = [
-                {
-                    "name": column.get("name"),
-                    "data_type": (
-                        column.get("data_type")
-                        if column.get("data_type") is not None
-                        else column.get("type")
-                    ),
-                }
-                for column in table_info.get(
-                    "columns",
-                    [],
+            if not isinstance(value, list):
+                raise ValueError(
+                    f"Retrieval contract {field_name} must be a list."
                 )
-                if isinstance(column, dict)
-            ]
 
-            tables[table_name] = {
+        limit = contract.get("limit")
+
+        if limit is not None:
+            if (
+                isinstance(limit, bool)
+                or not isinstance(limit, int)
+            ):
+                raise ValueError(
+                    "Retrieval contract limit must be an integer."
+                )
+
+            if limit < 1:
+                raise ValueError(
+                    "Retrieval contract limit must be greater than 0."
+                )
+
+        data_sources = contract.get(
+            "data_sources",
+            ["postgresql"],
+        )
+
+        if not isinstance(data_sources, list):
+            raise ValueError(
+                "Retrieval contract data_sources must be a list."
+            )
+
+        invalid = [
+            value
+            for value in data_sources
+            if value not in {
+                "postgresql",
+                "security_logs",
+            }
+        ]
+
+        if invalid:
+            raise ValueError(
+                "Unsupported data source(s): "
+                f"{invalid}"
+            )
+
+        postgresql_sources = contract.get(
+            "postgresql_sources",
+            [],
+        )
+
+        if not isinstance(postgresql_sources, list):
+            raise ValueError(
+                "Retrieval contract postgresql_sources "
+                "must be a list."
+            )
+
+        query_shape = contract.get(
+            "query_shape",
+            "auto",
+        )
+
+        if not isinstance(query_shape, str):
+            raise ValueError(
+                "contract query_shape must be a string."
+            )
+
+        if query_shape.strip().lower() not in {
+            "auto",
+            "direct",
+            "cte",
+            "subquery",
+        }:
+            raise ValueError(
+                "Unsupported deterministic query_shape: "
+                f"{query_shape!r}"
+            )
+
+    def _resolve_source_id(
+        self,
+        source_id: str | None,
+        contract: dict[str, Any],
+    ) -> str:
+        if source_id is not None:
+            if (
+                not isinstance(source_id, str)
+                or not source_id.strip()
+            ):
+                raise ValueError(
+                    "source_id must be a non-empty string."
+                )
+
+            return source_id.strip().lower()
+
+        contract_source = contract.get(
+            "source_id"
+        )
+
+        if isinstance(
+            contract_source,
+            str,
+        ) and contract_source.strip():
+            return contract_source.strip().lower()
+
+        sources = contract.get(
+            "postgresql_sources",
+            [],
+        )
+
+        normalized = [
+            value.strip().lower()
+            for value in sources
+            if isinstance(value, str)
+            and value.strip()
+        ]
+
+        if len(normalized) == 1:
+            return normalized[0]
+
+        return self.source_id
+
+    def _validate_contract_source(
+        self,
+        contract: dict[str, Any],
+        active_source_id: str,
+    ) -> None:
+        contract_sources = contract.get(
+            "postgresql_sources",
+            [],
+        )
+
+        normalized = {
+            value.strip().lower()
+            for value in contract_sources
+            if isinstance(value, str)
+            and value.strip()
+        }
+
+        if normalized and (
+            active_source_id not in normalized
+        ):
+            raise ValueError(
+                "Retrieval contract does not authorize PostgreSQL "
+                f"source '{active_source_id}'."
+            )
+
+        declared_source = contract.get(
+            "source_id"
+        )
+
+        if (
+            isinstance(declared_source, str)
+            and declared_source.strip()
+            and declared_source.strip().lower()
+            != active_source_id
+        ):
+            raise ValueError(
+                "Retrieval contract source mismatch: "
+                f"contract specifies '{declared_source.strip().lower()}', "
+                f"but execution requested '{active_source_id}'."
+            )
+
+    # ------------------------------------------------------------------
+    # Schema
+    # ------------------------------------------------------------------
+
+    def _build_schema_context(
+        self,
+    ) -> dict[str, Any]:
+        """
+        Return sanitized schema metadata.
+
+        No schema metadata is generated or inferred here.
+        """
+
+        tables: dict[str, Any] = {}
+
+        raw_tables = self.context.get(
+            "tables",
+            {},
+        )
+
+        if not isinstance(
+            raw_tables,
+            dict,
+        ):
+            raise ValueError(
+                "Context Layer tables must be a dictionary."
+            )
+
+        for table_name, table_info in raw_tables.items():
+            if not isinstance(
+                table_info,
+                dict,
+            ):
+                continue
+
+            raw_columns = table_info.get(
+                "columns",
+                [],
+            )
+
+            columns: list[dict[str, Any]] = []
+
+            if isinstance(
+                raw_columns,
+                list,
+            ):
+                for column in raw_columns:
+                    if not isinstance(
+                        column,
+                        dict,
+                    ):
+                        continue
+
+                    name = column.get(
+                        "name"
+                    )
+
+                    if not name:
+                        continue
+
+                    columns.append(
+                        {
+                            "name": str(name),
+                            "data_type": (
+                                column.get("data_type")
+                                if column.get("data_type")
+                                is not None
+                                else column.get("type")
+                            ),
+                        }
+                    )
+
+            tables[str(table_name)] = {
                 "columns": columns,
-                "primary_keys": table_info.get(
-                    "primary_keys",
-                    [],
+                "primary_keys": list(
+                    table_info.get(
+                        "primary_keys",
+                        [],
+                    )
+                    or []
                 ),
             }
 
@@ -96,541 +526,2023 @@ class SQLGenerator:
             ),
         }
 
-        # Defense in depth:
-        # remove sensitive fields before the schema reaches the LLM.
-        return sanitize_schema_context(schema_context)
+        return sanitize_schema_context(
+            schema_context
+        )
 
-    def generate(
+    def _tables(
         self,
-        contract: dict[str, Any],
-        source_id: str | None = None,
-    ) -> str:
-        if not isinstance(contract, dict):
+    ) -> dict[str, dict[str, Any]]:
+        context = self._build_schema_context()
+
+        tables = context.get(
+            "tables",
+            {},
+        )
+
+        if not isinstance(
+            tables,
+            dict,
+        ):
             raise ValueError(
-                "Retrieval contract must be a dictionary."
+                "Context Layer tables must be a dictionary."
             )
 
-        if source_id is not None:
-            if not isinstance(source_id, str) or not source_id.strip():
-                raise ValueError(
-                    "source_id must be a non-empty string."
-                )
+        return tables
 
-            active_source_id = source_id.strip().lower()
+    def _table_lookup(
+        self,
+    ) -> dict[str, str]:
+        return {
+            table_name.lower(): table_name
+            for table_name in self._tables()
+        }
 
-            if active_source_id != self.source_id:
-                raise ValueError(
-                    "SQLGenerator source mismatch: "
-                    f"generator is configured for '{self.source_id}' "
-                    f"but retrieval requested '{active_source_id}'."
-                )
-        else:
-            active_source_id = self.source_id
+    def _resolve_table(
+        self,
+        table_name: str,
+    ) -> str:
+        if (
+            not isinstance(table_name, str)
+            or not table_name.strip()
+        ):
+            raise ValueError(
+                "Table name must be a non-empty string."
+            )
 
-        contract_sources = contract.get(
-            "postgresql_sources",
+        requested = table_name.strip()
+
+        lookup = self._table_lookup()
+
+        actual = lookup.get(
+            requested.lower()
+        )
+
+        if actual is None:
+            raise ValueError(
+                "Table is not present in the discovered "
+                f"Context Layer: {requested!r}"
+            )
+
+        return actual
+
+    def _columns(
+        self,
+        table_name: str,
+    ) -> dict[str, dict[str, Any]]:
+        table = self._resolve_table(
+            table_name
+        )
+
+        table_info = self._tables().get(
+            table,
+            {},
+        )
+
+        result: dict[str, dict[str, Any]] = {}
+
+        for column in table_info.get(
+            "columns",
+            [],
+        ):
+            if not isinstance(
+                column,
+                dict,
+            ):
+                continue
+
+            name = column.get(
+                "name"
+            )
+
+            if not name:
+                continue
+
+            result[str(name).lower()] = column
+
+        return result
+
+    def _resolve_column(
+        self,
+        table_name: str,
+        column_name: str,
+    ) -> str:
+        actual_table = self._resolve_table(
+            table_name
+        )
+
+        if (
+            not isinstance(column_name, str)
+            or not column_name.strip()
+        ):
+            raise ValueError(
+                "Column name must be a non-empty string."
+            )
+
+        requested = column_name.strip()
+
+        columns = self._columns(
+            actual_table
+        )
+
+        column = columns.get(
+            requested.lower()
+        )
+
+        if column is None:
+            raise ValueError(
+                "Column is not present in the discovered "
+                f"Context Layer: "
+                f"{actual_table}.{requested}"
+            )
+
+        return str(
+            column.get(
+                "name",
+                requested,
+            )
+        )
+
+    def _column_metadata(
+        self,
+        table_name: str,
+        column_name: str,
+    ) -> dict[str, Any]:
+        actual_column = self._resolve_column(
+            table_name,
+            column_name,
+        )
+
+        return self._columns(
+            table_name
+        )[actual_column.lower()]
+
+    # ------------------------------------------------------------------
+    # Contract compilation
+    # ------------------------------------------------------------------
+
+    def _compile_query(
+        self,
+        contract: dict[str, Any],
+        schema_context: dict[str, Any],
+        runtime_bindings: list[dict[str, Any]],
+    ) -> str:
+        del schema_context
+
+        required_tables = self._normalize_required_tables(
+            contract
+        )
+
+        if not required_tables:
+            raise ValueError(
+                "Retrieval contract requires at least one table."
+            )
+
+        selected_tables = self._build_joined_table_set(
+            required_tables,
+            contract.get(
+                "relationships",
+                [],
+            ),
+        )
+
+        where_clauses = self._compile_filters(
+            contract.get(
+                "filters",
+                [],
+            ),
+            selected_tables,
+        )
+
+        where_clauses.extend(
+            self._compile_runtime_bindings(
+                runtime_bindings,
+                selected_tables,
+            )
+        )
+
+        grouping = self._compile_grouping(
+            contract.get(
+                "grouping",
+                [],
+            ),
+            selected_tables,
+        )
+
+        sorting = self._compile_sorting(
+            contract.get(
+                "sorting",
+                [],
+            ),
+            selected_tables,
+        )
+
+        requested_metrics = contract.get(
+            "requested_metrics",
             [],
         )
 
-        if not isinstance(contract_sources, list):
-            raise ValueError(
-                "Retrieval contract postgresql_sources must be a list."
-            )
-
-        normalized_contract_sources = {
+        operations = [
             str(value).strip().lower()
-            for value in contract_sources
-            if isinstance(value, str) and value.strip()
-        }
+            for value in contract.get(
+                "operations",
+                [],
+            )
+            if isinstance(value, str)
+            and value.strip()
+        ]
 
-        if normalized_contract_sources:
-            if active_source_id not in normalized_contract_sources:
-                raise ValueError(
-                    "Retrieval contract does not authorize PostgreSQL "
-                    f"source '{active_source_id}'."
-                )
-
-        schema_context = self._build_schema_context()
-
-        prompt = f"""
-You are a PostgreSQL SQL generation system.
-
-Your task is to translate the supplied Retrieval Contract
-into exactly ONE efficient, read-only PostgreSQL SQL query.
-
-POSTGRESQL SOURCE:
-
-The SQL query will execute against this PostgreSQL source:
-
-{active_source_id}
-
-Use ONLY the tables, columns, relationships, and business relationships
-belonging to this PostgreSQL source.
-
-Do not combine schemas from another PostgreSQL source.
-
-Do not invent cross-source joins.
-
-If the retrieval requires another PostgreSQL source, that source must be
-retrieved separately by the calling pipeline.
-
-IMPORTANT SAFETY RULES:
-
-1. Generate ONLY SELECT or WITH SQL.
-2. Never generate INSERT.
-3. Never generate UPDATE.
-4. Never generate DELETE.
-5. Never generate DROP.
-6. Never generate ALTER.
-7. Never generate CREATE.
-8. Never generate TRUNCATE.
-9. Never generate MERGE.
-10. Never generate CALL.
-11. Never generate DO.
-12. Never generate GRANT or REVOKE.
-13. Never generate LOCK.
-14. Never generate transaction-control statements.
-15. Never generate FOR UPDATE, FOR SHARE, or similar locking clauses.
-16. Generate exactly ONE SQL statement.
-17. Use only tables and columns present in the Context Layer.
-18. Do not invent schema information.
-19. Do not modify database data or schema.
-
-RETRIEVAL REQUIREMENTS:
-
-20. Treat the Retrieval Contract as the authoritative retrieval instruction.
-21. Respect the requested operations.
-22. Respect the requested filters.
-23. Respect the requested grouping.
-24. Respect the requested sorting.
-25. Respect the requested limit.
-26. If a positive limit is provided, apply it to the final result set.
-27. If sorting is provided, apply the requested sorting before applying the limit.
-28. Do not retrieve large amounts of unnecessary data when the contract
-    requests a limited result.
-29. If the contract requests aggregation such as count, sum, average,
-    minimum, or maximum, perform that operation in SQL rather than
-    retrieving all rows for the LLM.
-
-MULTI-ENTITY SQL GENERATION:
-
-30. Treat the Retrieval Contract as authoritative.
-31. When multiple required tables are present, determine the complete
-    join path from the supplied Context Layer relationships.
-32. Every JOIN must be supported by an explicitly discovered relationship.
-33. Do not invent JOIN conditions from column-name similarity.
-34. Do not assume primary-key-to-primary-key joins.
-35. Use the discovered source_table, source_column, target_table, and
-    target_column relationship metadata to construct joins.
-36. When the requested answer requires multiple hops, include every
-    necessary intermediate table.
-37. Do not omit an intermediate table merely because it is not explicitly
-    requested in the final output.
-38. Select only the columns required by the Retrieval Contract and the
-    minimum additional columns needed to establish the joins.
-39. When multiple entity types are requested, include identifying/display
-    columns for each requested entity when they exist in the schema.
-40. Preserve entity identity throughout the query.
-41. Avoid accidental many-to-many multiplication. Before aggregation,
-    verify that the selected join path represents the requested
-    relationship.
-42. When aggregation follows multiple joins, determine which entity level
-    the aggregate belongs to and group accordingly.
-43. Apply requested filters at the correct entity level.
-44. If the user asks for pending tickets, filter the ticket status before
-    counting tickets.
-45. If the user asks for each company and each project, GROUP BY all
-    required company/project identifying expressions.
-46. Do not use LIMIT unless the Retrieval Contract specifies a valid limit.
-47. Never use LIMIT to arbitrarily reduce "each", "all", or "every"
-    results.
-48. For ranking questions, apply LIMIT only after the required aggregation
-    and ordering have been performed.
-49. Never change the user's requested entity level merely to simplify SQL.
-
-GROUP BY VALIDATION:
-
-50. When using aggregate functions such as COUNT, SUM, AVG, MIN, or MAX,
-    inspect every expression in the SELECT list.
-51. Every SELECT expression that is not an aggregate expression must be
-    included in the GROUP BY clause, unless PostgreSQL can legally derive
-    it from grouped expressions according to PostgreSQL grouping rules.
-52. Do not select a non-aggregated column while grouping only by another
-    column from the same table.
-53. If the query selects identifying fields from multiple entities,
-    include the required identifying expressions in GROUP BY.
-54. Do not group only by one entity when the SELECT output contains
-    identifying fields from another entity.
-55. Ensure ORDER BY expressions are also valid for the aggregation query.
-56. Before returning an aggregated query, compare the final SELECT list
-    against the GROUP BY clause and ensure that every required
-    non-aggregated expression is grouped.
-57. If the query selects multiple non-aggregated columns, include all
-    required columns or expressions in GROUP BY.
-58. Do not remove selected columns merely to avoid a GROUP BY error.
-    Preserve the Retrieval Contract and include the required grouping.
-59. Apply these GROUP BY rules dynamically using the discovered schema
-    and Retrieval Contract. Do not hardcode table names or column names.
-
-JOIN PATH VALIDATION:
-
-60. Before returning the query, list the tables used in FROM and JOIN.
-61. For every JOIN, verify that the Context Layer contains a relationship
-    connecting the two participating tables.
-62. For a multi-hop query, verify that all intermediate tables form a
-    continuous discovered relationship path.
-63. Verify that every JOIN condition uses the actual discovered relationship
-    columns.
-64. Verify that no unrelated table was introduced.
-65. Verify that no required table was omitted.
-66. Verify that the final SELECT fields can be traced to the requested
-    entities.
-67. Verify that aggregation occurs at the requested entity level.
-68. Verify that filters apply to the correct table/entity.
-69. Verify that LIMIT does not truncate an aggregation or an "each/all"
-    result.
-70. If any of these checks fail, correct the SQL before returning it.
-
-GENERAL SQL RULES:
-
-71. If the contract requests ranking or "most recent"/"latest"/"top"
-    results and provides a limit, return only that number of results.
-72. Do not add arbitrary tables or columns that are not required by the
-    retrieval contract unless they are necessary to perform a validated
-    relationship, filter, grouping, sorting, or operation.
-73. Prefer SQL-side filtering, grouping, aggregation, ordering, and limiting
-    instead of retrieving unnecessary rows and processing them in the LLM.
-74. When filtering by an entity identifier, choose a column whose discovered
-    schema type is compatible with the supplied identifier value.
-75. Do not compare a textual identifier with a UUID column.
-76. If the supplied entity identifier is textual and the schema contains a
-    textual identifier/reference column for that entity, use that column.
-77. Never cast an incompatible identifier into another type merely to make
-    the comparison execute.
-78. Use the entity information and evidence supplied in the Retrieval Contract
-    together with the Context Layer schema to determine the correct identifier
-    column.
-79. When a retrieval filter refers to a natural-language categorical or text
-    value, do not assume the exact database casing.
-80. For case-insensitive equality against a textual database column, use a
-    case-insensitive SQL comparison such as LOWER(column) = LOWER('value').
-81. Do not hardcode known database values. Resolve the requested value from
-    the supplied filter semantics and discovered schema.
-82. Preserve exact equality semantics when the filter requires exact matching;
-    only normalize casing when the filter represents a natural-language
-    categorical value.
-83. When using UNION or UNION ALL, corresponding output columns at the
-    same ordinal position in every SELECT branch MUST have compatible
-    PostgreSQL data types.
-84. Before generating a UNION or UNION ALL query, inspect the discovered
-    data types of every corresponding output expression across ALL branches.
-85. If a projected output field such as record_id has different native
-    types across UNION branches, explicitly normalize that field to text
-    in EVERY UNION branch, including branches where the value is NULL.
-86. For example, if one branch returns a UUID record_id and another branch
-    returns NULL, use:
-        CAST(record_id AS text) AS record_id
-    and:
-        CAST(NULL AS text) AS record_id
-    so that every UNION branch returns text for record_id.
-87. Apply this type normalization consistently to ALL corresponding UNION
-    output columns that have incompatible types, not only record_id.
-88. Do not use output-type normalization for filtering, joining, grouping,
-    or sorting when the native database type is required. Normalize only
-    the projected output expressions needed for UNION compatibility.
-89. Never assume that casting only one UNION branch is sufficient.
-    Every corresponding column across every UNION branch must resolve to
-    the same or compatible PostgreSQL type.
-
-The Retrieval Contract has already been validated.
-
-Return ONLY the SQL query.
-
-Do not use markdown.
-
-Do not use ```sql.
-
-Do not provide explanations.
-
-CONTEXT LAYER:
-{json.dumps(schema_context, indent=2, default=str)}
-
-RETRIEVAL CONTRACT:
-{json.dumps(contract, indent=2, default=str)}
-"""
-
-        response = self.client.responses.create(
-            model=OPENAI_MODEL,
-            input=prompt,
+        has_metrics = bool(
+            requested_metrics
+        ) or any(
+            operation in self.AGGREGATE_OPERATIONS
+            for operation in operations
         )
 
-        query = response.output_text.strip()
+        if has_metrics:
+            select_sql, aggregate_query = (
+                self._compile_aggregate_select(
+                    contract=contract,
+                    selected_tables=selected_tables,
+                    grouping=grouping,
+                    requested_metrics=requested_metrics,
+                    operations=operations,
+                )
+            )
+        else:
+            select_sql = self._compile_projection(
+                contract=contract,
+                selected_tables=selected_tables,
+            )
+            aggregate_query = False
 
-        if not query:
-            raise ValueError(
-                "SQL generator returned an empty query."
+        from_sql = self._compile_from_and_joins(
+            required_tables=required_tables,
+            relationships=contract.get(
+                "relationships",
+                [],
+            ),
+        )
+
+        distinct = self._uses_distinct(
+            contract
+        )
+
+        select_keyword = (
+            "SELECT DISTINCT"
+            if distinct
+            else "SELECT"
+        )
+
+        query_parts = [
+            f"{select_keyword} {select_sql}",
+            f"FROM {from_sql}",
+        ]
+
+        if where_clauses:
+            query_parts.append(
+                "WHERE " + " AND ".join(
+                    f"({value})"
+                    for value in where_clauses
+                )
             )
 
-        # Remove accidental markdown fences if the model
-        # returns them despite the instruction.
-        if query.startswith("```"):
-            lines = query.splitlines()
+        if grouping:
+            query_parts.append(
+                "GROUP BY "
+                + ", ".join(grouping)
+            )
+        elif aggregate_query:
+            # Aggregate expressions without grouping require no GROUP BY.
+            pass
 
-            if lines and lines[0].strip().startswith("```"):
-                lines = lines[1:]
+        if sorting:
+            query_parts.append(
+                "ORDER BY "
+                + ", ".join(sorting)
+            )
 
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
+        limit = contract.get(
+            "limit"
+        )
 
-            query = "\n".join(lines).strip()
+        if limit is not None:
+            query_parts.append(
+                f"LIMIT {int(limit)}"
+            )
 
-        # Local safety validation BEFORE returning SQL.
-        validate_read_only_query(query)
-        validate_sql_syntax(query)
+        query = "\n".join(
+            query_parts
+        )
+
+        query_shape = str(
+            contract.get(
+                "query_shape",
+                "auto",
+            )
+            or "auto"
+        ).strip().lower()
+
+        if query_shape == "cte":
+            query = (
+                "WITH retrieval_result AS (\n"
+                + self._indent_sql(query)
+                + "\n)\n"
+                "SELECT *\n"
+                "FROM retrieval_result"
+            )
+
+        elif query_shape == "subquery":
+            query = (
+                "SELECT *\n"
+                "FROM (\n"
+                + self._indent_sql(query)
+                + "\n) AS retrieval_result"
+            )
 
         return query
 
-    def repair(
+    def _normalize_required_tables(
         self,
-        query: str,
-        database_error: str,
         contract: dict[str, Any],
-        source_id: str | None = None,
-    ) -> str:
-        """
-        Repair a generated read-only SQL query after PostgreSQL
-        reports a datatype or SQL execution problem.
-
-        The repair happens only at query-generation time.
-
-        No database schema or data is modified.
-        """
-        if not query or not query.strip():
-            raise ValueError(
-                "SQL query cannot be empty."
-            )
-
-        if not database_error or not database_error.strip():
-            raise ValueError(
-                "Database error cannot be empty."
-            )
-
-        if not isinstance(contract, dict):
-            raise ValueError(
-                "Retrieval contract must be a dictionary."
-            )
-
-        if source_id is not None:
-            if not isinstance(source_id, str) or not source_id.strip():
-                raise ValueError(
-                    "source_id must be a non-empty string."
-                )
-
-            active_source_id = source_id.strip().lower()
-
-            if active_source_id != self.source_id:
-                raise ValueError(
-                    "SQLGenerator source mismatch: "
-                    f"generator is configured for '{self.source_id}' "
-                    f"but repair requested '{active_source_id}'."
-                )
-        else:
-            active_source_id = self.source_id
-
-        contract_sources = contract.get(
-            "postgresql_sources",
+    ) -> list[str]:
+        raw = contract.get(
+            "required_tables",
             [],
         )
 
-        if not isinstance(contract_sources, list):
-            raise ValueError(
-                "Retrieval contract postgresql_sources must be a list."
-            )
+        normalized: list[str] = []
 
-        normalized_contract_sources = {
-            str(value).strip().lower()
-            for value in contract_sources
-            if isinstance(value, str) and value.strip()
-        }
-
-        if normalized_contract_sources:
-            if active_source_id not in normalized_contract_sources:
+        for value in raw:
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+            ):
                 raise ValueError(
-                    "Retrieval contract does not authorize PostgreSQL "
-                    f"source '{active_source_id}'."
+                    "required_tables must contain "
+                    "non-empty strings."
                 )
 
-        schema_context = self._build_schema_context()
-
-        prompt = f"""
-You are repairing a PostgreSQL SELECT query generated
-from a validated Retrieval Contract.
-
-The database rejected the generated query.
-
-Your task is to return ONE corrected, read-only PostgreSQL
-query that satisfies the same Retrieval Contract.
-
-POSTGRESQL SOURCE:
-
-The failed query was executed against:
-
-{active_source_id}
-
-Repair the query using ONLY the discovered schema belonging to this
-source.
-
-Do not introduce tables or columns from another PostgreSQL source.
-
-Do not create cross-source joins.
-
-IMPORTANT:
-
-1. Generate ONLY SELECT or WITH SQL.
-2. Never generate INSERT.
-3. Never generate UPDATE.
-4. Never generate DELETE.
-5. Never generate DROP.
-6. Never generate ALTER.
-7. Never generate CREATE.
-8. Never generate TRUNCATE.
-9. Never generate MERGE.
-10. Never generate CALL.
-11. Never generate DO.
-12. Never generate GRANT or REVOKE.
-13. Never generate LOCK.
-14. Never generate transaction-control statements.
-15. Never generate FOR UPDATE, FOR SHARE, or similar locking clauses.
-16. Generate exactly ONE SQL statement.
-17. Use only tables and columns present in the Context Layer.
-18. Do not invent schema information.
-19. Do not modify database data or schema.
-
-REPAIR REQUIREMENTS:
-
-20. Preserve the original Retrieval Contract.
-21. Fix the PostgreSQL error without changing the requested answer.
-22. Inspect the discovered PostgreSQL data types before repairing
-    type-related expressions.
-23. If the PostgreSQL error involves GROUP BY or aggregation:
-    - Inspect every expression in the SELECT list.
-    - Identify every non-aggregated SELECT expression.
-    - Ensure every required non-aggregated expression appears in GROUP BY.
-    - If multiple non-aggregated columns are selected, include all required
-      columns or expressions in GROUP BY.
-    - Preserve all requested aggregate calculations.
-    - Do not remove requested output columns merely to avoid the error.
-    - Do not hardcode table or column names.
-    - Use the supplied Context Layer schema and Retrieval Contract
-      to determine the correct grouping dynamically.
-24. Before returning the repaired query, validate the final SELECT list,
-    aggregate expressions, and GROUP BY clause together.
-25. If the error involves UNION or UNION ALL:
-    - Inspect EVERY SELECT branch.
-    - Compare EVERY corresponding output column by position.
-    - Ensure corresponding output expressions have compatible
-      PostgreSQL data types across ALL branches.
-26. If corresponding UNION output expressions have incompatible
-    PostgreSQL types, normalize the projected output values to one
-    compatible type across ALL affected branches.
-27. This normalization applies ONLY to SELECT projection/output
-    expressions.
-28. Do NOT change the database schema or database column types.
-29. For PostgreSQL enum types:
-    - If an enum value is UNIONed with text/varchar, it may be
-      explicitly cast to text.
-    - Apply the same output normalization to the corresponding
-      UNION branches.
-30. For UUID/text conflicts:
-    - If the projected output requires textual normalization,
-      explicitly cast the UUID to text.
-    - Apply the same normalization to corresponding branches.
-31. For other incompatible UNION types such as integer, bigint,
-    numeric, date, timestamp, text, varchar, UUID, or enum:
-    - Determine a compatible output representation.
-    - Apply the conversion consistently across ALL corresponding
-      UNION branches.
-32. If a branch returns NULL for a normalized output field,
-    explicitly cast NULL to the selected output type when necessary.
-33. Do NOT cast columns merely to make filtering or joining work.
-34. Preserve native database types for:
-    - WHERE conditions
-    - JOIN conditions
-    - GROUP BY
-    - ORDER BY
-    whenever required.
-35. Do not change the meaning of the Retrieval Contract.
-36. Do not add unnecessary tables or columns.
-37. Do not retrieve unnecessary rows.
-38. Preserve requested filtering, aggregation, grouping, sorting,
-    and limiting.
-39. If PostgreSQL identifies one problematic expression, repair it
-    AND inspect the corresponding expressions in every other UNION
-    branch for the same datatype incompatibility.
-40. Before returning the query, mentally verify every corresponding
-    UNION output column across every branch.
-41. The database must remain completely read-only.
-    The repair may ONLY modify the generated SQL query.
-42. Return exactly ONE valid read-only PostgreSQL query.
-
-ORIGINAL SQL:
-{query}
-
-POSTGRESQL ERROR:
-{database_error}
-
-CONTEXT LAYER:
-{json.dumps(schema_context, indent=2, default=str)}
-
-RETRIEVAL CONTRACT:
-{json.dumps(contract, indent=2, default=str)}
-
-Return ONLY the corrected SQL query.
-
-Do not use markdown.
-
-Do not use ```sql.
-
-Do not provide explanations.
-"""
-
-        response = self.client.responses.create(
-            model=OPENAI_MODEL,
-            input=prompt,
-        )
-
-        repaired_query = response.output_text.strip()
-
-        if not repaired_query:
-            raise ValueError(
-                "SQL repair returned an empty query."
+            normalized.append(
+                self._resolve_table(
+                    value
+                )
             )
 
-        # Remove accidental markdown fences.
-        if repaired_query.startswith("```"):
-            lines = repaired_query.splitlines()
+        return list(
+            dict.fromkeys(normalized)
+        )
 
-            if lines and lines[0].strip().startswith("```"):
-                lines = lines[1:]
+    # ------------------------------------------------------------------
+    # Relationship / JOIN compilation
+    # ------------------------------------------------------------------
 
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
+    def _normalize_relationship(
+        self,
+        relationship: Any,
+    ) -> dict[str, str] | None:
+        if not isinstance(
+            relationship,
+            dict,
+        ):
+            return None
 
-            repaired_query = "\n".join(lines).strip()
+        source_table = relationship.get(
+            "source_table"
+        )
+        source_column = relationship.get(
+            "source_column"
+        )
+        target_table = relationship.get(
+            "target_table"
+        )
+        target_column = relationship.get(
+            "target_column"
+        )
 
-        # VERY IMPORTANT:
-        # Validate repaired SQL before database execution.
-        validate_read_only_query(repaired_query)
-        validate_sql_syntax(repaired_query)
+        if not all(
+            isinstance(value, str)
+            and value.strip()
+            for value in (
+                source_table,
+                source_column,
+                target_table,
+                target_column,
+            )
+        ):
+            return None
 
-        return repaired_query
+        result = {
+            "source_table": self._resolve_table(
+                source_table
+            ),
+            "source_column": self._resolve_column(
+                source_table,
+                source_column,
+            ),
+            "target_table": self._resolve_table(
+                target_table
+            ),
+            "target_column": self._resolve_column(
+                target_table,
+                target_column,
+            ),
+        }
+
+        relationship_source = relationship.get(
+            "source_id"
+        )
+
+        if isinstance(
+            relationship_source,
+            str,
+        ) and relationship_source.strip():
+            result["source_id"] = (
+                relationship_source.strip().lower()
+            )
+
+        return result
+
+    def _normalized_relationships(
+        self,
+        relationships: Any,
+    ) -> list[dict[str, str]]:
+        if not isinstance(
+            relationships,
+            list,
+        ):
+            raise ValueError(
+                "relationships must be a list."
+            )
+
+        result: list[dict[str, str]] = []
+
+        for relationship in relationships:
+            normalized = self._normalize_relationship(
+                relationship
+            )
+
+            if normalized is not None:
+                result.append(
+                    normalized
+                )
+
+        return result
+
+    def _relationship_graph(
+        self,
+        relationships: list[dict[str, str]],
+    ) -> dict[str, list[tuple[str, dict[str, str]]]]:
+        graph: dict[
+            str,
+            list[
+                tuple[
+                    str,
+                    dict[str, str],
+                ]
+            ],
+        ] = {}
+
+        for relationship in relationships:
+            source_table = relationship[
+                "source_table"
+            ]
+            target_table = relationship[
+                "target_table"
+            ]
+
+            graph.setdefault(
+                source_table,
+                [],
+            ).append(
+                (
+                    target_table,
+                    relationship,
+                )
+            )
+
+            reverse = {
+                "source_table": target_table,
+                "source_column": relationship[
+                    "target_column"
+                ],
+                "target_table": source_table,
+                "target_column": relationship[
+                    "source_column"
+                ],
+            }
+
+            if "source_id" in relationship:
+                reverse["source_id"] = relationship[
+                    "source_id"
+                ]
+
+            graph.setdefault(
+                target_table,
+                [],
+            ).append(
+                (
+                    source_table,
+                    reverse,
+                )
+            )
+
+        return graph
+
+    def _build_joined_table_set(
+        self,
+        required_tables: list[str],
+        relationships: Any,
+    ) -> list[str]:
+        """
+        Verify that all required tables are connected through discovered
+        relationships.
+
+        Intermediate relationship tables are allowed.
+
+        No column-name similarity or implicit key matching is used.
+        """
+
+        if len(required_tables) <= 1:
+            return list(required_tables)
+
+        normalized_relationships = (
+            self._normalized_relationships(
+                relationships
+            )
+        )
+
+        graph = self._relationship_graph(
+            normalized_relationships
+        )
+
+        connected = {
+            required_tables[0]
+        }
+
+        joined_order = [
+            required_tables[0]
+        ]
+
+        remaining = set(
+            required_tables[1:]
+        )
+
+        while remaining:
+            path = self._find_path_from_connected_to_targets(
+                connected=connected,
+                targets=remaining,
+                graph=graph,
+            )
+
+            if path is None:
+                missing = sorted(
+                    remaining
+                )
+
+                raise ValueError(
+                    "No complete discovered relationship path exists "
+                    "for required tables: "
+                    f"{missing}"
+                )
+
+            path_nodes, path_edges = path
+
+            for node in path_nodes:
+                if node not in joined_order:
+                    joined_order.append(
+                        node
+                    )
+
+                connected.add(
+                    node
+                )
+
+                remaining.discard(
+                    node
+                )
+
+            del path_edges
+
+        return joined_order
+
+    def _find_path_from_connected_to_targets(
+        self,
+        connected: set[str],
+        targets: set[str],
+        graph: dict[
+            str,
+            list[
+                tuple[
+                    str,
+                    dict[str, str],
+                ]
+            ],
+        ],
+    ) -> tuple[
+        list[str],
+        list[dict[str, str]],
+    ] | None:
+        queue = deque()
+
+        parent: dict[
+            str,
+            tuple[
+                str | None,
+                dict[str, str] | None,
+            ],
+        ] = {}
+
+        for start in sorted(
+            connected
+        ):
+            queue.append(
+                start
+            )
+            parent[start] = (
+                None,
+                None,
+            )
+
+        target = None
+
+        while queue:
+            current = queue.popleft()
+
+            if (
+                current in targets
+                and current not in connected
+            ):
+                target = current
+                break
+
+            neighbors = sorted(
+                graph.get(
+                    current,
+                    [],
+                ),
+                key=lambda item: item[0],
+            )
+
+            for neighbor, relationship in neighbors:
+                if neighbor in parent:
+                    continue
+
+                parent[neighbor] = (
+                    current,
+                    relationship,
+                )
+
+                queue.append(
+                    neighbor
+                )
+
+        if target is None:
+            return None
+
+        nodes: list[str] = []
+        edges: list[dict[str, str]] = []
+
+        current = target
+
+        while current is not None:
+            nodes.append(
+                current
+            )
+
+            previous, relationship = parent[
+                current
+            ]
+
+            if relationship is not None:
+                edges.append(
+                    relationship
+                )
+
+            current = previous
+
+        nodes.reverse()
+        edges.reverse()
+
+        return nodes, edges
+
+    def _compile_from_and_joins(
+        self,
+        required_tables: list[str],
+        relationships: Any,
+    ) -> str:
+        if not required_tables:
+            raise ValueError(
+                "At least one required table is necessary."
+            )
+
+        normalized_relationships = (
+            self._normalized_relationships(
+                relationships
+            )
+        )
+
+        graph = self._relationship_graph(
+            normalized_relationships
+        )
+
+        base_table = required_tables[0]
+
+        joined: set[str] = {
+            base_table
+        }
+
+        pieces = [
+            self._quote_identifier(
+                base_table
+            )
+        ]
+
+        pending = set(
+            required_tables[1:]
+        )
+
+        while pending:
+            path = self._find_path_from_connected_to_targets(
+                connected=joined,
+                targets=pending,
+                graph=graph,
+            )
+
+            if path is None:
+                raise ValueError(
+                    "Required PostgreSQL tables cannot be connected "
+                    "using discovered relationships."
+                )
+
+            path_nodes, path_edges = path
+
+            for index, relationship in enumerate(
+                path_edges
+            ):
+                left_table = relationship[
+                    "source_table"
+                ]
+                left_column = relationship[
+                    "source_column"
+                ]
+                right_table = relationship[
+                    "target_table"
+                ]
+                right_column = relationship[
+                    "target_column"
+                ]
+
+                if left_table in joined:
+                    new_table = right_table
+                    new_column = right_column
+                    existing_table = left_table
+                    existing_column = left_column
+
+                elif right_table in joined:
+                    new_table = left_table
+                    new_column = left_column
+                    existing_table = right_table
+                    existing_column = right_column
+
+                else:
+                    # For intermediate path nodes, the path itself must
+                    # still determine which side is already reachable.
+                    if index > 0:
+                        previous_relationship = path_edges[
+                            index - 1
+                        ]
+
+                        previous_table = path_nodes[
+                            index
+                        ]
+
+                        if previous_table == left_table:
+                            new_table = right_table
+                            new_column = right_column
+                            existing_table = left_table
+                            existing_column = left_column
+                        else:
+                            new_table = left_table
+                            new_column = left_column
+                            existing_table = right_table
+                            existing_column = right_column
+                    else:
+                        raise ValueError(
+                            "Unable to compile discovered JOIN path."
+                        )
+
+                pieces.append(
+                    "JOIN "
+                    + self._quote_identifier(
+                        new_table
+                    )
+                    + " ON "
+                    + self._qualified_identifier(
+                        existing_table,
+                        existing_column,
+                    )
+                    + " = "
+                    + self._qualified_identifier(
+                        new_table,
+                        new_column,
+                    )
+                )
+
+                joined.add(
+                    new_table
+                )
+
+                pending.discard(
+                    new_table
+                )
+
+        return "\n".join(
+            pieces
+        )
+
+    # ------------------------------------------------------------------
+    # Projection
+    # ------------------------------------------------------------------
+
+    def _compile_projection(
+        self,
+        contract: dict[str, Any],
+        selected_tables: list[str],
+    ) -> str:
+        required_columns = contract.get(
+            "required_columns",
+            [],
+        )
+
+        expressions: list[str] = []
+
+        for reference in required_columns:
+            table_name, column_name = (
+                self._parse_field_reference(
+                    reference,
+                    selected_tables,
+                )
+            )
+
+            expressions.append(
+                self._qualified_identifier(
+                    table_name,
+                    column_name,
+                )
+            )
+
+        if expressions:
+            return ", ".join(
+                expressions
+            )
+
+        # Never fall back to SELECT * for an unconstrained retrieval.
+        #
+        # Use discovered primary keys as the smallest meaningful result.
+        for table_name in selected_tables:
+            table_info = self._tables().get(
+                table_name,
+                {},
+            )
+
+            primary_keys = table_info.get(
+                "primary_keys",
+                [],
+            ) or []
+
+            for primary_key in primary_keys:
+                if not isinstance(
+                    primary_key,
+                    str,
+                ):
+                    continue
+
+                column_name = self._resolve_column(
+                    table_name,
+                    primary_key,
+                )
+
+                expressions.append(
+                    self._qualified_identifier(
+                        table_name,
+                        column_name,
+                    )
+                )
+
+        if not expressions:
+            raise ValueError(
+                "Retrieval contract did not provide any required output "
+                "columns, and no discovered primary key is available "
+                "for a safe projection."
+            )
+
+        return ", ".join(
+            dict.fromkeys(
+                expressions
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Aggregation / metrics
+    # ------------------------------------------------------------------
+
+    def _compile_aggregate_select(
+        self,
+        contract: dict[str, Any],
+        selected_tables: list[str],
+        grouping: list[str],
+        requested_metrics: Any,
+        operations: list[str],
+    ) -> tuple[str, bool]:
+        expressions: list[str] = []
+
+        for field in grouping:
+            expressions.append(
+                self._resolve_field_expression(
+                    field,
+                    selected_tables,
+                )
+            )
+
+        metrics = (
+            requested_metrics
+            if isinstance(
+                requested_metrics,
+                list,
+            )
+            else []
+        )
+
+        if metrics:
+            for metric in metrics:
+                expressions.append(
+                    self._compile_metric(
+                        metric,
+                        selected_tables,
+                    )
+                )
+
+        else:
+            aggregate_operations = [
+                self.AGGREGATE_ALIASES.get(
+                    operation,
+                    operation,
+                )
+                for operation in operations
+                if operation in self.AGGREGATE_OPERATIONS
+            ]
+
+            for operation in aggregate_operations:
+                expressions.append(
+                    self._compile_implicit_metric(
+                        operation,
+                        contract,
+                        selected_tables,
+                    )
+                )
+
+        if not expressions:
+            raise ValueError(
+                "An aggregate retrieval requires at least one "
+                "grouping field or requested metric."
+            )
+
+        return (
+            ", ".join(expressions),
+            True,
+        )
+
+    def _compile_metric(
+        self,
+        metric: Any,
+        selected_tables: list[str],
+    ) -> str:
+        if not isinstance(
+            metric,
+            dict,
+        ):
+            raise ValueError(
+                "Each requested metric must be an object."
+            )
+
+        operation = str(
+            metric.get(
+                "operation",
+                "",
+            )
+        ).strip().lower()
+
+        operation = self.AGGREGATE_ALIASES.get(
+            operation,
+            operation,
+        )
+
+        if operation not in {
+            "count",
+            "sum",
+            "average",
+            "minimum",
+            "maximum",
+        }:
+            raise ValueError(
+                "Unsupported requested metric operation: "
+                f"{operation!r}"
+            )
+
+        source_id = metric.get(
+            "source_id"
+        )
+
+        if (
+            source_id is not None
+            and str(source_id).strip().lower()
+            != self.source_id
+        ):
+            raise ValueError(
+                "Requested metric source_id does not match "
+                f"SQLGenerator source '{self.source_id}'."
+            )
+
+        table_name = metric.get(
+            "table"
+        )
+        column_name = metric.get(
+            "column"
+        )
+
+        if (
+            not isinstance(
+                table_name,
+                str,
+            )
+            or not table_name.strip()
+        ):
+            raise ValueError(
+                "Requested metric table is required."
+            )
+
+        table_name = self._resolve_table(
+            table_name
+        )
+
+        if table_name not in selected_tables:
+            raise ValueError(
+                f"Requested metric table '{table_name}' "
+                "is not part of the selected query scope."
+            )
+
+        if (
+            not isinstance(
+                column_name,
+                str,
+            )
+            or not column_name.strip()
+        ):
+            if operation == "count":
+                expression = "COUNT(*)"
+            else:
+                raise ValueError(
+                    f"Metric operation '{operation}' requires "
+                    "a column."
+                )
+        else:
+            column_name = self._resolve_column(
+                table_name,
+                column_name,
+            )
+
+            qualified = self._qualified_identifier(
+                table_name,
+                column_name,
+            )
+
+            distinct = bool(
+                metric.get(
+                    "distinct",
+                    False,
+                )
+            )
+
+            if operation == "count":
+                expression = (
+                    f"COUNT(DISTINCT {qualified})"
+                    if distinct
+                    else f"COUNT({qualified})"
+                )
+
+            elif operation == "sum":
+                expression = (
+                    f"SUM({qualified})"
+                )
+
+            elif operation == "average":
+                expression = (
+                    f"AVG({qualified})"
+                )
+
+            elif operation == "minimum":
+                expression = (
+                    f"MIN({qualified})"
+                )
+
+            else:
+                expression = (
+                    f"MAX({qualified})"
+                )
+
+        label = metric.get(
+            "label"
+        )
+
+        if isinstance(
+            label,
+            str,
+        ) and label.strip():
+            expression += (
+                " AS "
+                + self._quote_identifier(
+                    label.strip()
+                )
+            )
+
+        return expression
+
+    def _compile_implicit_metric(
+        self,
+        operation: str,
+        contract: dict[str, Any],
+        selected_tables: list[str],
+    ) -> str:
+        required_columns = [
+            value
+            for value in contract.get(
+                "required_columns",
+                [],
+            )
+            if isinstance(
+                value,
+                str,
+            )
+        ]
+
+        if operation == "count":
+            return "COUNT(*) AS " + self._quote_identifier(
+                "count"
+            )
+
+        if not required_columns:
+            raise ValueError(
+                f"Operation '{operation}' requires a numeric/value "
+                "column or requested_metrics."
+            )
+
+        candidates: list[
+            tuple[str, str]
+        ] = []
+
+        for reference in required_columns:
+            table_name, column_name = (
+                self._parse_field_reference(
+                    reference,
+                    selected_tables,
+                )
+            )
+
+            metadata = self._column_metadata(
+                table_name,
+                column_name,
+            )
+
+            data_type = str(
+                metadata.get(
+                    "data_type",
+                    "",
+                )
+                or ""
+            ).lower()
+
+            candidates.append(
+                (
+                    reference,
+                    data_type,
+                )
+            )
+
+        numeric_candidates = [
+            reference
+            for reference, data_type in candidates
+            if any(
+                token in data_type
+                for token in (
+                    "integer",
+                    "bigint",
+                    "smallint",
+                    "numeric",
+                    "decimal",
+                    "real",
+                    "double",
+                    "money",
+                )
+            )
+        ]
+
+        if len(numeric_candidates) != 1:
+            raise ValueError(
+                f"Operation '{operation}' requires an unambiguous "
+                "metric column in the Retrieval Contract."
+            )
+
+        table_name, column_name = (
+            self._parse_field_reference(
+                numeric_candidates[0],
+                selected_tables,
+            )
+        )
+
+        qualified = self._qualified_identifier(
+            table_name,
+            column_name,
+        )
+
+        functions = {
+            "sum": "SUM",
+            "average": "AVG",
+            "minimum": "MIN",
+            "maximum": "MAX",
+        }
+
+        return (
+            f"{functions[operation]}({qualified}) "
+            f"AS {self._quote_identifier(operation)}"
+        )
+
+    # ------------------------------------------------------------------
+    # Filters
+    # ------------------------------------------------------------------
+
+    def _compile_filters(
+        self,
+        filters: Any,
+        selected_tables: list[str],
+    ) -> list[str]:
+        if not isinstance(
+            filters,
+            list,
+        ):
+            raise ValueError(
+                "filters must be a list."
+            )
+
+        result: list[str] = []
+
+        for filter_value in filters:
+            if not isinstance(
+                filter_value,
+                dict,
+            ):
+                raise ValueError(
+                    "Each filter must be an object."
+                )
+
+            reference = (
+                filter_value.get("field")
+                or filter_value.get("column")
+            )
+
+            table_name = filter_value.get(
+                "table"
+            )
+
+            if (
+                isinstance(
+                    reference,
+                    str,
+                )
+                and "." in reference
+                and not table_name
+            ):
+                table_name, reference = (
+                    reference.split(
+                        ".",
+                        1,
+                    )
+                )
+
+            if (
+                not isinstance(
+                    table_name,
+                    str,
+                )
+                or not table_name.strip()
+            ):
+                raise ValueError(
+                    "Filter table is required."
+                )
+
+            if (
+                not isinstance(
+                    reference,
+                    str,
+                )
+                or not reference.strip()
+            ):
+                raise ValueError(
+                    "Filter column is required."
+                )
+
+            table_name = self._resolve_table(
+                table_name
+            )
+
+            if table_name not in selected_tables:
+                raise ValueError(
+                    f"Filter references table '{table_name}' "
+                    "outside the selected query scope."
+                )
+
+            column_name = self._resolve_column(
+                table_name,
+                reference,
+            )
+
+            operator = filter_value.get(
+                "operator",
+                "=",
+            )
+
+            if not isinstance(
+                operator,
+                str,
+            ):
+                raise ValueError(
+                    "Filter operator must be a string."
+                )
+
+            operator = self.OPERATOR_ALIASES.get(
+                operator.strip().lower(),
+                operator.strip().lower(),
+            )
+
+            if operator not in self.ALLOWED_OPERATORS:
+                raise ValueError(
+                    f"Unsupported filter operator: "
+                    f"{operator!r}"
+                )
+
+            qualified = self._qualified_identifier(
+                table_name,
+                column_name,
+            )
+
+            result.append(
+                self._compile_filter_expression(
+                    qualified=qualified,
+                    operator=operator,
+                    value=filter_value.get(
+                        "value"
+                    ),
+                )
+            )
+
+        return result
+
+    def _compile_filter_expression(
+        self,
+        qualified: str,
+        operator: str,
+        value: Any,
+    ) -> str:
+        if operator == "is_null":
+            return f"{qualified} IS NULL"
+
+        if operator == "is_not_null":
+            return f"{qualified} IS NOT NULL"
+
+        if operator == "in":
+            if not isinstance(
+                value,
+                list,
+            ):
+                raise ValueError(
+                    "IN filter value must be a list."
+                )
+
+            if not value:
+                return "FALSE"
+
+            return (
+                f"{qualified} IN ("
+                + ", ".join(
+                    self._sql_literal(item)
+                    for item in value
+                )
+                + ")"
+            )
+
+        if operator == "not_in":
+            if not isinstance(
+                value,
+                list,
+            ):
+                raise ValueError(
+                    "NOT_IN filter value must be a list."
+                )
+
+            if not value:
+                return "TRUE"
+
+            return (
+                f"{qualified} NOT IN ("
+                + ", ".join(
+                    self._sql_literal(item)
+                    for item in value
+                )
+                + ")"
+            )
+
+        if operator == "contains":
+            return (
+                f"{qualified} ILIKE "
+                f"{self._sql_literal('%' + str(value) + '%')}"
+            )
+
+        if operator == "starts_with":
+            return (
+                f"{qualified} ILIKE "
+                f"{self._sql_literal(str(value) + '%')}"
+            )
+
+        if operator == "ends_with":
+            return (
+                f"{qualified} ILIKE "
+                f"{self._sql_literal('%' + str(value))}"
+            )
+
+        return (
+            f"{qualified} {operator} "
+            f"{self._sql_literal(value)}"
+        )
+
+    # ------------------------------------------------------------------
+    # Runtime bindings
+    # ------------------------------------------------------------------
+
+    def _normalize_runtime_bindings(
+        self,
+        runtime_bindings: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if runtime_bindings is None:
+            return []
+
+        if not isinstance(
+            runtime_bindings,
+            dict,
+        ):
+            raise ValueError(
+                "runtime_bindings must be a dictionary."
+            )
+
+        bindings = runtime_bindings.get(
+            "bindings",
+            [],
+        )
+
+        if not isinstance(
+            bindings,
+            list,
+        ):
+            raise ValueError(
+                "runtime_bindings bindings must be a list."
+            )
+
+        normalized: list[dict[str, Any]] = []
+        seen_indexes: set[int] = set()
+
+        for binding in bindings:
+            if not isinstance(
+                binding,
+                dict,
+            ):
+                raise ValueError(
+                    "Each runtime binding must be an object."
+                )
+
+            index = binding.get(
+                "index"
+            )
+
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index < 0
+            ):
+                raise ValueError(
+                    "Runtime binding index must be "
+                    "a non-negative integer."
+                )
+
+            if index in seen_indexes:
+                raise ValueError(
+                    f"Duplicate runtime binding index: {index}"
+                )
+
+            seen_indexes.add(
+                index
+            )
+
+            to_table = binding.get(
+                "to_table"
+            )
+
+            to_column = binding.get(
+                "to_column"
+            )
+
+            if (
+                not isinstance(
+                    to_table,
+                    str,
+                )
+                or not to_table.strip()
+            ):
+                raise ValueError(
+                    "Runtime binding to_table must "
+                    "be non-empty."
+                )
+
+            if (
+                not isinstance(
+                    to_column,
+                    str,
+                )
+                or not to_column.strip()
+            ):
+                raise ValueError(
+                    "Runtime binding to_column must "
+                    "be non-empty."
+                )
+
+            operator = str(
+                binding.get(
+                    "operator",
+                    "in",
+                )
+            ).strip().lower()
+
+            if operator == "eq":
+                operator = "equals"
+
+            if operator in {
+                "=",
+                "==",
+            }:
+                operator = "equals"
+
+            if operator not in {
+                "in",
+                "not_in",
+                "equals",
+            }:
+                raise ValueError(
+                    "Unsupported runtime binding operator: "
+                    f"{operator!r}"
+                )
+
+            normalized.append(
+                {
+                    "index": index,
+                    "to_table": self._resolve_table(
+                        to_table
+                    ),
+                    "to_column": self._resolve_column(
+                        to_table,
+                        to_column,
+                    ),
+                    "operator": operator,
+                }
+            )
+
+        return sorted(
+            normalized,
+            key=lambda value: value["index"],
+        )
+
+    def _compile_runtime_bindings(
+        self,
+        bindings: list[dict[str, Any]],
+        selected_tables: list[str],
+    ) -> list[str]:
+        result: list[str] = []
+
+        for binding in bindings:
+            table_name = binding[
+                "to_table"
+            ]
+
+            column_name = binding[
+                "to_column"
+            ]
+
+            if table_name not in selected_tables:
+                raise ValueError(
+                    "Runtime binding target table "
+                    f"'{table_name}' is not in the selected query scope."
+                )
+
+            qualified = self._qualified_identifier(
+                table_name,
+                column_name,
+            )
+
+            index = binding[
+                "index"
+            ]
+
+            operator = binding[
+                "operator"
+            ]
+
+            placeholder = "%s"
+
+            if operator == "in":
+                result.append(
+                    f"{qualified} = ANY({placeholder})"
+                )
+
+            elif operator == "not_in":
+                result.append(
+                    f"{qualified} <> ALL({placeholder})"
+                )
+
+            else:
+                result.append(
+                    f"{qualified} = {placeholder}"
+                )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # GROUP BY / ORDER BY
+    # ------------------------------------------------------------------
+
+    def _compile_grouping(
+        self,
+        grouping: Any,
+        selected_tables: list[str],
+    ) -> list[str]:
+        if not grouping:
+            return []
+
+        result: list[str] = []
+
+        for field in grouping:
+            result.append(
+                self._resolve_field_expression(
+                    field,
+                    selected_tables,
+                )
+            )
+
+        return list(
+            dict.fromkeys(
+                result
+            )
+        )
+
+    def _compile_sorting(
+        self,
+        sorting: Any,
+        selected_tables: list[str],
+    ) -> list[str]:
+        if not sorting:
+            return []
+
+        result: list[str] = []
+
+        for item in sorting:
+            if isinstance(
+                item,
+                str,
+            ):
+                expression = item.strip()
+                direction = "asc"
+
+                parts = expression.split()
+
+                if (
+                    len(parts) >= 2
+                    and parts[-1].lower()
+                    in self.SORT_DIRECTIONS
+                ):
+                    direction = parts[-1].lower()
+                    expression = " ".join(
+                        parts[:-1]
+                    )
+
+                result.append(
+                    f"{self._resolve_field_expression(expression, selected_tables)} "
+                    f"{direction.upper()}"
+                )
+                continue
+
+            if isinstance(
+                item,
+                dict,
+            ):
+                field = (
+                    item.get("field")
+                    or item.get("column")
+                )
+
+                if not isinstance(
+                    field,
+                    str,
+                ):
+                    raise ValueError(
+                        "Sorting field must be a string."
+                    )
+
+                direction = str(
+                    item.get(
+                        "direction",
+                        "asc",
+                    )
+                ).strip().lower()
+
+                if direction not in self.SORT_DIRECTIONS:
+                    raise ValueError(
+                        f"Unsupported sort direction: "
+                        f"{direction!r}"
+                    )
+
+                result.append(
+                    f"{self._resolve_field_expression(field, selected_tables)} "
+                    f"{direction.upper()}"
+                )
+                continue
+
+            raise ValueError(
+                "Each sorting item must be a string or object."
+            )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Field resolution
+    # ------------------------------------------------------------------
+
+    def _parse_field_reference(
+        self,
+        reference: Any,
+        selected_tables: list[str],
+    ) -> tuple[str, str]:
+        if not isinstance(
+            reference,
+            str,
+        ) or not reference.strip():
+            raise ValueError(
+                "Field reference must be a non-empty string."
+            )
+
+        value = reference.strip()
+
+        if "." in value:
+            table_name, column_name = (
+                value.split(
+                    ".",
+                    1,
+                )
+            )
+
+            table_name = self._resolve_table(
+                table_name
+            )
+
+            if table_name not in selected_tables:
+                raise ValueError(
+                    f"Field references table '{table_name}' "
+                    "outside the selected query scope."
+                )
+
+            column_name = self._resolve_column(
+                table_name,
+                column_name,
+            )
+
+            return (
+                table_name,
+                column_name,
+            )
+
+        matches: list[
+            tuple[str, str]
+        ] = []
+
+        for table_name in selected_tables:
+            try:
+                column_name = self._resolve_column(
+                    table_name,
+                    value,
+                )
+            except ValueError:
+                continue
+
+            matches.append(
+                (
+                    table_name,
+                    column_name,
+                )
+            )
+
+        if not matches:
+            raise ValueError(
+                "Field is not present in the selected "
+                f"Context Layer scope: {value!r}"
+            )
+
+        if len(matches) > 1:
+            raise ValueError(
+                "Ambiguous unqualified field reference: "
+                f"{value!r}. Use an explicit table.column reference."
+            )
+
+        return matches[0]
+
+    def _resolve_field_expression(
+        self,
+        reference: Any,
+        selected_tables: list[str],
+    ) -> str:
+        table_name, column_name = (
+            self._parse_field_reference(
+                reference,
+                selected_tables,
+            )
+        )
+
+        return self._qualified_identifier(
+            table_name,
+            column_name,
+        )
+
+    # ------------------------------------------------------------------
+    # DISTINCT
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _uses_distinct(
+        contract: dict[str, Any],
+    ) -> bool:
+        operations = {
+            str(value).strip().lower()
+            for value in contract.get(
+                "operations",
+                [],
+            )
+            if isinstance(value, str)
+        }
+
+        return (
+            "distinct" in operations
+            or bool(
+                contract.get(
+                    "distinct",
+                    False,
+                )
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # SQL safety / serialization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _quote_identifier(
+        identifier: str,
+    ) -> str:
+        if (
+            not isinstance(
+                identifier,
+                str,
+            )
+            or not identifier.strip()
+        ):
+            raise ValueError(
+                "SQL identifier must be a non-empty string."
+            )
+
+        return (
+            '"'
+            + identifier.strip().replace(
+                '"',
+                '""',
+            )
+            + '"'
+        )
+
+    def _qualified_identifier(
+        self,
+        table_name: str,
+        column_name: str,
+    ) -> str:
+        return (
+            self._quote_identifier(
+                table_name
+            )
+            + "."
+            + self._quote_identifier(
+                column_name
+            )
+        )
+
+    @staticmethod
+    def _sql_literal(
+        value: Any,
+    ) -> str:
+        """
+        Safely serialize a scalar value as a PostgreSQL literal.
+
+        Runtime dependency values are never handled here; those use
+        PostgreSQL parameter placeholders.
+        """
+
+        if value is None:
+            return "NULL"
+
+        if isinstance(
+            value,
+            bool,
+        ):
+            return "TRUE" if value else "FALSE"
+
+        if isinstance(
+            value,
+            (int, float, Decimal),
+        ):
+            return str(value)
+
+        if isinstance(
+            value,
+            (datetime, date),
+        ):
+            return (
+                "'"
+                + value.isoformat().replace(
+                    "'",
+                    "''",
+                )
+                + "'"
+            )
+
+        text_value = str(
+            value
+        )
+
+        return (
+            "'"
+            + text_value.replace(
+                "'",
+                "''",
+            )
+            + "'"
+        )
+
+    @staticmethod
+    def _normalize_sql(
+        query: str,
+    ) -> str:
+        if not isinstance(
+            query,
+            str,
+        ) or not query.strip():
+            raise ValueError(
+                "Generated SQL cannot be empty."
+            )
+
+        return query.strip()
+
+    @staticmethod
+    def _indent_sql(
+        query: str,
+    ) -> str:
+        return "\n".join(
+            "    " + line
+            for line in query.splitlines()
+        )
 
 
 def generate_sql(
     contract: dict[str, Any],
     source_id: str = "db1",
 ) -> str:
-    generator = SQLGenerator(source_id=source_id)
+    """
+    Backward-compatible helper.
+    """
+
+    generator = SQLGenerator(
+        source_id=source_id
+    )
 
     return generator.generate(
         contract=contract,
@@ -639,5 +2551,6 @@ def generate_sql(
 
 
 if __name__ == "__main__":
-    print("SQL generator initialized successfully.")
-
+    print(
+        "Deterministic SQL generator initialized successfully."
+    )

@@ -64,9 +64,12 @@ def _build_hash_query(
     table_sql = _quote_identifier(table_name)
     column_sql = _quote_identifier(column_name)
 
+    # lower(btrim(...)) makes the comparison robust to case / stray
+    # whitespace differences between systems (uuid text is lowercase, but a
+    # varchar copy in another system may be uppercase or padded).
     query = f"""
         SELECT DISTINCT
-            md5(CAST({column_sql} AS text)) AS value_hash
+            md5(lower(btrim(CAST({column_sql} AS text)))) AS value_hash
         FROM {table_sql}
         WHERE {column_sql} IS NOT NULL
     """
@@ -278,6 +281,17 @@ def _compare_candidate(
 
     result["matching_identifier_count"] = (
         matching_count
+    )
+
+    smaller_side = min(
+        len(source_hashes),
+        len(target_hashes),
+    )
+
+    result["overlap_ratio_of_smaller_side"] = (
+        round(matching_count / smaller_side, 3)
+        if smaller_side
+        else 0.0
     )
 
     if matching_count > 0:

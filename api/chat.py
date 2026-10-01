@@ -28,7 +28,7 @@ rag_pipeline = RAGPipeline()
 # Multi-source Context Graph
 # --------------------------------------------------
 
-# Load all available PostgreSQL Context Layers.
+# Load all available PostgreSQL Context Layers:
 #
 # {
 #     "db1": {...},
@@ -36,7 +36,6 @@ rag_pipeline = RAGPipeline()
 # }
 #
 # Convert dictionary values to a list so the graph builder receives:
-#
 # [
 #     DB1 context dictionary,
 #     DB2 context dictionary
@@ -49,7 +48,6 @@ rag_pipeline = RAGPipeline()
 #     db2:transcripts
 #
 # No table names are hardcoded here.
-
 contexts = list(
     load_all_contexts().values()
 )
@@ -65,7 +63,6 @@ context_graph = build_multi_source_context_graph(
 
 class ChatRequest(BaseModel):
     question: str
-    workspace_id: str | None = None
 
 
 # --------------------------------------------------
@@ -81,6 +78,7 @@ def graph_to_dict(graph):
     nodes = []
 
     for node, data in graph.nodes(data=True):
+
         node_id = str(node)
 
         source_id = data.get(
@@ -88,10 +86,8 @@ def graph_to_dict(graph):
         )
 
         # Fallback for source-aware graph IDs.
-        #
         # Example:
         #     db1:project_tasks
-
         if not source_id and ":" in node_id:
             source_id = node_id.split(
                 ":",
@@ -101,19 +97,24 @@ def graph_to_dict(graph):
         nodes.append(
             {
                 "id": node_id,
+
                 "label": data.get(
                     "table_name",
                     node_id,
                 ),
+
                 "type": data.get(
                     "node_type",
                     "entity",
                 ),
+
                 "source_id": source_id,
+
                 "columns": data.get(
                     "columns",
                     [],
                 ),
+
                 "primary_keys": data.get(
                     "primary_keys",
                     [],
@@ -126,12 +127,14 @@ def graph_to_dict(graph):
     for source, target, data in graph.edges(
         data=True
     ):
+
         relationship_type = data.get(
             "relationship_type",
             "DATABASE_RELATIONSHIP",
         )
 
         if relationship_type == "BUSINESS_RELATIONSHIP":
+
             edge_type = "business"
 
             label = (
@@ -141,7 +144,17 @@ def graph_to_dict(graph):
                 or relationship_type
             )
 
+        elif relationship_type == "CROSS_SOURCE_RELATIONSHIP":
+
+            edge_type = "cross_source"
+
+            label = (
+                data.get("relationship_kind")
+                or "CROSS_SOURCE"
+            )
+
         else:
+
             edge_type = "database"
 
             label = (
@@ -158,21 +171,39 @@ def graph_to_dict(graph):
                     f"{target}-"
                     f"{len(edges)}"
                 ),
+
                 "source": str(source),
+
                 "target": str(target),
+
                 "label": label,
+
                 "type": edge_type,
+
                 "relationship_type": (
                     relationship_type
                 ),
+
                 "source_column": data.get(
                     "source_column",
                     "",
                 ),
+
                 "target_column": data.get(
                     "target_column",
                     "",
                 ),
+
+                "target_source_id": data.get(
+                    "target_source_id",
+                    "",
+                ),
+
+                "relationship_kind": data.get(
+                    "relationship_kind",
+                    "",
+                ),
+
                 "confidence": data.get(
                     "confidence",
                     None,
@@ -212,10 +243,6 @@ def build_graph_trace(
     becomes:
 
         db2:transcripts
-
-    Security/SIEM resources are intentionally excluded
-    from the PostgreSQL Context Graph because they are
-    external API resources rather than PostgreSQL tables.
     """
 
     if not isinstance(
@@ -235,6 +262,7 @@ def build_graph_trace(
     # --------------------------------------------------
 
     for source in sources:
+
         if not isinstance(
             source,
             dict,
@@ -269,6 +297,7 @@ def build_graph_trace(
             "entities",
             [],
         ):
+
             if not entity:
                 continue
 
@@ -299,6 +328,7 @@ def build_graph_trace(
             "tables",
             [],
         ):
+
             if not table:
                 continue
 
@@ -330,6 +360,7 @@ def build_graph_trace(
     trace_nodes = []
 
     for node_id in used_nodes:
+
         node_data = graph.nodes[
             node_id
         ]
@@ -347,14 +378,17 @@ def build_graph_trace(
         trace_nodes.append(
             {
                 "id": str(node_id),
+
                 "label": node_data.get(
                     "table_name",
                     node_id,
                 ),
+
                 "type": node_data.get(
                     "node_type",
                     "entity",
                 ),
+
                 "source_id": source_id,
             }
         )
@@ -366,6 +400,7 @@ def build_graph_trace(
     trace_edges = []
 
     for source_node in used_nodes:
+
         for target_node in used_nodes:
 
             if source_node == target_node:
@@ -386,15 +421,12 @@ def build_graph_trace(
                 continue
 
             # NetworkX MultiDiGraph:
-            #
             # edge_data = {
             #     edge_key: relationship_data
             # }
             #
             # NetworkX DiGraph:
-            #
             # edge_data can be a relationship dict.
-
             if all(
                 isinstance(
                     value,
@@ -407,9 +439,11 @@ def build_graph_trace(
                 )
                 for value in edge_data.values()
             ):
+
                 relationships = edge_data.items()
 
             else:
+
                 relationships = [
                     (
                         0,
@@ -437,6 +471,7 @@ def build_graph_trace(
                     relationship_type
                     == "BUSINESS_RELATIONSHIP"
                 ):
+
                     label = (
                         relationship.get(
                             "business_relationship"
@@ -444,7 +479,15 @@ def build_graph_trace(
                         or relationship_type
                     )
 
+                elif relationship_type == "CROSS_SOURCE_RELATIONSHIP":
+
+                    label = (
+                        relationship.get("relationship_kind")
+                        or "CROSS_SOURCE"
+                    )
+
                 else:
+
                     label = (
                         relationship.get(
                             "database_relationship_type"
@@ -459,16 +502,25 @@ def build_graph_trace(
                             f"{target_node}-"
                             f"{edge_key}"
                         ),
+
                         "source": str(
                             source_node
                         ),
+
                         "target": str(
                             target_node
                         ),
+
                         "label": label,
+
                         "relationship_type": (
                             relationship_type
                         ),
+
+                        "relationship_kind": relationship.get(
+                            "relationship_kind"
+                        ),
+
                         "confidence": (
                             relationship.get(
                                 "confidence"
@@ -479,12 +531,15 @@ def build_graph_trace(
 
     return {
         "nodes": trace_nodes,
+
         "edges": trace_edges,
 
         # Preserve original provenance for
         # frontend attribution.
         "source_entities": source_entities,
+
         "source_tables": source_tables,
+
         "matched_graph_nodes": used_nodes,
     }
 
@@ -496,7 +551,6 @@ def build_graph_trace(
 def build_source_trace(
     sources: list[dict],
     data_sources: list[str] | None = None,
-    security_resource: str | None = None,
 ) -> dict:
     """
     Build a frontend-friendly representation of the
@@ -507,9 +561,7 @@ def build_source_trace(
         db1
         db2
 
-    Security Logs remains represented separately,
-    including the exact logical security resource
-    selected by the planner.
+    Security Logs remains represented separately.
     """
 
     if not isinstance(
@@ -527,6 +579,7 @@ def build_source_trace(
     normalized_data_sources = []
 
     for source_name in data_sources:
+
         if not source_name:
             continue
 
@@ -549,6 +602,7 @@ def build_source_trace(
     postgresql_sources = []
 
     for source in sources:
+
         if not isinstance(
             source,
             dict,
@@ -586,6 +640,7 @@ def build_source_trace(
     external_sources = []
 
     for source in sources:
+
         if not isinstance(
             source,
             dict,
@@ -596,51 +651,37 @@ def build_source_trace(
             "source_type"
         )
 
-        if source_type != "security_logs_api":
-            continue
+        if (
+            source_type
+            == "security_logs_api"
+        ):
 
-        # Prefer the actual resource returned by the
-        # retrieval layer. Fall back to the validated
-        # planner resource.
-        actual_resource = source.get(
-            "resource"
-        )
+            external_sources.append(
+                {
+                    "id": "security_logs",
 
-        if not actual_resource:
-            actual_resource = security_resource
+                    "label": "Security Logs",
 
-        external_sources.append(
-            {
-                "id": "security_logs",
-                "label": "Security Logs",
-                "type": "security_logs",
-                "source_type": source_type,
+                    "type": "security_logs",
 
-                # Exact logical SIEM resource used.
-                "resource": actual_resource,
+                    "source_type": source_type,
 
-                "source": source.get(
-                    "source",
-                    "security_logs",
-                ),
+                    "source": source.get(
+                        "source",
+                        "security_logs",
+                    ),
 
-                "event_count": source.get(
-                    "event_count",
-                    0,
-                ),
+                    "event_count": source.get(
+                        "event_count",
+                        0,
+                    ),
 
-                "truncated": source.get(
-                    "truncated",
-                    False,
-                ),
-
-                # Workspace ID is returned only if the
-                # trusted runtime retrieval layer supplied it.
-                "workspace_id": source.get(
-                    "workspace_id"
-                ),
-            }
-        )
+                    "truncated": source.get(
+                        "truncated",
+                        False,
+                    ),
+                }
+            )
 
     return {
         "data_sources": (
@@ -654,10 +695,6 @@ def build_source_trace(
         "external_sources": (
             external_sources
         ),
-
-        # Planner-selected resource. This is only the
-        # logical resource name, never a URL/token/header.
-        "security_resource": security_resource,
     }
 
 
@@ -676,46 +713,22 @@ def chat(
     PostgreSQL remains read-only because the endpoint
     uses the existing RAG pipeline and read-only
     retrieval executor.
-
-    Workspace ID is supplied through runtime request
-    context and is never generated by the LLM.
     """
 
     try:
-        question = request.question.strip()
 
-        workspace_id = (
-            request.workspace_id.strip()
-            if (
-                isinstance(
-                    request.workspace_id,
-                    str,
-                )
-                and request.workspace_id.strip()
-            )
-            else None
-        )
+        question = request.question.strip()
 
         # --------------------------------------------------
         # Validate client input
         # --------------------------------------------------
 
         if not question:
+
             raise HTTPException(
                 status_code=400,
                 detail=(
                     "Question cannot be empty."
-                ),
-            )
-
-        if (
-            workspace_id is not None
-            and len(workspace_id) > 256
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "workspace_id is too long."
                 ),
             )
 
@@ -724,8 +737,7 @@ def chat(
         # --------------------------------------------------
 
         result = rag_pipeline.ask(
-            question,
-            workspace_id=workspace_id,
+            question
         )
 
         # --------------------------------------------------
@@ -756,10 +768,6 @@ def chat(
         # Source trace
         # --------------------------------------------------
 
-        security_resource = result.get(
-            "security_resource"
-        )
-
         source_trace = build_source_trace(
             result.get(
                 "sources",
@@ -769,7 +777,6 @@ def chat(
                 "data_sources",
                 [],
             ),
-            security_resource=security_resource,
         )
 
         # --------------------------------------------------
@@ -789,13 +796,6 @@ def chat(
                 [],
             ),
 
-            "data_sources": result.get(
-                "data_sources",
-                [],
-            ),
-
-            "security_resource": security_resource,
-
             "graph": graph_data,
 
             "graph_summary": graph_summary,
@@ -806,10 +806,12 @@ def chat(
         }
 
     except HTTPException:
+
         # Preserve intentional HTTP errors.
         raise
 
     except Exception as exc:
+
         print(
             f"CHAT ERROR: "
             f"{type(exc).__name__}: {exc}"
@@ -834,6 +836,7 @@ def get_graph():
     """
 
     try:
+
         graph_data = graph_to_dict(
             context_graph
         )
@@ -848,6 +851,7 @@ def get_graph():
         }
 
     except Exception as exc:
+
         print(
             f"GRAPH ERROR: "
             f"{type(exc).__name__}: {exc}"
@@ -859,4 +863,3 @@ def get_graph():
                 "Unable to load context graph."
             ),
         )
-

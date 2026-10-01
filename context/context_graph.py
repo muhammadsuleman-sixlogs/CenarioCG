@@ -14,6 +14,11 @@ BUSINESS_LOGIC_FILE = (
     / "business_relationships.json"
 )
 
+CROSS_SOURCE_RELATIONSHIPS_FILE = (
+    Path(__file__).resolve().parent
+    / "cross_source_relationships.json"
+)
+
 
 def load_context() -> dict[str, Any]:
     """
@@ -80,6 +85,106 @@ def load_business_relationships(
         ) == source_id
     ]
 
+
+
+def load_cross_source_relationships() -> list[dict[str, Any]]:
+    """Load validated cross-source relationship metadata from local storage."""
+    if not CROSS_SOURCE_RELATIONSHIPS_FILE.exists():
+        return []
+    try:
+        with open(CROSS_SOURCE_RELATIONSHIPS_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    candidates: list[Any] = []
+    for key in ("validated_relationships", "relationships", "validated", "results"):
+        value = data.get(key)
+        if isinstance(value, list):
+            candidates = value
+            break
+    if not candidates:
+        for value in data.values():
+            if not isinstance(value, dict):
+                continue
+            for key in ("validated_relationships", "relationships", "validated", "results"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    candidates = nested
+                    break
+            if candidates:
+                break
+
+    def text_value(value: Any) -> str | None:
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+    def nested(record: dict[str, Any], side: str, key: str) -> Any:
+        value = record.get(side)
+        return value.get(key) if isinstance(value, dict) else None
+
+    result: list[dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        validity = item.get("validated", item.get("valid", item.get("accepted")))
+        if validity is not None and validity is not True:
+            continue
+
+        source_id = (
+            text_value(item.get("source_id"))
+            or text_value(item.get("source_system"))
+            or text_value(item.get("source_database"))
+            or text_value(nested(item, "source", "source_id"))
+            or text_value(nested(item, "source", "system"))
+        )
+        target_id = (
+            text_value(item.get("target_source_id"))
+            or text_value(item.get("target_system"))
+            or text_value(item.get("target_database"))
+            or text_value(nested(item, "target", "source_id"))
+            or text_value(nested(item, "target", "system"))
+        )
+        source_table = text_value(item.get("source_table")) or text_value(nested(item, "source", "table"))
+        target_table = text_value(item.get("target_table")) or text_value(nested(item, "target", "table"))
+        source_column = text_value(item.get("source_column")) or text_value(nested(item, "source", "column"))
+        target_column = text_value(item.get("target_column")) or text_value(nested(item, "target", "column"))
+
+        if not all((source_id, target_id, source_table, target_table, source_column, target_column)):
+            continue
+        source_id = source_id.lower()
+        target_id = target_id.lower()
+        if source_id == target_id:
+            continue
+
+        result.append({
+            "source_id": source_id,
+            "source_table": source_table,
+            "source_column": source_column,
+            "target_source_id": target_id,
+            "target_table": target_table,
+            "target_column": target_column,
+            "relationship_type": "CROSS_SOURCE_RELATIONSHIP",
+            "relationship_kind": text_value(item.get("relationship_kind")) or text_value(item.get("kind")) or "reference",
+            "confidence": item.get("confidence"),
+            "matching_identifier_count": item.get("matching_identifier_count"),
+            "overlap_detected": item.get("overlap_detected"),
+            "evidence": item.get("evidence", []),
+            "source": item.get("source", "cross_source_validator"),
+        })
+
+    unique = {}
+    for relationship in result:
+        key = tuple(relationship[key] for key in (
+            "source_id", "source_table", "source_column",
+            "target_source_id", "target_table", "target_column",
+        ))
+        unique[key] = relationship
+    return list(unique.values())
 
 def make_node_id(
     source_id: str,
@@ -329,7 +434,9 @@ def build_multi_source_context_graph(
         db1:table_name
         db2:table_name
 
-    No cross-source relationships are inferred here.
+    Validated cross-source relationships are loaded from local metadata
+    and added as explicit edges. No new cross-source relationship is
+    inferred by this graph builder.
     """
 
     graph = nx.MultiDiGraph()
@@ -517,6 +624,46 @@ def build_multi_source_context_graph(
             ),
         )
 
+    # ------------------------------------------------------
+    # Add validated cross-source relationships
+    # ------------------------------------------------------
+
+    for relationship in load_cross_source_relationships():
+        source_node = make_node_id(
+            relationship["source_id"],
+            relationship["source_table"],
+        )
+        target_node = make_node_id(
+            relationship["target_source_id"],
+            relationship["target_table"],
+        )
+
+        if source_node not in graph or target_node not in graph:
+            continue
+
+        graph.add_edge(
+            source_node,
+            target_node,
+            relationship_type="CROSS_SOURCE_RELATIONSHIP",
+            relationship_kind=relationship.get("relationship_kind", "reference"),
+            source_id=relationship["source_id"],
+            target_source_id=relationship["target_source_id"],
+            source_table=relationship["source_table"],
+            source_column=relationship["source_column"],
+            target_table=relationship["target_table"],
+            target_column=relationship["target_column"],
+            evidence=(
+                f'{relationship["source_id"]}:{relationship["source_table"]}.'
+                f'{relationship["source_column"]} -> '
+                f'{relationship["target_source_id"]}:{relationship["target_table"]}.'
+                f'{relationship["target_column"]}'
+            ),
+            confidence=relationship.get("confidence"),
+            matching_identifier_count=relationship.get("matching_identifier_count"),
+            overlap_detected=relationship.get("overlap_detected"),
+            source=relationship.get("source", "cross_source_validator"),
+        )
+
     return graph
 
 
@@ -526,6 +673,7 @@ def get_graph_summary(
 
     database_relationships = 0
     business_relationships = 0
+    cross_source_relationships = 0
 
     for _, _, data in graph.edges(
         data=True
@@ -547,6 +695,9 @@ def get_graph_summary(
         ):
             business_relationships += 1
 
+        elif relationship_type == "CROSS_SOURCE_RELATIONSHIP":
+            cross_source_relationships += 1
+
     return {
         "nodes": graph.number_of_nodes(),
         "edges": graph.number_of_edges(),
@@ -556,6 +707,7 @@ def get_graph_summary(
         "business_relationships": (
             business_relationships
         ),
+        "cross_source_relationships": cross_source_relationships,
     }
 
 
