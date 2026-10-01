@@ -3,11 +3,9 @@ import ReactMarkdown from "react-markdown";
 import GraphView from "./components/GraphView";
 import "./App.css";
 
-
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
   "http://127.0.0.1:8000";
-
 
 function getNodeSource(node) {
   if (node?.source_id) {
@@ -23,11 +21,8 @@ function getNodeSource(node) {
   return "unknown";
 }
 
-
 function getSourceLabel(sourceId) {
-  const source = String(
-    sourceId || ""
-  ).toLowerCase();
+  const source = String(sourceId || "").toLowerCase();
 
   if (source === "db1") {
     return "DB1";
@@ -48,7 +43,6 @@ function getSourceLabel(sourceId) {
   return sourceId || "Unknown";
 }
 
-
 function getSourceDetails(message, sourceId) {
   const sources = Array.isArray(
     message?.response_data?.sources
@@ -63,9 +57,8 @@ function getSourceDetails(message, sourceId) {
   const postgresSource = sources.find(
     (source) =>
       source?.source_type === "postgresql" &&
-      String(
-        source?.source_id || ""
-      ).toLowerCase() === normalizedSource
+      String(source?.source_id || "").toLowerCase() ===
+        normalizedSource
   );
 
   if (postgresSource) {
@@ -76,14 +69,12 @@ function getSourceDetails(message, sourceId) {
     return (
       sources.find(
         (source) =>
-          source?.source_type ===
-          "security_logs_api"
+          source?.source_type === "security_logs_api"
       ) ||
       message?.response_data?.source_trace?.external_sources?.find(
         (source) =>
-          String(
-            source?.id || ""
-          ).toLowerCase() === normalizedSource
+          String(source?.id || "").toLowerCase() ===
+          normalizedSource
       ) ||
       null
     );
@@ -91,7 +82,6 @@ function getSourceDetails(message, sourceId) {
 
   return null;
 }
-
 
 function getSourceStatus(details) {
   if (!details) {
@@ -121,118 +111,104 @@ function getSourceStatus(details) {
   return "Retrieved";
 }
 
-
 function App() {
-  const [authenticated, setAuthenticated] =
-    useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
 
-  const [authChecking, setAuthChecking] =
-    useState(true);
-
-  const [username, setUsername] =
-    useState("");
-
-  const [password, setPassword] =
-    useState("");
-
-  const [loginError, setLoginError] =
-    useState("");
-
-  const [loginLoading, setLoginLoading] =
-    useState(false);
-
-  const [selectedEntity, setSelectedEntity] =
-    useState(null);
-
-  const [selectedSource, setSelectedSource] =
-    useState(null);
-
-  const [question, setQuestion] =
-    useState("");
-
-  const [messages, setMessages] =
-    useState([]);
-
-  const [loading, setLoading] =
-    useState(false);
+  const [selectedEntity, setSelectedEntity] = useState(null);
+  const [selectedSource, setSelectedSource] = useState(null);
+  const [question, setQuestion] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
 
   const [graphData, setGraphData] = useState({
     nodes: [],
     edges: [],
   });
 
-  const [graphTrace, setGraphTrace] =
-    useState({
-      nodes: [],
-      edges: [],
-      tables: [],
-      source_entities: [],
-      source_tables: [],
-      matched_graph_nodes: [],
-    });
+  const [graphTrace, setGraphTrace] = useState({
+    nodes: [],
+    edges: [],
+    tables: [],
+    source_entities: [],
+    source_tables: [],
+    matched_graph_nodes: [],
+  });
 
-  const [sourceTrace, setSourceTrace] =
-    useState({
-      data_sources: [],
-      external_sources: [],
-    });
+  const [sourceTrace, setSourceTrace] = useState({
+    data_sources: [],
+    external_sources: [],
+  });
 
-  const [graphSummary, setGraphSummary] =
-    useState({
-      nodes: 0,
-      edges: 0,
-      database_relationships: 0,
-      business_relationships: 0,
-    });
-
+  const [graphSummary, setGraphSummary] = useState({
+    nodes: 0,
+    edges: 0,
+    database_relationships: 0,
+    business_relationships: 0,
+  });
 
   // -------------------------------------------------------
   // Authentication
   // -------------------------------------------------------
 
   useEffect(() => {
-    const checkAuthentication =
-      async () => {
-        try {
-          const response = await fetch(
-            `${API_BASE_URL}/api/auth/me`,
-            {
-              credentials: "include",
-            }
-          );
+    let mounted = true;
 
-          setAuthenticated(
-            response.ok
-          );
-        } catch (error) {
-          console.error(
-            "Authentication check failed:",
-            error
-          );
+    const checkAuthentication = async () => {
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/api/auth/me`,
+          {
+            method: "GET",
+            credentials: "include",
+            cache: "no-store",
+            headers: {
+              Accept: "application/json",
+            },
+          }
+        );
 
-          setAuthenticated(false);
-        } finally {
+        if (!mounted) {
+          return;
+        }
+
+        setAuthenticated(response.ok);
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+
+        console.error(
+          "Authentication check failed:",
+          error
+        );
+
+        setAuthenticated(false);
+      } finally {
+        if (mounted) {
           setAuthChecking(false);
         }
-      };
+      }
+    };
 
     checkAuthentication();
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-
-  const handleLogin = async (
-    event
-  ) => {
+  const handleLogin = async (event) => {
     event.preventDefault();
 
-    if (
-      !username.trim() ||
-      !password
-    ) {
+    if (!username.trim() || !password) {
       setLoginError(
         "Please enter your username and password."
       );
-
       return;
     }
 
@@ -245,9 +221,10 @@ function App() {
         {
           method: "POST",
           credentials: "include",
+          cache: "no-store",
           headers: {
-            "Content-Type":
-              "application/json",
+            "Content-Type": "application/json",
+            Accept: "application/json",
           },
           body: JSON.stringify({
             username: username.trim(),
@@ -256,8 +233,13 @@ function App() {
         }
       );
 
-      const data =
-        await response.json();
+      let data = {};
+
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
 
       if (!response.ok) {
         throw new Error(
@@ -269,21 +251,18 @@ function App() {
       setAuthenticated(true);
       setUsername("");
       setPassword("");
+      setLoginError("");
     } catch (error) {
-      console.error(
-        "Login failed:",
-        error
-      );
+      console.error("Login failed:", error);
 
+      setAuthenticated(false);
       setLoginError(
-        error.message ||
-          "Unable to sign in."
+        error.message || "Unable to sign in."
       );
     } finally {
       setLoginLoading(false);
     }
   };
-
 
   const handleLogout = async () => {
     try {
@@ -292,6 +271,10 @@ function App() {
         {
           method: "POST",
           credentials: "include",
+          cache: "no-store",
+          headers: {
+            Accept: "application/json",
+          },
         }
       );
     } catch (error) {
@@ -305,10 +288,12 @@ function App() {
       setSelectedEntity(null);
       setSelectedSource(null);
       setQuestion("");
+
       setGraphData({
         nodes: [],
         edges: [],
       });
+
       setGraphTrace({
         nodes: [],
         edges: [],
@@ -317,13 +302,32 @@ function App() {
         source_tables: [],
         matched_graph_nodes: [],
       });
+
       setSourceTrace({
         data_sources: [],
         external_sources: [],
       });
+
+      setGraphSummary({
+        nodes: 0,
+        edges: 0,
+        database_relationships: 0,
+        business_relationships: 0,
+      });
+
+      /*
+       * Force a clean application load after logout.
+       *
+       * This guarantees that even if the user immediately
+       * pastes/opens the application URL again, the frontend
+       * starts from the authentication check instead of
+       * relying on an already-mounted application state.
+       */
+      window.location.replace(
+        window.location.origin
+      );
     }
   };
-
 
   // -------------------------------------------------------
   // Graph source summary
@@ -332,66 +336,49 @@ function App() {
   const sourceSummary = useMemo(() => {
     const counts = {};
 
-    (graphData?.nodes || []).forEach(
-      (node) => {
-        const sourceId =
-          getNodeSource(node);
+    (graphData?.nodes || []).forEach((node) => {
+      const sourceId = getNodeSource(node);
 
-        counts[sourceId] =
-          (counts[sourceId] || 0) + 1;
-      }
-    );
+      counts[sourceId] =
+        (counts[sourceId] || 0) + 1;
+    });
 
     return Object.entries(counts)
       .sort(([a], [b]) =>
         a.localeCompare(b)
       )
-      .map(
-        ([sourceId, count]) => ({
-          sourceId,
-          label:
-            getSourceLabel(
-              sourceId
-            ),
-          count,
-        })
-      );
+      .map(([sourceId, count]) => ({
+        sourceId,
+        label: getSourceLabel(sourceId),
+        count,
+      }));
   }, [graphData]);
-
 
   // -------------------------------------------------------
   // Current query sources
   // -------------------------------------------------------
 
-  const activeAnswerSources =
-    useMemo(() => {
-      const sources = new Set();
+  const activeAnswerSources = useMemo(() => {
+    const sources = new Set();
 
-      (
-        sourceTrace?.data_sources ||
-        []
-      ).forEach((source) => {
-        if (source) {
-          sources.add(
-            String(source)
-          );
-        }
-      });
+    (
+      sourceTrace?.data_sources || []
+    ).forEach((source) => {
+      if (source) {
+        sources.add(String(source));
+      }
+    });
 
-      (
-        sourceTrace?.external_sources ||
-        []
-      ).forEach((source) => {
-        if (source?.id) {
-          sources.add(
-            String(source.id)
-          );
-        }
-      });
+    (
+      sourceTrace?.external_sources || []
+    ).forEach((source) => {
+      if (source?.id) {
+        sources.add(String(source.id));
+      }
+    });
 
-      return Array.from(sources);
-    }, [sourceTrace]);
-
+    return Array.from(sources);
+  }, [sourceTrace]);
 
   // -------------------------------------------------------
   // Load graph
@@ -402,15 +389,28 @@ function App() {
       return;
     }
 
+    let mounted = true;
+
     const loadGraph = async () => {
       try {
-        const response =
-          await fetch(
-            `${API_BASE_URL}/api/graph`,
-            {
-              credentials: "include",
-            }
-          );
+        const response = await fetch(
+          `${API_BASE_URL}/api/graph`,
+          {
+            method: "GET",
+            credentials: "include",
+            cache: "no-store",
+            headers: {
+              Accept: "application/json",
+            },
+          }
+        );
+
+        if (response.status === 401) {
+          if (mounted) {
+            setAuthenticated(false);
+          }
+          return;
+        }
 
         if (!response.ok) {
           throw new Error(
@@ -418,8 +418,11 @@ function App() {
           );
         }
 
-        const data =
-          await response.json();
+        const data = await response.json();
+
+        if (!mounted) {
+          return;
+        }
 
         setGraphData(
           data.graph || {
@@ -437,77 +440,76 @@ function App() {
           }
         );
       } catch (error) {
-        console.error(
-          "Failed to load context graph:",
-          error
-        );
+        if (mounted) {
+          console.error(
+            "Failed to load context graph:",
+            error
+          );
+        }
       }
     };
 
     loadGraph();
-  }, [authenticated]);
 
+    return () => {
+      mounted = false;
+    };
+  }, [authenticated]);
 
   // -------------------------------------------------------
   // Entity selection
   // -------------------------------------------------------
 
-  const handleEntitySelect =
-    (entity) => {
-      setSelectedEntity(entity);
-    };
-
+  const handleEntitySelect = (entity) => {
+    setSelectedEntity(entity);
+  };
 
   // -------------------------------------------------------
   // Ask Cenario
   // -------------------------------------------------------
 
   const handleAsk = async () => {
-    const trimmedQuestion =
-      question.trim();
+    const trimmedQuestion = question.trim();
 
-    if (
-      !trimmedQuestion ||
-      loading
-    ) {
+    if (!trimmedQuestion || loading) {
       return;
     }
 
-    setMessages(
-      (previous) => [
-        ...previous,
-        {
-          role: "user",
-          content:
-            trimmedQuestion,
-        },
-      ]
-    );
+    setMessages((previous) => [
+      ...previous,
+      {
+        role: "user",
+        content: trimmedQuestion,
+      },
+    ]);
 
     setQuestion("");
     setLoading(true);
     setSelectedSource(null);
 
     try {
-      const response =
-        await fetch(
-          `${API_BASE_URL}/api/chat`,
-          {
-            method: "POST",
-            credentials: "include",
-            headers: {
-              "Content-Type":
-                "application/json",
-            },
-            body: JSON.stringify({
-              question:
-                trimmedQuestion,
-            }),
-          }
-        );
+      const response = await fetch(
+        `${API_BASE_URL}/api/chat`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            question: trimmedQuestion,
+          }),
+        }
+      );
 
-      const data =
-        await response.json();
+      const data = await response.json();
+
+      if (response.status === 401) {
+        setAuthenticated(false);
+        setMessages([]);
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(
@@ -516,21 +518,18 @@ function App() {
         );
       }
 
-      setMessages(
-        (previous) => [
-          ...previous,
-          {
-            role: "assistant",
-            content:
-              data.answer ||
-              "I could not generate an answer.",
-            sources:
-              data.source_trace ||
-              null,
-            response_data: data,
-          },
-        ]
-      );
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content:
+            data.answer ||
+            "I could not generate an answer.",
+          sources:
+            data.source_trace || null,
+          response_data: data,
+        },
+      ]);
 
       setGraphData(
         data.graph || {
@@ -568,31 +567,26 @@ function App() {
         error
       );
 
-      setMessages(
-        (previous) => [
-          ...previous,
-          {
-            role: "assistant",
-            content:
-              "Sorry, I could not process your question right now.",
-          },
-        ]
-      );
+      setMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content:
+            "Sorry, I could not process your question right now.",
+        },
+      ]);
     } finally {
       setLoading(false);
     }
   };
 
-
   // -------------------------------------------------------
   // Suggestions
   // -------------------------------------------------------
 
-  const handleSuggestion =
-    (suggestion) => {
-      setQuestion(suggestion);
-    };
-
+  const handleSuggestion = (suggestion) => {
+    setQuestion(suggestion);
+  };
 
   // -------------------------------------------------------
   // Authentication loading screen
@@ -624,7 +618,6 @@ function App() {
       </div>
     );
   }
-
 
   // -------------------------------------------------------
   // Login screen
@@ -667,9 +660,7 @@ function App() {
                 )
               }
               autoComplete="username"
-              disabled={
-                loginLoading
-              }
+              disabled={loginLoading}
               autoFocus
             />
           </div>
@@ -689,9 +680,7 @@ function App() {
                 )
               }
               autoComplete="current-password"
-              disabled={
-                loginLoading
-              }
+              disabled={loginLoading}
             />
           </div>
 
@@ -704,9 +693,7 @@ function App() {
           <button
             className="auth-button"
             type="submit"
-            disabled={
-              loginLoading
-            }
+            disabled={loginLoading}
           >
             {loginLoading
               ? "Signing in..."
@@ -716,7 +703,6 @@ function App() {
       </div>
     );
   }
-
 
   // -------------------------------------------------------
   // Main CenarioCG application
@@ -807,9 +793,7 @@ function App() {
 
               <div>
                 <div className="stat-number">
-                  {
-                    graphSummary.nodes
-                  }
+                  {graphSummary.nodes}
                 </div>
 
                 <div className="stat-label">
@@ -878,9 +862,7 @@ function App() {
 
               <div>
                 <div className="stat-number">
-                  {
-                    graphSummary.edges
-                  }
+                  {graphSummary.edges}
                 </div>
 
                 <div className="stat-label">
@@ -915,15 +897,12 @@ function App() {
             </div>
 
             <div className="source-list">
-              {sourceSummary.length >
-              0 ? (
+              {sourceSummary.length > 0 ? (
                 sourceSummary.map(
                   (source) => (
                     <div
                       className="source-card"
-                      key={
-                        source.sourceId
-                      }
+                      key={source.sourceId}
                     >
                       <div className="source-card-icon">
                         ◉
@@ -931,15 +910,11 @@ function App() {
 
                       <div className="source-card-content">
                         <div className="source-card-title">
-                          {
-                            source.label
-                          }
+                          {source.label}
                         </div>
 
                         <div className="source-card-meta">
-                          {
-                            source.count
-                          }{" "}
+                          {source.count}{" "}
                           entities
                         </div>
                       </div>
@@ -959,8 +934,7 @@ function App() {
             </div>
           </section>
 
-          {activeAnswerSources.length >
-            0 && (
+          {activeAnswerSources.length > 0 && (
             <section className="answer-source-bar">
               <span className="answer-source-label">
                 CURRENT QUERY
@@ -1022,21 +996,13 @@ function App() {
 
               <div className="graph-wrapper">
                 <GraphView
-                  graphData={
-                    graphData
-                  }
-                  graphTrace={
-                    graphTrace
-                  }
-                  sourceTrace={
-                    sourceTrace
-                  }
+                  graphData={graphData}
+                  graphTrace={graphTrace}
+                  sourceTrace={sourceTrace}
                   onEntitySelect={
                     handleEntitySelect
                   }
-                  loading={
-                    loading
-                  }
+                  loading={loading}
                 />
 
                 <div className="graph-overlay">
@@ -1202,8 +1168,7 @@ function App() {
             </div>
 
             <div className="chat-content">
-              {messages.length ===
-              0 ? (
+              {messages.length === 0 ? (
                 <div className="chat-empty">
                   <div className="chat-icon">
                     ✦
@@ -1410,16 +1375,12 @@ function App() {
                     }
                   }}
                   placeholder="Ask a question about your connected data..."
-                  disabled={
-                    loading
-                  }
+                  disabled={loading}
                 />
 
                 <button
                   type="button"
-                  onClick={
-                    handleAsk
-                  }
+                  onClick={handleAsk}
                   disabled={
                     loading ||
                     !question.trim()
@@ -1442,9 +1403,7 @@ function App() {
           <div
             className="source-overlay-backdrop"
             onClick={() =>
-              setSelectedSource(
-                null
-              )
+              setSelectedSource(null)
             }
           >
             <div
@@ -1729,5 +1688,5 @@ function App() {
   );
 }
 
-
 export default App;
+
