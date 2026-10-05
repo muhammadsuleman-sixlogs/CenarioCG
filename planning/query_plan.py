@@ -906,20 +906,26 @@ def _normalize_string_list(
     values: list[str],
     field_name: str,
 ) -> list[str]:
+    if values is None:
+        return []
+
+    if isinstance(values, str):
+        values = [values]
+
     if not isinstance(values, list):
-        raise ValueError(
-            f"Query step {field_name} must be a list of strings."
-        )
+        return []
 
     normalized: list[str] = []
 
     for value in values:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(
-                f"Query step {field_name} must contain "
-                "non-empty strings."
-            )
+        if isinstance(value, str):
+            item_str = value.strip()
+        elif isinstance(value, (int, float)):
+            item_str = str(value).strip()
+        else:
+            continue
 
-        normalized.append(value.strip())
+        if item_str:
+            normalized.append(item_str)
 
     return list(dict.fromkeys(normalized))

@@ -99,8 +99,89 @@ def test_sql_generation():
     )
 
 
+def test_ranking_uses_distinct_on_not_group_by():
+    """Latest-per-group ranking must not emit invalid GROUP BY SQL."""
+    context = {
+        "tables": {
+            "projects": {
+                "columns": [
+                    {"name": "project_id"},
+                    {"name": "project_title"},
+                    {"name": "project_code"},
+                ],
+                "primary_keys": ["project_id"],
+            },
+            "sessions": {
+                "columns": [
+                    {"name": "session_id"},
+                    {"name": "project_id"},
+                    {"name": "meeting_title"},
+                    {"name": "created_at"},
+                ],
+                "primary_keys": ["session_id"],
+            },
+        },
+        "relationships": [
+            {
+                "source_table": "sessions",
+                "source_column": "project_id",
+                "target_table": "projects",
+                "target_column": "project_id",
+                "relationship_type": "FOREIGN_KEY",
+            }
+        ],
+    }
+
+    contract = {
+        "question": "Return project name/code and latest meeting title",
+        "required_tables": ["projects", "sessions"],
+        "required_columns": [
+            "projects.project_title",
+            "projects.project_code",
+            "sessions.meeting_title",
+            "sessions.created_at",
+            "sessions.project_id",
+        ],
+        "relationships": [
+            {
+                "source_table": "sessions",
+                "source_column": "project_id",
+                "target_table": "projects",
+                "target_column": "project_id",
+                "relationship_type": "FOREIGN_KEY",
+            }
+        ],
+        "filters": [],
+        "operations": ["lookup", "ranking"],
+        "grouping": [
+            "projects.project_title",
+            "projects.project_code",
+        ],
+        "sorting": [
+            {
+                "field": "sessions.created_at",
+                "direction": "desc",
+            }
+        ],
+        "limit": None,
+        "entities": [],
+    }
+
+    query = SQLGenerator(context, source_id="db2").generate(contract)
+    normalized = " ".join(query.upper().split())
+
+    assert "SELECT DISTINCT ON" in normalized
+    assert "GROUP BY" not in normalized
+    assert "ORDER BY" in normalized
+    assert "CREATED_AT" in normalized and "DESC" in normalized
+    validate_sql_syntax(query)
+
+    print("Ranking DISTINCT ON generation passed.")
+
+
 if __name__ == "__main__":
     test_sql_generation()
+    test_ranking_uses_distinct_on_not_group_by()
 
     print(
         "All SQL generator tests passed."

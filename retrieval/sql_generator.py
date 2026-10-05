@@ -641,6 +641,11 @@ class SQLGenerator:
 
         requested = column_name.strip()
 
+        if "." in requested:
+            parts = [p.strip() for p in requested.split(".", 1)]
+            if len(parts) == 2 and parts[1]:
+                requested = parts[1]
+
         columns = self._columns(
             actual_table
         )
@@ -698,12 +703,19 @@ class SQLGenerator:
                 "Retrieval contract requires at least one table."
             )
 
+        contract_rels = contract.get("relationships", [])
+        context_rels = self.context.get("relationships", [])
+        combined_relationships = (
+            list(contract_rels) if isinstance(contract_rels, list) else []
+        )
+        if isinstance(context_rels, list):
+            combined_relationships.extend(
+                [rel for rel in context_rels if isinstance(rel, dict)]
+            )
+
         selected_tables = self._build_joined_table_set(
             required_tables,
-            contract.get(
-                "relationships",
-                [],
-            ),
+            combined_relationships,
         )
 
         where_clauses = self._compile_filters(
@@ -778,21 +790,32 @@ class SQLGenerator:
 
         from_sql = self._compile_from_and_joins(
             required_tables=required_tables,
-            relationships=contract.get(
-                "relationships",
-                [],
-            ),
+            relationships=combined_relationships,
         )
 
         distinct = self._uses_distinct(
             contract
         )
 
-        select_keyword = (
-            "SELECT DISTINCT"
-            if distinct
-            else "SELECT"
+        # Ranking with grouping means "latest/top row per group", not SQL
+        # aggregation. Use DISTINCT ON so non-grouped selected columns
+        # (e.g. meeting_title) remain valid under PostgreSQL.
+        is_ranking_query = (
+            "ranking" in operations
+            and not has_metrics
+            and bool(grouping)
         )
+
+        if is_ranking_query:
+            select_keyword = (
+                "SELECT DISTINCT ON ("
+                + ", ".join(grouping)
+                + ")"
+            )
+        elif distinct:
+            select_keyword = "SELECT DISTINCT"
+        else:
+            select_keyword = "SELECT"
 
         query_parts = [
             f"{select_keyword} {select_sql}",
@@ -807,19 +830,21 @@ class SQLGenerator:
                 )
             )
 
-        if grouping:
+        if grouping and (aggregate_query or has_metrics):
             query_parts.append(
                 "GROUP BY "
                 + ", ".join(grouping)
             )
-        elif aggregate_query:
-            # Aggregate expressions without grouping require no GROUP BY.
-            pass
 
-        if sorting:
+        order_by = self._compile_order_by(
+            sorting=sorting,
+            grouping=grouping,
+            ranking_query=is_ranking_query,
+        )
+        if order_by:
             query_parts.append(
                 "ORDER BY "
-                + ", ".join(sorting)
+                + ", ".join(order_by)
             )
 
         limit = contract.get(
@@ -2167,17 +2192,17 @@ class SQLGenerator:
 
             if operator == "in":
                 result.append(
-                    f"{qualified} = ANY({placeholder})"
+                    f"CAST({qualified} AS text) = ANY({placeholder})"
                 )
 
             elif operator == "not_in":
                 result.append(
-                    f"{qualified} <> ALL({placeholder})"
+                    f"CAST({qualified} AS text) <> ALL({placeholder})"
                 )
 
             else:
                 result.append(
-                    f"{qualified} = {placeholder}"
+                    f"CAST({qualified} AS text) = {placeholder}"
                 )
 
         return result
@@ -2209,6 +2234,34 @@ class SQLGenerator:
                 result
             )
         )
+
+    def _compile_order_by(
+        self,
+        sorting: list[str],
+        grouping: list[str],
+        ranking_query: bool,
+    ) -> list[str]:
+        """
+        Build ORDER BY expressions.
+
+        PostgreSQL DISTINCT ON requires the leading ORDER BY expressions to
+        match the DISTINCT ON expressions. For ranking queries, prepend the
+        grouping keys, then append the requested sort keys.
+        """
+        if ranking_query and grouping:
+            order_by = [f"{field} ASC" for field in grouping]
+            seen = {field.lower() for field in grouping}
+
+            for item in sorting:
+                expression = item.rsplit(" ", 1)[0].strip()
+                if expression.lower() in seen:
+                    continue
+                order_by.append(item)
+                seen.add(expression.lower())
+
+            return order_by
+
+        return list(sorting)
 
     def _compile_sorting(
         self,

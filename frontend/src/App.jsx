@@ -117,12 +117,83 @@ function getSourceDetails(message, sourceId) {
     ...messageExternalSources,
   ];
 
-  const matchingSource = allSources.find((source) => {
+  const objectSources = allSources.filter(
+    (source) => source && typeof source === "object"
+  );
+
+  if (normalizedSource === "postgresql") {
+    const postgresSources = objectSources.filter((source) => {
+      const candidates = [
+        source?.source_id,
+        source?.id,
+        source?.source,
+        source?.name,
+        source?.source_type,
+      ]
+        .filter(Boolean)
+        .map((value) => String(value).toLowerCase());
+
+      return (
+        source?.source_type === "postgresql" ||
+        candidates.includes("postgresql") ||
+        candidates.includes("db1") ||
+        candidates.includes("db2")
+      );
+    });
+
+    if (postgresSources.length === 1) {
+      return postgresSources[0];
+    }
+
+    if (postgresSources.length > 1) {
+      const combinedTables = Array.from(
+        new Set(postgresSources.flatMap((s) => s.tables || []))
+      );
+      const combinedEntities = Array.from(
+        new Set(postgresSources.flatMap((s) => s.entities || []))
+      );
+      const combinedColumns = Array.from(
+        new Set(postgresSources.flatMap((s) => s.columns || []))
+      );
+      const combinedQueries = postgresSources
+        .map((s) => {
+          const label = s.source_id || s.source || s.name || "PostgreSQL";
+          return `-- Source (${label}):\n${s.query || "No query recorded"}`;
+        })
+        .join("\n\n");
+      const totalRowCount = postgresSources.reduce(
+        (sum, s) => sum + (typeof s.row_count === "number" ? s.row_count : 0),
+        0
+      );
+      const sourceIds = Array.from(
+        new Set(
+          postgresSources.map(
+            (s) => s.source_id || s.source || "postgresql"
+          )
+        )
+      ).join(", ");
+
+      return {
+        source_type: "postgresql",
+        source_id: sourceIds,
+        tables: combinedTables,
+        entities: combinedEntities,
+        columns: combinedColumns,
+        query: combinedQueries,
+        row_count: totalRowCount,
+        retrieval_status:
+          totalRowCount > 0 ? "success_with_data" : "success_empty",
+      };
+    }
+  }
+
+  const matchingSource = objectSources.find((source) => {
     const candidates = [
       source?.source_id,
       source?.id,
       source?.source,
       source?.name,
+      source?.source_type,
     ]
       .filter(Boolean)
       .map((value) => String(value).toLowerCase());
@@ -132,15 +203,10 @@ function getSourceDetails(message, sourceId) {
     }
 
     if (
-      normalizedSource === "security_logs" &&
-      candidates.includes("security_logs_api")
-    ) {
-      return true;
-    }
-
-    if (
-      normalizedSource === "security_logs_api" &&
-      candidates.includes("security_logs")
+      (normalizedSource === "security_logs" ||
+        normalizedSource === "security_logs_api") &&
+      (candidates.includes("security_logs") ||
+        candidates.includes("security_logs_api"))
     ) {
       return true;
     }

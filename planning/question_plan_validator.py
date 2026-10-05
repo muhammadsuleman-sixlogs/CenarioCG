@@ -291,8 +291,9 @@ class QuestionPlanValidator:
 
         Field references are resolved only against the PostgreSQL source IDs
         selected by the plan and, when available, the plan's required tables.
-        Ambiguous bare fields are intentionally left unchanged so validation
-        rejects them instead of guessing.
+        When a bare field exists on multiple required tables, ties are broken
+        by preferred tables (for example input bindings) then required_tables
+        order. Unscoped ambiguity is left unchanged.
         """
 
         normalized = deepcopy(plan)
@@ -311,8 +312,9 @@ class QuestionPlanValidator:
             source_ids=normalized["postgresql_sources"],
             candidate_tables=normalized["required_tables"],
         )
-        normalized["relationships"] = self._canonical_list(
-            normalized.get("relationships", [])
+        normalized["relationships"] = self._canonical_relationships(
+            normalized.get("relationships", []),
+            source_ids=normalized["postgresql_sources"],
         )
         normalized["filters"] = self._canonical_filters(
             normalized.get("filters", []),
@@ -339,14 +341,44 @@ class QuestionPlanValidator:
         execution_plan = normalized.get("execution_plan")
         if isinstance(execution_plan, dict):
             normalized["execution_plan"] = self._canonicalize_execution_plan(
-                execution_plan
+                execution_plan,
+                top_level_plan=normalized,
             )
+        elif execution_plan is None and normalized.get("postgresql_sources"):
+            source_id = (
+                str(normalized["postgresql_sources"][0]).strip().lower()
+                if normalized.get("postgresql_sources")
+                else "db1"
+            )
+            normalized["execution_plan"] = {
+                "mode": "single",
+                "steps": [
+                    {
+                        "id": "s1",
+                        "type": "source_query",
+                        "source_id": source_id,
+                        "contract": deepcopy(normalized),
+                        "depends_on": [],
+                        "inputs": [],
+                        "input_bindings": [],
+                        "key_columns": [],
+                        "output_columns": deepcopy(
+                            normalized.get("required_columns", [])
+                        ),
+                        "purpose": normalized.get(
+                            "question", "Single step query execution"
+                        ),
+                    }
+                ],
+                "final_step": "s1",
+            }
 
         return normalized
 
     def _canonicalize_execution_plan(
         self,
         execution_plan: dict[str, Any],
+        top_level_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Canonicalize execution steps without erasing nested contracts.
 
@@ -358,9 +390,37 @@ class QuestionPlanValidator:
         """
         normalized = deepcopy(execution_plan)
 
-        raw_steps = normalized.get("steps", [])
-        if not isinstance(raw_steps, list):
-            return normalized
+        raw_steps = normalized.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            mode = str(normalized.get("mode", "single")).strip().lower()
+            if mode == "single" and top_level_plan:
+                source_id = "db1"
+                pg_sources = top_level_plan.get("postgresql_sources", [])
+                if isinstance(pg_sources, list) and pg_sources:
+                    source_id = str(pg_sources[0]).strip().lower()
+
+                raw_steps = [
+                    {
+                        "id": "s1",
+                        "type": "source_query",
+                        "source_id": source_id,
+                        "contract": deepcopy(top_level_plan),
+                        "depends_on": [],
+                        "inputs": [],
+                        "input_bindings": [],
+                        "key_columns": [],
+                        "output_columns": deepcopy(
+                            top_level_plan.get("required_columns", [])
+                        ),
+                        "purpose": top_level_plan.get(
+                            "question", "Single step query execution"
+                        ),
+                    }
+                ]
+                normalized["steps"] = raw_steps
+                normalized["final_step"] = "s1"
+            else:
+                return normalized
 
         canonical_steps: list[Any] = []
 
@@ -408,6 +468,10 @@ class QuestionPlanValidator:
                 step_source_ids = self._canonical_string_list(
                     original_step.get("postgresql_sources", [])
                 )
+
+            preferred_tables = self._preferred_tables_from_step(
+                original_step
+            )
 
             # Start from the nested contract if it exists. This is critical
             # for multi-source plans because the top-level step may only
@@ -462,6 +526,7 @@ class QuestionPlanValidator:
                         value,
                         source_ids=step_source_ids,
                         candidate_tables=candidate_tables,
+                        preferred_tables=preferred_tables,
                     )
 
                 elif field_name == "relationships":
@@ -510,9 +575,16 @@ class QuestionPlanValidator:
             contract_source_ids = self._canonical_string_list(
                 contract.get("postgresql_sources", step_source_ids)
             )
-            contract_tables = self._canonical_string_list(
+            raw_contract_tables = self._canonical_string_list(
                 contract.get("required_tables", [])
             )
+            if contract_source_ids:
+                known_for_step = self._known_tables(contract_source_ids)
+                contract_tables = [
+                    t for t in raw_contract_tables if t in known_for_step
+                ]
+            else:
+                contract_tables = raw_contract_tables
 
             contract["data_sources"] = self._canonical_string_list(
                 contract.get("data_sources", ["postgresql"])
@@ -523,9 +595,11 @@ class QuestionPlanValidator:
                 contract.get("required_columns", []),
                 source_ids=contract_source_ids,
                 candidate_tables=contract_tables,
+                preferred_tables=preferred_tables,
             )
-            contract["relationships"] = self._canonical_list(
-                contract.get("relationships", [])
+            contract["relationships"] = self._canonical_relationships(
+                contract.get("relationships", []),
+                source_ids=contract_source_ids,
             )
             contract["filters"] = self._canonical_filters(
                 contract.get("filters", []),
@@ -563,6 +637,64 @@ class QuestionPlanValidator:
         return normalized
 
     @staticmethod
+    def _preferred_tables_from_step(
+        step: dict[str, Any],
+    ) -> list[str]:
+        """Collect table preference hints from step bindings and columns."""
+        preferred: list[str] = []
+
+        bindings = step.get("input_bindings", [])
+        if isinstance(bindings, list):
+            for binding in bindings:
+                if not isinstance(binding, dict):
+                    continue
+                to_table = binding.get("to_table")
+                if isinstance(to_table, str) and to_table.strip():
+                    preferred.append(to_table.strip())
+
+        for field_name in (
+            "output_columns",
+            "grouping",
+            "key_columns",
+        ):
+            values = step.get(field_name, [])
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, str) or value.count(".") != 1:
+                    continue
+                table_name = value.split(".", 1)[0].strip()
+                if table_name:
+                    preferred.append(table_name)
+
+        contract = step.get("contract")
+        if isinstance(contract, dict):
+            for field_name in ("grouping", "sorting", "required_columns"):
+                values = contract.get(field_name, [])
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    if isinstance(value, dict):
+                        table_name = str(
+                            value.get("table")
+                            or value.get("table_name")
+                            or ""
+                        ).strip()
+                        if table_name:
+                            preferred.append(table_name)
+                        field = value.get("field")
+                        if isinstance(field, str) and field.count(".") == 1:
+                            preferred.append(field.split(".", 1)[0].strip())
+                        continue
+                    if not isinstance(value, str) or value.count(".") != 1:
+                        continue
+                    preferred.append(value.split(".", 1)[0].strip())
+
+        return list(dict.fromkeys(
+            table for table in preferred if table
+        ))
+
+    @staticmethod
     def _canonical_list(value: Any) -> list[Any]:
         if value is None:
             return []
@@ -574,24 +706,29 @@ class QuestionPlanValidator:
             return []
         if not isinstance(value, list):
             value = [value]
-        return [
-            str(item).strip()
-            for item in value
-            if isinstance(item, (str, int, float))
-            and str(item).strip()
-        ]
+        result: list[str] = []
+        for item in value:
+            if isinstance(item, (str, int, float)):
+                cleaned = str(item).strip().strip('"').strip("'")
+                if cleaned:
+                    result.append(cleaned)
+        return result
 
     def _resolve_bare_column(
         self,
         column_name: str,
         source_ids: list[str] | None = None,
         candidate_tables: list[str] | None = None,
+        preferred_tables: list[str] | None = None,
     ) -> str | None:
         """
-        Resolve one bare column name only when its discovered location is
-        unique within the selected PostgreSQL source/table scope.
+        Resolve one bare column name within the selected PostgreSQL
+        source/table scope.
 
-        No semantic inference is performed. Ambiguity returns None.
+        Unique matches always win. When multiple tables contain the same
+        column and the plan already declared candidate tables, break ties
+        using preferred_tables (if any) then candidate_tables order.
+        Unscoped ambiguity still returns None.
         """
 
         if not isinstance(column_name, str) or not column_name.strip():
@@ -608,11 +745,21 @@ class QuestionPlanValidator:
         if not normalized_sources:
             normalized_sources = self._available_postgresql_sources()
 
-        normalized_tables = {
-            str(table).strip().lower()
+        table_order = [
+            str(table).strip()
             for table in (candidate_tables or [])
             if isinstance(table, str) and table.strip()
+        ]
+        normalized_tables = {
+            table.lower()
+            for table in table_order
         }
+
+        preferred_order = [
+            str(table).strip()
+            for table in (preferred_tables or [])
+            if isinstance(table, str) and table.strip()
+        ]
 
         matches: list[tuple[str, str, str]] = []
 
@@ -668,35 +815,121 @@ class QuestionPlanValidator:
                             )
                         )
 
+        if not matches and normalized_tables:
+            for source_id in normalized_sources:
+                context = self._get_source_context(source_id)
+                tables = context.get("tables", {})
+                if not isinstance(tables, dict):
+                    continue
+
+                for table_name, table_info in tables.items():
+                    actual_table = str(table_name)
+                    if not isinstance(table_info, dict):
+                        continue
+
+                    columns = table_info.get("columns", [])
+                    if isinstance(columns, dict):
+                        column_names = [
+                            str(name)
+                            for name in columns.keys()
+                        ]
+                    elif isinstance(columns, list):
+                        column_names = []
+                        for column in columns:
+                            if isinstance(column, str):
+                                column_names.append(column)
+                            elif isinstance(column, dict):
+                                name = (
+                                    column.get("name")
+                                    or column.get("column")
+                                    or column.get("column_name")
+                                )
+                                if name:
+                                    column_names.append(str(name))
+                    else:
+                        column_names = []
+
+                    for actual_column in column_names:
+                        if actual_column.strip().lower() == target:
+                            matches.append(
+                                (
+                                    source_id,
+                                    actual_table,
+                                    actual_column,
+                                )
+                            )
+
         unique_matches = list(dict.fromkeys(matches))
 
-        if len(unique_matches) != 1:
+        if not unique_matches:
             return None
 
-        _, table_name, column_name = unique_matches[0]
-        return f"{table_name}.{column_name}"
+        if len(unique_matches) == 1:
+            _, table_name, resolved_column = unique_matches[0]
+            return f"{table_name}.{resolved_column}"
+
+        match_by_table = {
+            actual_table.lower(): (actual_table, actual_column)
+            for _, actual_table, actual_column in unique_matches
+        }
+
+        for table in preferred_order:
+            resolved = match_by_table.get(table.lower())
+            if resolved is not None:
+                actual_table, actual_column = resolved
+                return f"{actual_table}.{actual_column}"
+
+        # Declared required_tables order is a deterministic tie-break for
+        # join keys like project_id that exist on multiple related tables.
+        if table_order:
+            for table in table_order:
+                resolved = match_by_table.get(table.lower())
+                if resolved is not None:
+                    actual_table, actual_column = resolved
+                    return f"{actual_table}.{actual_column}"
+
+        return None
 
     def _canonical_field_reference(
         self,
         value: Any,
         source_ids: list[str] | None = None,
         candidate_tables: list[str] | None = None,
+        preferred_tables: list[str] | None = None,
     ) -> Any:
-        """Normalize one field reference without guessing ambiguous fields."""
+        """Normalize one field reference, resolving bare columns when possible."""
 
         if isinstance(value, str):
-            value = value.strip()
+            value = value.strip().strip('"').strip("'")
 
             if not value:
                 return value
 
             if value.count(".") == 1:
-                return value
+                table_name, column_name = [p.strip().strip('"').strip("'") for p in value.split(".", 1)]
+                known = self._known_columns(source_ids)
+                table_key = self._find_key_ci(known, table_name)
+                if table_key:
+                    table_cols = known[table_key]
+                    for c in table_cols:
+                        if c.lower() == column_name.lower():
+                            return f"{table_key}.{c}"
+
+                resolved = self._resolve_bare_column(
+                    column_name,
+                    source_ids=source_ids,
+                    candidate_tables=candidate_tables,
+                    preferred_tables=preferred_tables,
+                )
+                if resolved is not None:
+                    return resolved
+                return f"{table_name}.{column_name}"
 
             resolved = self._resolve_bare_column(
                 value,
                 source_ids=source_ids,
                 candidate_tables=candidate_tables,
+                preferred_tables=preferred_tables,
             )
 
             return resolved if resolved is not None else value
@@ -709,6 +942,7 @@ class QuestionPlanValidator:
                     field,
                     source_ids=source_ids,
                     candidate_tables=candidate_tables,
+                    preferred_tables=preferred_tables,
                 )
                 if isinstance(normalized_field, str):
                     return normalized_field
@@ -723,9 +957,12 @@ class QuestionPlanValidator:
             )
 
             if table and column:
-                return (
-                    f"{str(table).strip()}."
-                    f"{str(column).strip()}"
+                full_ref = f"{str(table).strip()}.{str(column).strip()}"
+                return self._canonical_field_reference(
+                    full_ref,
+                    source_ids=source_ids,
+                    candidate_tables=candidate_tables,
+                    preferred_tables=preferred_tables,
                 )
 
             if column:
@@ -733,8 +970,9 @@ class QuestionPlanValidator:
                     str(column),
                     source_ids=source_ids,
                     candidate_tables=candidate_tables,
+                    preferred_tables=preferred_tables,
                 )
-                return resolved if resolved is not None else value
+                return resolved
 
         return value
 
@@ -743,20 +981,94 @@ class QuestionPlanValidator:
         value: Any,
         source_ids: list[str] | None = None,
         candidate_tables: list[str] | None = None,
+        preferred_tables: list[str] | None = None,
     ) -> list[Any]:
         if value is None:
             return []
         if not isinstance(value, list):
             value = [value]
 
-        return [
-            self._canonical_field_reference(
+        result: list[Any] = []
+        seen: set[str] = set()
+
+        known = self._known_columns(source_ids)
+
+        for item in value:
+            resolved = self._canonical_field_reference(
                 item,
                 source_ids=source_ids,
                 candidate_tables=candidate_tables,
+                preferred_tables=preferred_tables,
             )
-            for item in value
-        ]
+            if not resolved or not isinstance(resolved, str):
+                continue
+            if resolved.count(".") != 1:
+                continue
+            table_name, col_name = resolved.split(".", 1)
+            table_key = self._find_key_ci(known, table_name)
+            if not table_key:
+                continue
+            cols = known[table_key]
+            matching_col = None
+            for c in cols:
+                if c.lower() == col_name.lower():
+                    matching_col = c
+                    break
+            if not matching_col:
+                continue
+            canonical_ref = f"{table_key}.{matching_col}"
+            if canonical_ref in seen:
+                continue
+            seen.add(canonical_ref)
+            result.append(canonical_ref)
+
+        return result
+
+    def _canonical_relationships(
+        self,
+        value: Any,
+        source_ids: list[str] | None = None,
+    ) -> list[Any]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+
+        known = self._known_relationships(source_ids)
+
+        def endpoints(item: dict[str, Any]) -> tuple[str, str, str, str] | None:
+            source_table = str(item.get("source_table") or item.get("from_table") or "").strip()
+            source_column = str(item.get("source_column") or item.get("from_column") or "").strip()
+            target_table = str(item.get("target_table") or item.get("to_table") or "").strip()
+            target_column = str(item.get("target_column") or item.get("to_column") or "").strip()
+            if not all((source_table, source_column, target_table, target_column)):
+                return None
+            return (source_table, source_column, target_table, target_column)
+
+        def matches(left, right):
+            return (
+                left[0].lower() == right[0].lower()
+                and left[1].lower() == right[1].lower()
+                and left[2].lower() == right[2].lower()
+                and left[3].lower() == right[3].lower()
+            ) or (
+                left[0].lower() == right[2].lower()
+                and left[1].lower() == right[3].lower()
+                and left[2].lower() == right[0].lower()
+                and left[3].lower() == right[1].lower()
+            )
+
+        result: list[Any] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            desired = endpoints(item)
+            if desired is None:
+                continue
+            if any(matches(desired, endpoints(k)) for k in known if endpoints(k) is not None):
+                result.append(item)
+
+        return result
 
     def _canonical_filters(
         self,
@@ -769,12 +1081,41 @@ class QuestionPlanValidator:
         if not isinstance(value, list):
             value = [value]
 
+        valid_operators = self.ALLOWED_FILTER_OPERATORS | {
+            "eq", "equals", "ne", "not_equals", "gt", "gte", "lt", "lte", "not_in"
+        }
+
         result: list[Any] = []
 
         for item in value:
             if not isinstance(item, dict):
                 result.append(item)
                 continue
+
+            operator = str(
+                item.get("operator")
+                or item.get("op")
+                or "="
+            ).strip().lower()
+
+            if operator not in valid_operators:
+                # Drop pseudo-filter metadata output by planner
+                continue
+
+            filter_value = item.get("value")
+            if isinstance(filter_value, str):
+                placeholder_values = {
+                    "project_id",
+                    "user_id",
+                    "target_project",
+                    "some_project",
+                    "project_name",
+                    "id",
+                    "none",
+                    "null",
+                }
+                if filter_value.strip().lower() in placeholder_values:
+                    continue
 
             current = deepcopy(item)
 
@@ -838,17 +1179,20 @@ class QuestionPlanValidator:
 
         for item in value:
             if not isinstance(item, dict):
-                result.append(item)
                 continue
 
             current = deepcopy(item)
 
             if "field" in current:
-                current["field"] = self._canonical_field_reference(
+                field_val = self._canonical_field_reference(
                     current.get("field"),
                     source_ids=source_ids,
                     candidate_tables=candidate_tables,
                 )
+                if isinstance(field_val, str) and field_val.count(".") == 1:
+                    current["field"] = field_val
+                else:
+                    continue
 
             direction = current.get("direction")
             if isinstance(direction, str):

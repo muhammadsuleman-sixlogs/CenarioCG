@@ -188,6 +188,33 @@ class RAGPipeline:
                 "Question plan postgresql_sources must be a list."
             )
 
+        sources = [
+            str(source).strip().lower()
+            for source in sources
+            if isinstance(source, str) and source.strip()
+        ]
+
+        # Multi-step plans may declare sources on execution steps even when
+        # the top-level postgresql_sources list was narrowed by schema
+        # anchoring. Prefer the full step-declared source set.
+        execution_plan = plan.get("execution_plan")
+        if isinstance(execution_plan, dict):
+            step_sources: list[str] = []
+            for step in execution_plan.get("steps", []) or []:
+                if not isinstance(step, dict):
+                    continue
+                source_id = step.get("source_id")
+                if isinstance(source_id, str) and source_id.strip():
+                    step_sources.append(source_id.strip().lower())
+                    continue
+                contract = step.get("contract")
+                if isinstance(contract, dict):
+                    for value in contract.get("postgresql_sources", []) or []:
+                        if isinstance(value, str) and value.strip():
+                            step_sources.append(value.strip().lower())
+            if step_sources:
+                sources = step_sources
+
         sources = list(dict.fromkeys(sources))
 
         if "postgresql" not in plan.get("data_sources", []):
@@ -1091,7 +1118,7 @@ class RAGPipeline:
             validated_plan=validated_plan,
         )
 
-        print("COMPLEX QUERY PLAN:", complex_plan.to_dict())
+        print(f"[Pipeline] Complex Query Plan: mode={complex_plan.mode}, steps={len(complex_plan.steps)}")
 
         retrieval_contracts: dict[str, dict[str, Any]] = {}
 
@@ -1127,7 +1154,7 @@ class RAGPipeline:
             step_executor=execute_step,
         )
 
-        print("COMPLEX QUERY EXECUTION:", execution)
+        print(f"[Pipeline] Complex Query Execution: status={execution.get('status')}, step_count={len(execution.get('steps', {}))}")
 
         step_results = execution.get("steps", {})
         postgres_results: list[dict[str, Any]] = []
@@ -1175,8 +1202,11 @@ class RAGPipeline:
 
         validation = self.plan_validator.validate(raw_plan)
 
-        print("RAW QUESTION PLAN:", raw_plan)
-        print("QUESTION PLAN VALIDATION:", validation)
+        print(
+            f"[Pipeline] Question Plan: sources={raw_plan.get('postgresql_sources')}, "
+            f"mode={raw_plan.get('execution_plan', {}).get('mode', 'single') if isinstance(raw_plan.get('execution_plan'), dict) else 'single'}"
+        )
+        print(f"[Pipeline] Plan Validation: valid={validation.get('valid')}")
 
         plan_repaired = False
 
@@ -1184,8 +1214,7 @@ class RAGPipeline:
             validation_errors = validation.get("errors", [])
 
             print(
-                "QUESTION PLAN INVALID - attempting one "
-                "schema-based repair."
+                "[Pipeline] Question Plan Invalid - attempting schema-based repair."
             )
 
             repaired_plan = self.planner.repair_plan(
@@ -1200,13 +1229,7 @@ class RAGPipeline:
             )
 
             print(
-                "REPAIRED QUESTION PLAN:",
-                repaired_plan,
-            )
-
-            print(
-                "REPAIRED PLAN VALIDATION:",
-                repaired_validation,
+                f"[Pipeline] Repaired Plan Validation: valid={repaired_validation.get('valid')}"
             )
 
             if not repaired_validation.get("valid", False):

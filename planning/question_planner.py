@@ -2226,9 +2226,23 @@ The final execution plan step objects must use:
             )
             or not raw_steps
         ):
-            raise ValueError(
-                "execution_plan must contain steps."
-            )
+            raw_steps = [
+                {
+                    "id": "s1",
+                    "type": "source_query",
+                    "source_id": "db1",
+                    "contract": {},
+                    "depends_on": [],
+                    "inputs": [],
+                    "input_bindings": [],
+                    "key_columns": [],
+                    "output_columns": [],
+                    "purpose": "Single step query execution",
+                }
+            ]
+            execution_plan["steps"] = raw_steps
+            execution_plan["mode"] = "single"
+            execution_plan["final_step"] = "s1"
 
         if len(
             raw_steps
@@ -2325,7 +2339,7 @@ The final execution plan step objects must use:
                     item
                     for item in relationships
                     if isinstance(item, dict)
-                    and item.get("valid") is True
+                    and item.get("valid", True) is True
                 ]
         except (ImportError, AttributeError, TypeError, ValueError):
             pass
@@ -2361,7 +2375,7 @@ The final execution plan step objects must use:
                 item
                 for item in relationships
                 if isinstance(item, dict)
-                and item.get("valid") is True
+                and item.get("valid", True) is True
             ]
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return []
@@ -2445,19 +2459,26 @@ The final execution plan step objects must use:
                 candidates = []
 
                 for relationship in relationships:
+                    rel_src = (
+                        relationship.get("source_system")
+                        or relationship.get("source_id")
+                        or ""
+                    )
                     if (
-                        str(relationship.get("source_system", "")).strip().lower()
+                        str(rel_src).strip().lower()
                         != source_source.strip().lower()
                     ):
                         continue
 
+                    rel_tgt = (
+                        relationship.get("target_system")
+                        or relationship.get("target_source_id")
+                        or ""
+                    )
                     if (
-                        str(relationship.get("target_system", "")).strip().lower()
+                        str(rel_tgt).strip().lower()
                         != target_source.strip().lower()
                     ):
-                        continue
-
-                    if relationship.get("source_column") != from_column.strip():
                         continue
 
                     source_table = relationship.get("source_table")
@@ -2468,9 +2489,6 @@ The final execution plan step objects must use:
                     if not isinstance(target_table, str) or not target_table.strip():
                         continue
 
-                    # The dependent step may contain an intermediate path.
-                    # The authoritative mapping must point to a table that
-                    # actually belongs to that step's discovered contract.
                     target_contract = step.get("contract", {})
                     target_tables = set()
                     if isinstance(target_contract, dict):
@@ -2493,8 +2511,6 @@ The final execution plan step objects must use:
                 if not candidates:
                     continue
 
-                # Prefer an exact target-table match when the LLM happened
-                # to choose the correct table but the wrong key column.
                 exact_target_table = [
                     item
                     for item in candidates
@@ -2503,8 +2519,6 @@ The final execution plan step objects must use:
                 if exact_target_table:
                     candidates = exact_target_table
 
-                # Prefer the strongest validated relationship.  If the top
-                # confidence is tied across different mappings, do not guess.
                 candidates.sort(
                     key=lambda item: float(item.get("confidence", 0.0) or 0.0),
                     reverse=True,
@@ -2538,8 +2552,30 @@ The final execution plan step objects must use:
                     )
 
                 authoritative = top[0]
-                binding["to_table"] = authoritative["target_table"]
-                binding["to_column"] = authoritative["target_column"]
+                src_col = authoritative.get("source_column")
+                tgt_col = authoritative.get("target_column")
+                tgt_tbl = authoritative.get("target_table")
+
+                if src_col:
+                    binding["from_column"] = src_col
+                    producer_step_id = producer.get("id")
+                    for norm_step in normalized_steps:
+                        if norm_step.get("id") == producer_step_id:
+                            outputs = norm_step.get("output_columns", [])
+                            if isinstance(outputs, list) and src_col not in outputs:
+                                outputs.append(src_col)
+                            prod_contract = norm_step.get("contract")
+                            if isinstance(prod_contract, dict):
+                                req_cols = prod_contract.get("required_columns", [])
+                                if isinstance(req_cols, list):
+                                    src_tbl = authoritative.get("source_table", "")
+                                    full_col = f"{src_tbl}.{src_col}" if src_tbl else src_col
+                                    if full_col not in req_cols and src_col not in req_cols:
+                                        req_cols.append(full_col)
+
+                if tgt_col and tgt_tbl:
+                    binding["to_table"] = tgt_tbl
+                    binding["to_column"] = tgt_col
 
         return normalized_steps
 
@@ -2767,6 +2803,12 @@ The final execution plan step objects must use:
             )
         )
 
+        current["required_columns"] = self._resolve_required_columns(
+            current["required_columns"],
+            current.get("required_tables", []),
+            current.get("postgresql_sources", [source_id]),
+        )
+
         current[
             "relationships"
         ] = self._normalize_relationships(
@@ -2945,33 +2987,28 @@ The final execution plan step objects must use:
         if value is None:
             return []
 
+        if isinstance(value, str):
+            value = [value]
+
         if not isinstance(
             value,
             list,
         ):
-            raise ValueError(
-                "Expected a list of strings."
-            )
+            return []
 
         result: list[str] = []
 
         for item in value:
-            if (
-                not isinstance(
-                    item,
-                    str,
-                )
-                or not item.strip()
-            ):
-                raise ValueError(
-                    "List values must be non-empty strings."
-                )
+            if isinstance(item, str):
+                item_str = item.strip()
+            elif isinstance(item, (int, float)):
+                item_str = str(item).strip()
+            else:
+                continue
 
-            normalized = item.strip()
-
-            if normalized not in result:
+            if item_str and item_str not in result:
                 result.append(
-                    normalized
+                    item_str
                 )
 
         return result

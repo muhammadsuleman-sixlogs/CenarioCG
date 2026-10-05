@@ -682,30 +682,6 @@
       "confidence": 0.98
     },
     {
-      "source_id": "db1",
-      "source_table": "access_profiles",
-      "target_table": "companies",
-      "business_relationship": "An access profile is configured for a specific company (tenant).",
-      "reason": "The access profile records reference a company via a dedicated company_id field.",
-      "evidence": [
-        "access_profiles.company_id (uuid) exists",
-        "Relationship evidence provided: access_profiles.company_id -> companies.id (FOREIGN_KEY, confidence 1.0)"
-      ],
-      "confidence": 1.0
-    },
-    {
-      "source_id": "db1",
-      "source_table": "access_profiles",
-      "target_table": "users",
-      "business_relationship": "An access profile is created by a specific user.",
-      "reason": "The access profile includes created_by_id, indicating the creator user.",
-      "evidence": [
-        "access_profiles.created_by_id (uuid) exists",
-        "Relationship evidence provided: access_profiles.created_by_id -> users.id (FOREIGN_KEY, confidence 1.0)"
-      ],
-      "confidence": 1.0
-    },
-    {
       "source_id": "db2",
       "source_table": "action_items",
       "target_table": "projects",
@@ -931,6 +907,875 @@
         "companies has primary key id (character varying)"
       ],
       "confidence": 0.5
+    },
+    {
+      "source_id": "db1",
+      "source_table": "access_profiles",
+      "target_table": "companies",
+      "business_relationship": "An access profile belongs to a company",
+      "reason": "Each access_profile has a company_id pointing to a company record; this indicates the profile is company-scoped.",
+      "evidence": [
+        "access_profiles.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "access_profiles",
+      "target_table": "users",
+      "business_relationship": "An access profile was created by a user",
+      "reason": "access_profiles.created_by_id references users.id, indicating creator provenance.",
+      "evidence": [
+        "access_profiles.created_by_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "cde_provider_tasks",
+      "target_table": "cde_workspaces",
+      "business_relationship": "A provider task is associated with a CDE workspace",
+      "reason": "cde_provider_tasks.workspace_id references the workspace it operates on.",
+      "evidence": [
+        "cde_provider_tasks.workspace_id (uuid) -> cde_workspaces.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "cde_ssh_keys",
+      "target_table": "cde_workspaces",
+      "business_relationship": "SSH keys belong to a CDE workspace",
+      "reason": "cde_ssh_keys.workspace_id references the workspace owning the keys.",
+      "evidence": [
+        "cde_ssh_keys.workspace_id (uuid) -> cde_workspaces.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "cde_workspaces",
+      "target_table": "users",
+      "business_relationship": "A CDE workspace is created by a user",
+      "reason": "cde_workspaces.created_by references users.id.",
+      "evidence": [
+        "cde_workspaces.created_by (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "cde_workspaces",
+      "target_table": "users",
+      "business_relationship": "A CDE workspace is assigned to a developer user",
+      "reason": "cde_workspaces.developer_id references users.id.",
+      "evidence": [
+        "cde_workspaces.developer_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "cde_workspaces",
+      "target_table": "project_details",
+      "business_relationship": "A CDE workspace is linked to a project",
+      "reason": "cde_workspaces.project_id references project_details.id.",
+      "evidence": [
+        "cde_workspaces.project_id (uuid) -> project_details.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_messages",
+      "target_table": "chat_rooms",
+      "business_relationship": "A chat message belongs to a chat room",
+      "reason": "chat_messages.chat_room_id references chat_rooms.id.",
+      "evidence": [
+        "chat_messages.chat_room_id (uuid) -> chat_rooms.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_messages",
+      "target_table": "users",
+      "business_relationship": "A chat message is authored by a user",
+      "reason": "chat_messages.user_id references users.id.",
+      "evidence": [
+        "chat_messages.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_room_participants",
+      "target_table": "chat_rooms",
+      "business_relationship": "A participant record belongs to a chat room",
+      "reason": "chat_room_participants.chat_room_id references chat_rooms.id.",
+      "evidence": [
+        "chat_room_participants.chat_room_id (uuid) -> chat_rooms.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_room_participants",
+      "target_table": "users",
+      "business_relationship": "A participant record links a user to a chat room",
+      "reason": "chat_room_participants.user_id references users.id.",
+      "evidence": [
+        "chat_room_participants.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_rooms",
+      "target_table": "companies",
+      "business_relationship": "A chat room is associated with a company",
+      "reason": "chat_rooms.company_id references companies.id.",
+      "evidence": [
+        "chat_rooms.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_rooms",
+      "target_table": "users",
+      "business_relationship": "A chat room is assigned to a consultant user",
+      "reason": "chat_rooms.consultant_id references users.id.",
+      "evidence": [
+        "chat_rooms.consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_rooms",
+      "target_table": "project_details",
+      "business_relationship": "A chat room may relate to a project",
+      "reason": "chat_rooms.project_id references project_details.id.",
+      "evidence": [
+        "chat_rooms.project_id (uuid) -> project_details.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_rooms",
+      "target_table": "proposals",
+      "business_relationship": "A chat room may relate to a proposal",
+      "reason": "chat_rooms.proposal_id references proposals.id.",
+      "evidence": [
+        "chat_rooms.proposal_id (uuid) -> proposals.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_rooms",
+      "target_table": "project_tasks",
+      "business_relationship": "A chat room may relate to a project task",
+      "reason": "chat_rooms.task_id references project_tasks.id.",
+      "evidence": [
+        "chat_rooms.task_id (uuid) -> project_tasks.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "chat_rooms",
+      "target_table": "tickets",
+      "business_relationship": "A chat room may relate to a ticket",
+      "reason": "chat_rooms.ticket_id references tickets.id.",
+      "evidence": [
+        "chat_rooms.ticket_id (uuid) -> tickets.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "companies",
+      "target_table": "users",
+      "business_relationship": "A company has a designated root user",
+      "reason": "companies.root_user_id references users.id.",
+      "evidence": [
+        "companies.root_user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "companies",
+      "target_table": "users",
+      "business_relationship": "A company was created by a consultant user",
+      "reason": "companies.created_by_consultant_id references users.id.",
+      "evidence": [
+        "companies.created_by_consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "company_contacts",
+      "target_table": "companies",
+      "business_relationship": "A company contact belongs to a company",
+      "reason": "company_contacts.company_id references companies.id.",
+      "evidence": [
+        "company_contacts.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "company_contacts",
+      "target_table": "users",
+      "business_relationship": "A company contact was created by a user",
+      "reason": "company_contacts.created_by_user_id references users.id.",
+      "evidence": [
+        "company_contacts.created_by_user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "company_hours",
+      "target_table": "companies",
+      "business_relationship": "Company hours are tracked per company",
+      "reason": "company_hours.company_id references companies.id.",
+      "evidence": [
+        "company_hours.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "company_hours",
+      "target_table": "invoices",
+      "business_relationship": "Company hours were purchased/linked to an invoice",
+      "reason": "company_hours.invoice_id references invoices.id.",
+      "evidence": [
+        "company_hours.invoice_id (uuid) -> invoices.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "invoices",
+      "target_table": "companies",
+      "business_relationship": "An invoice is issued for a company",
+      "reason": "invoices.company_id references companies.id.",
+      "evidence": [
+        "invoices.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "invoices",
+      "target_table": "tickets",
+      "business_relationship": "An invoice may be associated with a ticket",
+      "reason": "invoices.ticket_id references tickets.id.",
+      "evidence": [
+        "invoices.ticket_id (uuid) -> tickets.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "invoice_tags",
+      "target_table": "invoices",
+      "business_relationship": "Invoice-tag mappings belong to an invoice",
+      "reason": "invoice_tags.invoice_id references invoices.id.",
+      "evidence": [
+        "invoice_tags.invoice_id (uuid) -> invoices.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "invoice_tags",
+      "target_table": "tags",
+      "business_relationship": "Invoice-tag mappings reference a tag",
+      "reason": "invoice_tags.tag_id references tags.id.",
+      "evidence": [
+        "invoice_tags.tag_id (uuid) -> tags.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "notifications",
+      "target_table": "users",
+      "business_relationship": "A notification is sent to a user",
+      "reason": "notifications.user_id references users.id.",
+      "evidence": [
+        "notifications.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "password_reset_tokens",
+      "target_table": "users",
+      "business_relationship": "A password reset token is issued for a user",
+      "reason": "password_reset_tokens.user_id references users.id.",
+      "evidence": [
+        "password_reset_tokens.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_change_orders",
+      "target_table": "project_details",
+      "business_relationship": "A change order applies to a project",
+      "reason": "project_change_orders.project_id references project_details.id.",
+      "evidence": [
+        "project_change_orders.project_id (uuid) -> project_details.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_details",
+      "target_table": "companies",
+      "business_relationship": "A project is associated with a company",
+      "reason": "project_details.company_id references companies.id.",
+      "evidence": [
+        "project_details.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_details",
+      "target_table": "users",
+      "business_relationship": "A project was created by a client user",
+      "reason": "project_details.created_by_client_id references users.id.",
+      "evidence": [
+        "project_details.created_by_client_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_details",
+      "target_table": "users",
+      "business_relationship": "A project was created by a user",
+      "reason": "project_details.created_by_user_id references users.id.",
+      "evidence": [
+        "project_details.created_by_user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_details",
+      "target_table": "users",
+      "business_relationship": "A project has an owning consultant user",
+      "reason": "project_details.owner_consultant_id references users.id.",
+      "evidence": [
+        "project_details.owner_consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_milestones",
+      "target_table": "project_details",
+      "business_relationship": "A milestone belongs to a project",
+      "reason": "project_milestones.project_id references project_details.id.",
+      "evidence": [
+        "project_milestones.project_id (uuid) -> project_details.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_stake_holders",
+      "target_table": "project_details",
+      "business_relationship": "A project stakeholder entry belongs to a project",
+      "reason": "project_stake_holders.project_id references project_details.id.",
+      "evidence": [
+        "project_stake_holders.project_id (uuid) -> project_details.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_stake_holders",
+      "target_table": "users",
+      "business_relationship": "A stakeholder entry references a user",
+      "reason": "project_stake_holders.user_id references users.id.",
+      "evidence": [
+        "project_stake_holders.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_sub_tasks",
+      "target_table": "project_tasks",
+      "business_relationship": "A sub-task belongs to a project task",
+      "reason": "project_sub_tasks.task_id references project_tasks.id.",
+      "evidence": [
+        "project_sub_tasks.task_id (uuid) -> project_tasks.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_sub_tasks",
+      "target_table": "users",
+      "business_relationship": "A sub-task is assigned to a user",
+      "reason": "project_sub_tasks.assignee_id references users.id.",
+      "evidence": [
+        "project_sub_tasks.assignee_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_task_time_logs",
+      "target_table": "project_tasks",
+      "business_relationship": "A time log entry is associated with a project task",
+      "reason": "project_task_time_logs.task_id references project_tasks.id.",
+      "evidence": [
+        "project_task_time_logs.task_id (uuid) -> project_tasks.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_task_time_logs",
+      "target_table": "users",
+      "business_relationship": "A time log entry is recorded by a consultant user",
+      "reason": "project_task_time_logs.consultant_id references users.id.",
+      "evidence": [
+        "project_task_time_logs.consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_tasks",
+      "target_table": "project_details",
+      "business_relationship": "A project task belongs to a project",
+      "reason": "project_tasks.project_id references project_details.id.",
+      "evidence": [
+        "project_tasks.project_id (uuid) -> project_details.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_tasks",
+      "target_table": "project_milestones",
+      "business_relationship": "A project task is grouped under a milestone",
+      "reason": "project_tasks.milestone_id references project_milestones.id.",
+      "evidence": [
+        "project_tasks.milestone_id (uuid) -> project_milestones.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_tasks",
+      "target_table": "users",
+      "business_relationship": "A project task is assigned to a user",
+      "reason": "project_tasks.assignee_id references users.id.",
+      "evidence": [
+        "project_tasks.assignee_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_tasks",
+      "target_table": "users",
+      "business_relationship": "A project task was created by a user",
+      "reason": "project_tasks.created_by_id references users.id.",
+      "evidence": [
+        "project_tasks.created_by_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "project_team_stages",
+      "target_table": "project_details",
+      "business_relationship": "Team stage workflow settings belong to a project",
+      "reason": "project_team_stages.project_id references project_details.id.",
+      "evidence": [
+        "project_team_stages.project_id (uuid) -> project_details.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "proposals",
+      "target_table": "companies",
+      "business_relationship": "A proposal is for a company",
+      "reason": "proposals.company_id references companies.id.",
+      "evidence": [
+        "proposals.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "proposals",
+      "target_table": "users",
+      "business_relationship": "A proposal is created/owned by a consultant user",
+      "reason": "proposals.consultant_id references users.id.",
+      "evidence": [
+        "proposals.consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "proposals",
+      "target_table": "tickets",
+      "business_relationship": "A proposal may be associated with a ticket",
+      "reason": "proposals.ticket_id references tickets.id.",
+      "evidence": [
+        "proposals.ticket_id (uuid) -> tickets.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "service_allocations",
+      "target_table": "services",
+      "business_relationship": "A service allocation references a service",
+      "reason": "service_allocations.service_id references services.id.",
+      "evidence": [
+        "service_allocations.service_id (uuid) -> services.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "service_allocations",
+      "target_table": "users",
+      "business_relationship": "A service allocation assigns a service to a consultant user",
+      "reason": "service_allocations.consultant_id references users.id.",
+      "evidence": [
+        "service_allocations.consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "services",
+      "target_table": "users",
+      "business_relationship": "A service has an owning consultant user",
+      "reason": "services.owner_consultant_id references users.id.",
+      "evidence": [
+        "services.owner_consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "subscriptions",
+      "target_table": "companies",
+      "business_relationship": "A subscription belongs to a company",
+      "reason": "subscriptions.company_id references companies.id.",
+      "evidence": [
+        "subscriptions.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "subscriptions",
+      "target_table": "packages",
+      "business_relationship": "A subscription is for a package",
+      "reason": "subscriptions.package_id references packages.id.",
+      "evidence": [
+        "subscriptions.package_id (uuid) -> packages.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "subscriptions",
+      "target_table": "users",
+      "business_relationship": "A subscription is owned by a user",
+      "reason": "subscriptions.user_id references users.id.",
+      "evidence": [
+        "subscriptions.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "tags",
+      "target_table": "companies",
+      "business_relationship": "Tags are scoped to a company",
+      "reason": "tags.company_id references companies.id.",
+      "evidence": [
+        "tags.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "ticket_attachments",
+      "target_table": "tickets",
+      "business_relationship": "A ticket attachment belongs to a ticket",
+      "reason": "ticket_attachments.ticket_id references tickets.id.",
+      "evidence": [
+        "ticket_attachments.ticket_id (uuid) -> tickets.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "ticket_logs",
+      "target_table": "tickets",
+      "business_relationship": "A ticket log entry belongs to a ticket",
+      "reason": "ticket_logs.ticket_id references tickets.id.",
+      "evidence": [
+        "ticket_logs.ticket_id (uuid) -> tickets.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "ticket_logs",
+      "target_table": "users",
+      "business_relationship": "A ticket log entry was created by a user",
+      "reason": "ticket_logs.user_id references users.id.",
+      "evidence": [
+        "ticket_logs.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "ticket_tags",
+      "target_table": "tags",
+      "business_relationship": "A ticket-tag mapping references a tag",
+      "reason": "ticket_tags.tag_id references tags.id.",
+      "evidence": [
+        "ticket_tags.tag_id (uuid) -> tags.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "ticket_tags",
+      "target_table": "tickets",
+      "business_relationship": "A ticket-tag mapping belongs to a ticket",
+      "reason": "ticket_tags.ticket_id references tickets.id.",
+      "evidence": [
+        "ticket_tags.ticket_id (uuid) -> tickets.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "ticket_time_logs",
+      "target_table": "tickets",
+      "business_relationship": "A ticket time log entry belongs to a ticket",
+      "reason": "ticket_time_logs.ticket_id references tickets.id.",
+      "evidence": [
+        "ticket_time_logs.ticket_id (uuid) -> tickets.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "ticket_time_logs",
+      "target_table": "users",
+      "business_relationship": "A ticket time log is recorded by a consultant user",
+      "reason": "ticket_time_logs.consultant_id references users.id.",
+      "evidence": [
+        "ticket_time_logs.consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "ticket_time_logs",
+      "target_table": "companies",
+      "business_relationship": "Ticket time logs are scoped to a company",
+      "reason": "ticket_time_logs.company_id references companies.id.",
+      "evidence": [
+        "ticket_time_logs.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "tickets",
+      "target_table": "companies",
+      "business_relationship": "A ticket belongs to a company",
+      "reason": "tickets.company_id references companies.id.",
+      "evidence": [
+        "tickets.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "tickets",
+      "target_table": "services",
+      "business_relationship": "A ticket is for a particular service",
+      "reason": "tickets.service_id references services.id.",
+      "evidence": [
+        "tickets.service_id (uuid) -> services.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "tickets",
+      "target_table": "users",
+      "business_relationship": "A ticket is associated with a user (requester/owner)",
+      "reason": "tickets.user_id references users.id.",
+      "evidence": [
+        "tickets.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "tickets",
+      "target_table": "users",
+      "business_relationship": "A ticket was created by a user",
+      "reason": "tickets.created_by_user_id references users.id.",
+      "evidence": [
+        "tickets.created_by_user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "user_access_profiles",
+      "target_table": "access_profiles",
+      "business_relationship": "A user-access-profile assignment references an access profile",
+      "reason": "user_access_profiles.access_profile_id references access_profiles.id.",
+      "evidence": [
+        "user_access_profiles.access_profile_id (uuid) -> access_profiles.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "user_access_profiles",
+      "target_table": "users",
+      "business_relationship": "A user-access-profile assignment references a user",
+      "reason": "user_access_profiles.user_id references users.id.",
+      "evidence": [
+        "user_access_profiles.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "user_access_profiles",
+      "target_table": "users",
+      "business_relationship": "A user-access-profile assignment was assigned by a user",
+      "reason": "user_access_profiles.assigned_by_id references users.id.",
+      "evidence": [
+        "user_access_profiles.assigned_by_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "users",
+      "target_table": "companies",
+      "business_relationship": "A user belongs to a company",
+      "reason": "users.company_id references companies.id.",
+      "evidence": [
+        "users.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "users",
+      "target_table": "roles",
+      "business_relationship": "A user has a role",
+      "reason": "users.role_id references roles.id.",
+      "evidence": [
+        "users.role_id (uuid) -> roles.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "users",
+      "target_table": "users",
+      "business_relationship": "A user may reference a lead consultant user",
+      "reason": "users.lead_consultant_id references users.id (self-relation).",
+      "evidence": [
+        "users.lead_consultant_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "vaults",
+      "target_table": "companies",
+      "business_relationship": "A vault entry is associated with a company",
+      "reason": "vaults.company_id references companies.id.",
+      "evidence": [
+        "vaults.company_id (uuid) -> companies.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "vaults",
+      "target_table": "users",
+      "business_relationship": "A vault entry is associated with a user",
+      "reason": "vaults.user_id references users.id.",
+      "evidence": [
+        "vaults.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_id": "db1",
+      "source_table": "recent_activities",
+      "target_table": "users",
+      "business_relationship": "A recent activity is created by a user",
+      "reason": "recent_activities.user_id references users.id.",
+      "evidence": [
+        "recent_activities.user_id (uuid) -> users.id (uuid)"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "source_table": "test_source_a",
+      "target_table": "test_target_a",
+      "business_relationship": "test relationship",
+      "reason": "test",
+      "evidence": [
+        "test evidence"
+      ],
+      "confidence": 0.99,
+      "source_id": "test_db1"
+    },
+    {
+      "source_table": "test_source_b",
+      "target_table": "test_target_b",
+      "business_relationship": "test relationship",
+      "reason": "test",
+      "evidence": [
+        "test evidence"
+      ],
+      "confidence": 0.98,
+      "source_id": "test_db2"
     }
   ]
 }

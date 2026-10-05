@@ -151,6 +151,36 @@ def login_user(
 
     session = create_session(username)
 
+    cookie_secure, cookie_samesite = _get_cookie_settings()
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        secure=cookie_secure,
+        samesite=cookie_samesite,
+        path="/",
+    )
+
+
+def logout_user(response: Response):
+    cookie_secure, cookie_samesite = _get_cookie_settings()
+
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        secure=cookie_secure,
+        httponly=True,
+        samesite=cookie_samesite,
+    )
+
+
+def _get_cookie_settings() -> tuple[bool, str]:
+    """
+    SameSite=None requires Secure. For local HTTP (COOKIE_SECURE=false),
+    use Lax so the browser will store and send the session cookie.
+    """
     cookie_secure = (
         os.getenv(
             "COOKIE_SECURE",
@@ -159,26 +189,6 @@ def login_user(
         == "true"
     )
 
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=session,
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        secure=cookie_secure,
-        samesite="none",
-        path="/",
-    )
+    cookie_samesite = "none" if cookie_secure else "lax"
 
-
-def logout_user(response: Response):
-    cookie_secure = (
-        os.getenv("COOKIE_SECURE", "true").strip().lower() == "true"
-    )
-
-    response.delete_cookie(
-        key=SESSION_COOKIE_NAME,
-        path="/",
-        secure=cookie_secure,
-        httponly=True,
-        samesite="none",
-    )
+    return cookie_secure, cookie_samesite
