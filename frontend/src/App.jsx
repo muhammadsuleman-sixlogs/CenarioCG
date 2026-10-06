@@ -426,7 +426,23 @@ function App() {
     return Array.from(sources);
   }, [sourceTrace]);
 
+  const getAuthHeaders = (overrideToken) => {
+    const token =
+      overrideToken ||
+      localStorage.getItem("cenariocg_token") ||
+      "";
+
+    if (!token) {
+      return {};
+    }
+
+    return {
+      Authorization: `Bearer ${token}`,
+    };
+  };
+
   const clearApplicationState = () => {
+    localStorage.removeItem("cenariocg_token");
     setAuthenticated(false);
 
     setUsername("");
@@ -457,13 +473,16 @@ function App() {
     setSourceTrace(EMPTY_SOURCE_TRACE);
   };
 
-  const checkAuthentication = async () => {
+  const checkAuthentication = async (overrideToken) => {
     try {
       const response = await fetch(
         `${API_BASE_URL}/api/auth/me`,
         {
           method: "GET",
           credentials: "include",
+          headers: {
+            ...getAuthHeaders(overrideToken),
+          },
         }
       );
 
@@ -526,8 +545,12 @@ function App() {
         );
       }
 
+      if (data?.token) {
+        localStorage.setItem("cenariocg_token", data.token);
+      }
+
       const authenticatedNow =
-        await checkAuthentication();
+        await checkAuthentication(data?.token);
 
       if (!authenticatedNow) {
         throw new Error(
@@ -558,6 +581,9 @@ function App() {
         {
           method: "POST",
           credentials: "include",
+          headers: {
+            ...getAuthHeaders(),
+          },
         }
       );
     } catch (error) {
@@ -583,6 +609,9 @@ function App() {
         {
           method: "GET",
           credentials: "include",
+          headers: {
+            ...getAuthHeaders(),
+          },
           cache: "no-store",
         }
       );
@@ -639,6 +668,9 @@ function App() {
             {
               method: "GET",
               credentials: "include",
+              headers: {
+                ...getAuthHeaders(),
+              },
             }
           );
 
@@ -711,6 +743,7 @@ function App() {
           credentials: "include",
           headers: {
             "Content-Type": "application/json",
+            ...getAuthHeaders(),
           },
           body: JSON.stringify({
             question: trimmedQuestion,

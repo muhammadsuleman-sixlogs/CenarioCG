@@ -109,8 +109,36 @@ def validate_session(session: str | None) -> bool:
 def get_session_from_request(
     request: Request,
 ) -> str | None:
+    auth_header = (
+        request.headers.get("Authorization")
+        or request.headers.get("authorization")
+    )
+    if auth_header:
+        parts = auth_header.strip().split(" ", 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            return parts[1].strip()
+        if len(parts) == 1 and "." in parts[0]:
+            return parts[0].strip()
+
     return request.cookies.get(
         SESSION_COOKIE_NAME
+    )
+
+
+def set_session_cookie(
+    response: Response,
+    session: str,
+) -> None:
+    cookie_secure, cookie_samesite = _get_cookie_settings()
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        secure=cookie_secure,
+        samesite=cookie_samesite,
+        path="/",
     )
 
 
@@ -127,8 +155,8 @@ def authenticate_request(request: Request):
 def login_user(
     username: str,
     password: str,
-    response: Response,
-):
+    response: Response | None = None,
+) -> str:
     configured_username, configured_password, _ = (
         _get_auth_config()
     )
@@ -151,17 +179,10 @@ def login_user(
 
     session = create_session(username)
 
-    cookie_secure, cookie_samesite = _get_cookie_settings()
+    if response is not None:
+        set_session_cookie(response, session)
 
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=session,
-        max_age=SESSION_MAX_AGE,
-        httponly=True,
-        secure=cookie_secure,
-        samesite=cookie_samesite,
-        path="/",
-    )
+    return session
 
 
 def logout_user(response: Response):

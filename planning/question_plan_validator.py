@@ -334,7 +334,7 @@ class QuestionPlanValidator:
             source_ids=normalized["postgresql_sources"],
             candidate_tables=normalized["required_tables"],
         )
-        normalized["entities"] = self._canonical_list(
+        normalized["entities"] = self._canonical_entities(
             normalized.get("entities", [])
         )
 
@@ -619,7 +619,7 @@ class QuestionPlanValidator:
                 source_ids=contract_source_ids,
                 candidate_tables=contract_tables,
             )
-            contract["entities"] = self._canonical_list(
+            contract["entities"] = self._canonical_entities(
                 contract.get("entities", [])
             )
 
@@ -1007,6 +1007,7 @@ class QuestionPlanValidator:
             table_name, col_name = resolved.split(".", 1)
             table_key = self._find_key_ci(known, table_name)
             if not table_key:
+                result.append(resolved)
                 continue
             cols = known[table_key]
             matching_col = None
@@ -1015,6 +1016,7 @@ class QuestionPlanValidator:
                     matching_col = c
                     break
             if not matching_col:
+                result.append(resolved)
                 continue
             canonical_ref = f"{table_key}.{matching_col}"
             if canonical_ref in seen:
@@ -1202,6 +1204,77 @@ class QuestionPlanValidator:
 
         return result
 
+    def _canonical_entities(
+        self,
+        entities: Any,
+    ) -> list[dict[str, Any]]:
+        if entities is None:
+            return []
+        if isinstance(entities, (str, dict)):
+            entities = [entities]
+        if not isinstance(entities, list):
+            return []
+
+        available_sources = set(self._available_postgresql_sources())
+        canonical: list[dict[str, Any]] = []
+
+        for item in entities:
+            if isinstance(item, str) and item.strip():
+                canonical.append({
+                    "id": item.strip(),
+                    "type": "entity",
+                })
+                continue
+
+            if not isinstance(item, dict):
+                continue
+
+            current = deepcopy(item)
+
+            entity_id = (
+                current.get("id")
+                or current.get("identifier")
+                or current.get("entity_id")
+                or current.get("entity_name")
+                or current.get("name")
+                or current.get("value")
+                or current.get("entity_value")
+            )
+            if entity_id is not None and str(entity_id).strip():
+                current["id"] = str(entity_id).strip()
+
+            entity_type = (
+                current.get("type")
+                or current.get("entity_type")
+                or current.get("matched_table")
+                or current.get("table")
+                or current.get("category")
+            )
+            if entity_type is not None and str(entity_type).strip():
+                current["type"] = str(entity_type).strip()
+            elif current.get("id"):
+                current["type"] = "entity"
+
+            source_id = current.get("source_id")
+            if isinstance(source_id, str) and source_id.strip():
+                sid = source_id.strip().lower()
+                if sid in available_sources:
+                    current["source_id"] = sid
+                else:
+                    current.pop("source_id", None)
+            elif source_id is not None:
+                current.pop("source_id", None)
+
+            if (
+                isinstance(current.get("id"), str)
+                and current.get("id", "").strip()
+                and isinstance(current.get("type"), str)
+                and current.get("type", "").strip()
+            ):
+                canonical.append(current)
+
+        return canonical
+
     # ------------------------------------------------------------------
     # Basic validation
     # ------------------------------------------------------------------
@@ -1292,15 +1365,28 @@ class QuestionPlanValidator:
                 errors.append(f"Invalid entity format: {entity!r}")
                 continue
 
-            entity_type = entity.get("type")
-            entity_id = entity.get("id")
+            entity_type = (
+                entity.get("type")
+                or entity.get("entity_type")
+                or entity.get("matched_table")
+                or entity.get("table")
+            )
+            entity_id = (
+                entity.get("id")
+                or entity.get("identifier")
+                or entity.get("entity_id")
+                or entity.get("entity_name")
+                or entity.get("name")
+                or entity.get("value")
+                or entity.get("entity_value")
+            )
 
-            if not isinstance(entity_type, str) or not entity_type.strip():
+            if not isinstance(entity_type, str) or not str(entity_type).strip():
                 errors.append(
                     f"Entity type must be a non-empty string: {entity!r}"
                 )
 
-            if not isinstance(entity_id, str) or not entity_id.strip():
+            if not isinstance(entity_id, str) or not str(entity_id).strip():
                 errors.append(
                     f"Entity id must be a non-empty string: {entity!r}"
                 )

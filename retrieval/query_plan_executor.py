@@ -613,6 +613,7 @@ class QueryPlanExecutor:
                         ),
                     }
 
+                resolved_operator = "in"
                 parameter_value: Any = list(
                     values
                 )
@@ -620,7 +621,9 @@ class QueryPlanExecutor:
             # ----------------------------------------------------------
             # EQUALS
             #
-            # Exactly one upstream value is required.
+            # Single upstream value uses scalar equality; multiple upstream
+            # values generalize to IN set-membership so multi-record queries
+            # execute without runtime failure.
             # ----------------------------------------------------------
 
             elif binding.operator == "equals":
@@ -636,16 +639,12 @@ class QueryPlanExecutor:
                         ),
                     }
 
-                if len(
-                    values
-                ) != 1:
-                    raise ValueError(
-                        f"Input binding from "
-                        f"{binding.from_step!r} uses equals "
-                        "but produced more than one value."
-                    )
-
-                parameter_value = values[0]
+                if len(values) == 1:
+                    resolved_operator = "equals"
+                    parameter_value = values[0]
+                else:
+                    resolved_operator = "in"
+                    parameter_value = list(values)
 
             # ----------------------------------------------------------
             # NOT_IN
@@ -659,6 +658,7 @@ class QueryPlanExecutor:
                 if not values:
                     continue
 
+                resolved_operator = "not_in"
                 parameter_value = list(
                     values
                 )
@@ -682,7 +682,7 @@ class QueryPlanExecutor:
                     "from_column": binding.from_column,
                     "to_table": binding.to_table,
                     "to_column": binding.to_column,
-                    "operator": binding.operator,
+                    "operator": resolved_operator,
                     "values": values,
                 }
             )

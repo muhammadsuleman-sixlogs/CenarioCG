@@ -179,9 +179,59 @@ def test_ranking_uses_distinct_on_not_group_by():
     print("Ranking DISTINCT ON generation passed.")
 
 
+def test_runtime_bound_filter_with_placeholder_and_in_coercion():
+    """Placeholder filters for runtime-bound columns must not fail with IN filter value must be a list."""
+    context = {
+        "tables": {
+            "projects": {
+                "columns": [
+                    {"name": "id"},
+                    {"name": "project_name"},
+                ],
+                "primary_keys": ["id"],
+            },
+        },
+        "relationships": [],
+    }
+
+    contract = {
+        "question": "project details",
+        "required_tables": ["projects"],
+        "required_columns": ["projects.id", "projects.project_name"],
+        "filters": [
+            {"field": "projects.id", "operator": "in", "value": None},
+            {"field": "projects.project_name", "operator": "in", "value": "SingleName"},
+        ],
+        "operations": ["lookup"],
+        "relationships": [],
+    }
+
+    runtime_bindings = [
+        {
+            "index": 0,
+            "to_table": "projects",
+            "to_column": "id",
+            "operator": "in",
+        }
+    ]
+
+    generator = SQLGenerator(context, source_id="db1")
+    query = generator.generate(
+        contract,
+        source_id="db1",
+        runtime_bindings={"bindings": runtime_bindings, "parameters": [["uuid-1", "uuid-2"]]},
+    )
+
+    normalized = " ".join(query.upper().split())
+    assert "CAST(\"PROJECTS\".\"ID\" AS TEXT) = ANY(%S)" in normalized
+    assert "\"PROJECTS\".\"PROJECT_NAME\" IN ('SINGLENAME')" in normalized
+    validate_sql_syntax(query)
+
+
 if __name__ == "__main__":
     test_sql_generation()
     test_ranking_uses_distinct_on_not_group_by()
+    test_runtime_bound_filter_with_placeholder_and_in_coercion()
 
     print(
         "All SQL generator tests passed."

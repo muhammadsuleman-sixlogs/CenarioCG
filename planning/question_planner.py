@@ -575,6 +575,24 @@ be null.
 Do not invent a metric column.
 
 ============================================================
+ENTITIES & FOLLOW-UP QUERIES
+============================================================
+
+When entities are identified, each entity object in "entities" MUST have:
+{{
+  "id": "identifier or name",
+  "type": "user|project|meeting|entity",
+  "source_id": "db1"
+}}
+Never use arbitrary keys without setting "id" and "type".
+
+When the question is a conversational follow-up (e.g. asking about a person, user,
+or entity mentioned in prior turns or meeting summaries):
+- If asking whether someone is a user or asking about a user/person by name (e.g. "is Rahim Zahid a user?", "who is Rahim Zahid"):
+  Query db1.users and filter by name fields (e.g. users.first_name contains 'Rahim', users.last_name contains 'Zahid').
+  Do NOT produce filters with empty values (such as users.id in []). Always filter by the name components.
+
+============================================================
 SIMPLE QUERIES
 ============================================================
 
@@ -2149,37 +2167,72 @@ The final execution plan step objects must use:
         if entities is None:
             return []
 
+        if isinstance(entities, (str, dict)):
+            entities = [entities]
+
         if not isinstance(
             entities,
             list,
         ):
-            raise ValueError(
-                "entities must be a list."
-            )
+            return []
 
+        available_sources = set(self._get_available_postgresql_sources())
         normalized: list[dict[str, Any]] = []
 
         for item in entities:
+            if isinstance(item, str) and item.strip():
+                normalized.append({
+                    "id": item.strip(),
+                    "type": "entity",
+                })
+                continue
+
             if not isinstance(item, dict):
                 continue
 
             current = deepcopy(item)
 
-            # Some model responses use ``identifier`` even though the
-            # canonical planner contract uses ``id``.  This is a structural
-            # normalization only; it does not invent or change the value.
-            if (
-                (
-                    "id" not in current
-                    or not isinstance(current.get("id"), str)
-                    or not current.get("id", "").strip()
-                )
-                and isinstance(current.get("identifier"), str)
-                and current.get("identifier", "").strip()
-            ):
-                current["id"] = current["identifier"].strip()
+            entity_id = (
+                current.get("id")
+                or current.get("identifier")
+                or current.get("entity_id")
+                or current.get("entity_name")
+                or current.get("name")
+                or current.get("value")
+                or current.get("entity_value")
+            )
+            if entity_id is not None and str(entity_id).strip():
+                current["id"] = str(entity_id).strip()
 
-            normalized.append(current)
+            entity_type = (
+                current.get("type")
+                or current.get("entity_type")
+                or current.get("matched_table")
+                or current.get("table")
+                or current.get("category")
+            )
+            if entity_type is not None and str(entity_type).strip():
+                current["type"] = str(entity_type).strip()
+            elif current.get("id"):
+                current["type"] = "entity"
+
+            source_id = current.get("source_id")
+            if isinstance(source_id, str) and source_id.strip():
+                sid = source_id.strip().lower()
+                if sid in available_sources:
+                    current["source_id"] = sid
+                else:
+                    current.pop("source_id", None)
+            elif source_id is not None:
+                current.pop("source_id", None)
+
+            if (
+                isinstance(current.get("id"), str)
+                and current.get("id", "").strip()
+                and isinstance(current.get("type"), str)
+                and current.get("type", "").strip()
+            ):
+                normalized.append(current)
 
         return normalized
 

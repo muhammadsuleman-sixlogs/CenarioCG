@@ -10,6 +10,7 @@ from auth.authentication import (
     authenticate_request,
     login_user,
     logout_user,
+    set_session_cookie,
 )
 
 
@@ -23,7 +24,7 @@ app = FastAPI(
 
 allow_origins_raw = os.getenv(
     "ALLOW_ORIGINS",
-    "http://localhost:5173,https://cenario-cg-xmvw.vercel.app",
+    "http://localhost:5173,http://127.0.0.1:5173,https://cenario-cg-xmvw.vercel.app",
 )
 
 allow_origins = [
@@ -31,6 +32,8 @@ allow_origins = [
     for origin in allow_origins_raw.split(",")
     if origin.strip()
 ]
+if "http://localhost:5173" in allow_origins and "http://127.0.0.1:5173" not in allow_origins:
+    allow_origins.append("http://127.0.0.1:5173")
 
 
 app.add_middleware(
@@ -101,16 +104,21 @@ async def login(request: Request):
         )
     )
 
+    session = login_user(
+        username=username,
+        password=password,
+    )
+
     response = JSONResponse(
         content={
             "authenticated": True,
+            "token": session,
         }
     )
 
-    login_user(
-        username=username,
-        password=password,
+    set_session_cookie(
         response=response,
+        session=session,
     )
 
     return response

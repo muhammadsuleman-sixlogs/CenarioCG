@@ -724,6 +724,7 @@ class SQLGenerator:
                 [],
             ),
             selected_tables,
+            runtime_bindings=runtime_bindings,
         )
 
         where_clauses.extend(
@@ -1810,6 +1811,7 @@ class SQLGenerator:
         self,
         filters: Any,
         selected_tables: list[str],
+        runtime_bindings: list[dict[str, Any]] | None = None,
     ) -> list[str]:
         if not isinstance(
             filters,
@@ -1818,6 +1820,15 @@ class SQLGenerator:
             raise ValueError(
                 "filters must be a list."
             )
+
+        bound_targets = {
+            (
+                str(binding.get("to_table", "")).strip().lower(),
+                str(binding.get("to_column", "")).strip().lower(),
+            )
+            for binding in (runtime_bindings or [])
+            if isinstance(binding, dict)
+        }
 
         result: list[str] = []
 
@@ -1891,6 +1902,11 @@ class SQLGenerator:
                 reference,
             )
 
+            # Skip contract filters that are dynamically supplied by runtime_bindings.
+            # _compile_runtime_bindings generates the parameter placeholder ANY(%s).
+            if (table_name.lower(), column_name.lower()) in bound_targets:
+                continue
+
             operator = filter_value.get(
                 "operator",
                 "=",
@@ -1915,6 +1931,21 @@ class SQLGenerator:
                     f"{operator!r}"
                 )
 
+            raw_val = filter_value.get("value")
+
+            # Skip step placeholder values or None values for operators that require values
+            if operator not in {"is_null", "is_not_null"}:
+                if raw_val is None:
+                    continue
+                if isinstance(raw_val, str) and (
+                    raw_val.startswith("$")
+                    or raw_val.startswith("s1.")
+                    or raw_val.startswith("s2.")
+                    or raw_val.startswith("s3.")
+                    or raw_val in {"s1", "s2", "s3"}
+                ):
+                    continue
+
             qualified = self._qualified_identifier(
                 table_name,
                 column_name,
@@ -1924,9 +1955,7 @@ class SQLGenerator:
                 self._compile_filter_expression(
                     qualified=qualified,
                     operator=operator,
-                    value=filter_value.get(
-                        "value"
-                    ),
+                    value=raw_val,
                 )
             )
 
@@ -1945,10 +1974,14 @@ class SQLGenerator:
             return f"{qualified} IS NOT NULL"
 
         if operator == "in":
-            if not isinstance(
-                value,
-                list,
-            ):
+            if value is None:
+                return "FALSE"
+
+            if isinstance(value, (str, int, float, Decimal, bool)):
+                value = [value]
+            elif isinstance(value, (tuple, set)):
+                value = list(value)
+            elif not isinstance(value, list):
                 raise ValueError(
                     "IN filter value must be a list."
                 )
@@ -1966,10 +1999,14 @@ class SQLGenerator:
             )
 
         if operator == "not_in":
-            if not isinstance(
-                value,
-                list,
-            ):
+            if value is None:
+                return "TRUE"
+
+            if isinstance(value, (str, int, float, Decimal, bool)):
+                value = [value]
+            elif isinstance(value, (tuple, set)):
+                value = list(value)
+            elif not isinstance(value, list):
                 raise ValueError(
                     "NOT_IN filter value must be a list."
                 )

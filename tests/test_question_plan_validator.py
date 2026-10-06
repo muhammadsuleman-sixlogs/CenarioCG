@@ -312,3 +312,58 @@ if __name__ == "__main__":
     print(
         "All question plan validator tests passed."
     )
+
+
+def test_entity_canonicalization_and_validation():
+    contexts = {
+        "db1": {
+            "tables": {
+                "users": {
+                    "columns": [
+                        {"name": "id"},
+                        {"name": "first_name"},
+                        {"name": "last_name"},
+                    ]
+                }
+            },
+            "relationships": [],
+        }
+    }
+
+    plan = {
+        "question": "is rahim zahid is user?",
+        "data_sources": ["postgresql"],
+        "postgresql_sources": ["db1"],
+        "required_tables": ["users"],
+        "required_columns": ["users.id", "users.first_name", "users.last_name"],
+        "relationships": [],
+        "operations": ["lookup"],
+        "filters": [
+            {
+                "table": "users",
+                "column": "first_name",
+                "operator": "contains",
+                "value": "Rahim",
+            }
+        ],
+        "entities": [
+            {
+                "entity_name": "Rahim Zahid",
+                "matched_table": "users",
+                "matched_columns": ["first_name", "last_name"],
+            },
+            "Rahim Zahid",
+        ],
+        "confidence": 0.8,
+    }
+
+    validator = QuestionPlanValidator(contexts)
+    result = validator.validate(plan)
+
+    assert result["valid"] is True, result["errors"]
+    canonical_entities = result["plan"]["entities"]
+    assert len(canonical_entities) == 2
+    assert canonical_entities[0]["id"] == "Rahim Zahid"
+    assert canonical_entities[0]["type"] == "users"
+    assert canonical_entities[1]["id"] == "Rahim Zahid"
+    assert canonical_entities[1]["type"] == "entity"
