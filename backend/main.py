@@ -14,6 +14,11 @@ from auth.authentication import (
 )
 
 
+from pathlib import Path
+
+# Load .env from backend directory and environment
+backend_dir = Path(__file__).resolve().parent
+load_dotenv(backend_dir / ".env")
 load_dotenv()
 
 

@@ -70,13 +70,13 @@ flowchart TD
 
 | Module / Directory | Path | Core Responsibilities |
 |---|---|---|
-| **API Server** | [`main.py`](main.py), [`api/chat.py`](api/chat.py) | FastAPI backend serving `/api/chat`, `/api/auth`, `/api/graph`. Manages session auth, cross-origin security, request validation, and Graph data formatting. |
-| **RAG Pipeline** | [`pipeline/rag_pipeline.py`](pipeline/rag_pipeline.py) | Central orchestrator coordinating plan generation, plan validation, multi-source query execution, security logging, and answer generation. |
-| **Query Planning** | [`planning/question_planner.py`](planning/question_planner.py)<br>[`planning/question_plan_validator.py`](planning/question_plan_validator.py)<br>[`planning/complex_query_planner.py`](planning/complex_query_planner.py) | LLM-driven query planner producing formal semantic contracts. Validates plans against the Context Layer and normalizes entity references. |
-| **Safe SQL Engine** | [`retrieval/sql_generator.py`](retrieval/sql_generator.py)<br>[`retrieval/query_plan_executor.py`](retrieval/query_plan_executor.py) | Compiles plan contracts into parameterized SQL. Executes read-only queries with dynamic runtime parameter bindings across steps (`s1` $\rightarrow$ `s2`). |
-| **Context Layer** | [`context/context_store.py`](context/context_store.py)<br>[`context/context_graph.py`](context/context_graph.py) | Discovers schema metadata, primary/foreign keys, and business relationships. Builds multi-source NetworkX graphs. |
-| **Security Intelligence** | [`security_logs/client.py`](security_logs/client.py)<br>[`security_logs/retriever.py`](security_logs/retriever.py) | Read-only client for SIEM security logs, CLI audits, and workspace compliance summaries. |
-| **Entity Resolution** | [`entity_resolution/`](entity_resolution/) | Extracts and maps codes (`AVID-4207`), emails, and entities across schema boundaries. |
+| **API Server** | [`backend/main.py`](backend/main.py), [`backend/api/chat.py`](backend/api/chat.py) | FastAPI backend serving `/api/chat`, `/api/auth`, `/api/graph`. Manages session auth, cross-origin security, request validation, and Graph data formatting. |
+| **RAG Pipeline** | [`backend/pipeline/rag_pipeline.py`](backend/pipeline/rag_pipeline.py) | Central orchestrator coordinating plan generation, plan validation, multi-source query execution, security logging, and answer generation. |
+| **Query Planning** | [`backend/planning/question_planner.py`](backend/planning/question_planner.py)<br>[`backend/planning/question_plan_validator.py`](backend/planning/question_plan_validator.py)<br>[`backend/planning/complex_query_planner.py`](backend/planning/complex_query_planner.py) | LLM-driven query planner producing formal semantic contracts. Validates plans against the Context Layer and normalizes entity references. |
+| **Safe SQL Engine** | [`backend/retrieval/sql_generator.py`](backend/retrieval/sql_generator.py)<br>[`backend/retrieval/query_plan_executor.py`](backend/retrieval/query_plan_executor.py) | Compiles plan contracts into parameterized SQL. Executes read-only queries with dynamic runtime parameter bindings across steps (`s1` $\rightarrow$ `s2`). |
+| **Context Layer** | [`backend/context/context_store.py`](backend/context/context_store.py)<br>[`backend/context/context_graph.py`](backend/context/context_graph.py) | Discovers schema metadata, primary/foreign keys, and business relationships. Builds multi-source NetworkX graphs. |
+| **Security Intelligence** | [`backend/security_logs/client.py`](backend/security_logs/client.py)<br>[`backend/security_logs/retriever.py`](backend/security_logs/retriever.py) | Read-only client for SIEM security logs, CLI audits, and workspace compliance summaries. |
+| **Entity Resolution** | [`backend/entity_resolution/`](backend/entity_resolution/) | Extracts and maps codes (`AVID-4207`), emails, and entities across schema boundaries. |
 | **Frontend Dashboard** | [`frontend/src/App.jsx`](frontend/src/App.jsx)<br>[`frontend/src/components/GraphView.jsx`](frontend/src/components/GraphView.jsx) | React 19 + Vite dashboard featuring Cytoscape force-directed graph view, conversational UI, and interactive SQL provenance modals. |
 
 ---
@@ -192,6 +192,9 @@ SECURITY_API_TOKEN=your-jwt-token
 
 ### Step 2: Install Python Dependencies & Start Backend
 ```powershell
+# Navigate to backend directory
+cd backend
+
 # Install backend dependencies
 pip install -r requirements.txt
 
@@ -227,14 +230,14 @@ Dashboard will be live at `http://127.0.0.1:5173`.
 Run the automated test suite across validation, SQL generation, and authentication:
 
 ```powershell
-# Run plan validator test suite
-python -m pytest tests/test_question_plan_validator.py
+# Run plan validator test suite (from root or backend/)
+python -m pytest backend/tests/test_question_plan_validator.py
 
 # Run parameterized SQL generator test suite
-python -m pytest tests/test_sql_generator.py
+python -m pytest backend/tests/test_sql_generator.py
 
 # Run session authentication test suite
-python -m pytest tests/test_authentication.py
+python -m pytest backend/tests/test_authentication.py
 ```
 
 ---

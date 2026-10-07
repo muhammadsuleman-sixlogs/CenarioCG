@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 
-CONTEXT_DIR = Path("context")
+CONTEXT_DIR = Path(__file__).resolve().parent
 
 DB1_CONTEXT_FILE = CONTEXT_DIR / "context_db1.json"
 DB2_CONTEXT_FILE = CONTEXT_DIR / "context_db2.json"

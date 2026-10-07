@@ -43,13 +43,13 @@ flowchart TD
 
 | Directory / File | Description & Core Responsibilities |
 |---|---|
-| `main.py` & `api/` | **FastAPI Application Server:** Exposes `/api/chat`, `/api/auth`, `/api/graph`. Manages session auth, request validation, and HTTP response streaming. |
-| `pipeline/rag_pipeline.py` | **Central Orchestrator (`RAGPipeline`):** Controls the end-to-end question planning, plan validation, query execution, result aggregation, and final answer generation. |
-| `planning/` | **Query Planning & Validation Subsystem:** <br>• `question_planner.py`: Generates structured single-step or multi-step execution plans.<br>• `question_plan_validator.py`: Deterministically validates plans against the Context Layer.<br>• `question_plan_repair.py`: Repairs invalid plans using schema context.<br>• `query_plan.py`: Dependency graph builder for step execution (`s1`, `s2`, `s3`). |
-| `context/` | **Context Layer (`context_store.py`, `context_builder.py`):** Dynamically discovers and stores schema context (tables, columns, primary/foreign keys, business relationships) for `db1` and `db2`. |
-| `retrieval/` | **Database Query Engine:** <br>• `sql_generator.py`: Compiles step contracts into parameterized, safe PostgreSQL SQL queries.<br>• `postgres_retriever.py` & `complex_postgres_retriever.py`: Executes read-only queries against PostgreSQL instances. |
-| `security_logs/` | **Security Intelligence Layer:** `client.py` and `retriever.py` handle read-only retrieval of SIEM security logs and user audit events. |
-| `entity_resolution/` | **Entity Resolution Engine:** Resolves project codes (`AVID-4207`), user emails, and entity IDs across different database schemas. |
+| `backend/main.py` & `backend/api/` | **FastAPI Application Server:** Exposes `/api/chat`, `/api/auth`, `/api/graph`. Manages session auth, request validation, and HTTP response streaming. |
+| `backend/pipeline/` | **Central Orchestrator (`RAGPipeline`):** Controls the end-to-end question planning, plan validation, query execution, result aggregation, and final answer generation. |
+| `backend/planning/` | **Query Planning & Validation Subsystem:** <br>• `question_planner.py`: Generates structured single-step or multi-step execution plans.<br>• `question_plan_validator.py`: Deterministically validates plans against the Context Layer.<br>• `question_plan_repair.py`: Repairs invalid plans using schema context.<br>• `query_plan.py`: Dependency graph builder for step execution (`s1`, `s2`, `s3`). |
+| `backend/context/` | **Context Layer (`context_store.py`, `context_builder.py`):** Dynamically discovers and stores schema context (tables, columns, primary/foreign keys, business relationships) for `db1` and `db2`. |
+| `backend/retrieval/` | **Database Query Engine:** <br>• `sql_generator.py`: Compiles step contracts into parameterized, safe PostgreSQL SQL queries.<br>• `postgres_retriever.py` & `complex_postgres_retriever.py`: Executes read-only queries against PostgreSQL instances. |
+| `backend/security_logs/` | **Security Intelligence Layer:** `client.py` and `retriever.py` handle read-only retrieval of SIEM security logs and user audit events. |
+| `backend/entity_resolution/` | **Entity Resolution Engine:** Resolves project codes (`AVID-4207`), user emails, and entity IDs across different database schemas. |
 | `frontend/` | **React + Vite UI:** Web dashboard with chat components, interactive source buttons, and PostgreSQL provenance modals (`App.jsx`). |
 
 ---
@@ -92,11 +92,14 @@ flowchart TD
 When testing or validating changes in this codebase, run the following commands:
 
 ```bash
-# Run pytest test suite for plan validator & SQL generator
-pytest tests/test_question_plan_validator.py tests/test_sql_generator.py
+# Run pytest test suite for plan validator & SQL generator (from root or backend/)
+pytest backend/tests/test_question_plan_validator.py backend/tests/test_sql_generator.py
+
+# Or inside backend:
+cd backend && pytest tests/test_question_plan_validator.py tests/test_sql_generator.py
 
 # Run FastAPI backend server locally
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
+cd backend && python -m uvicorn main:app --host 127.0.0.1 --port 8000
 
 # Run Vite frontend dev server
 cd frontend && npm run dev

@@ -13,7 +13,7 @@ from context.cross_source_evidence import (
 )
 
 
-OUTPUT_FILE = Path("context/cross_source_relationships.json")
+OUTPUT_FILE = Path(__file__).resolve().parent / "cross_source_relationships.json"
 
 
 # ---------------------------------------------------------------------------

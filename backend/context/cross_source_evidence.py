@@ -14,7 +14,7 @@ from context.cross_source_inference import (
 from context.context_builder import build_context
 
 
-OUTPUT_FILE = Path("context/cross_source_evidence.json")
+OUTPUT_FILE = Path(__file__).resolve().parent / "cross_source_evidence.json"
 
 
 def _quote_identifier(value: str) -> str:
