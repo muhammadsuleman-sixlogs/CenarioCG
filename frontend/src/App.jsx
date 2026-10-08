@@ -1423,11 +1423,11 @@ function App() {
                       type="button"
                       onClick={() =>
                         handleSuggestion(
-                          "What is the total number of tickets?"
+                          "Show me recent meetings"
                         )
                       }
                     >
-                      Total ticket
+                      Show me recent meetings
                     </button>
                   </div>
                 </div>
