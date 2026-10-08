@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import GraphView from "./components/GraphView";
+import KpiDetailView from "./components/KpiDetailView";
 import "./App.css";
 
 const API_BASE_URL =
@@ -364,6 +365,7 @@ function App() {
 
   const [selectedEntity, setSelectedEntity] = useState(null);
   const [selectedSource, setSelectedSource] = useState(null);
+  const [selectedKpi, setSelectedKpi] = useState(null);
 
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
@@ -451,6 +453,7 @@ function App() {
 
     setSelectedEntity(null);
     setSelectedSource(null);
+    setSelectedKpi(null);
 
     setQuestion("");
     setMessages([]);
@@ -980,7 +983,11 @@ function App() {
 
         <div className="page">
           <section className="stats-grid">
-            <div className="stat-card">
+            <div
+              className={`stat-card clickable ${selectedKpi === "entities" ? "active" : ""}`}
+              onClick={() => setSelectedKpi(selectedKpi === "entities" ? null : "entities")}
+              title="Click to inspect all discovered entities and schema attributes"
+            >
               <div className="stat-icon">
                 ◈
               </div>
@@ -998,9 +1005,14 @@ function App() {
               <div className="stat-description">
                 Discovered entities across sources
               </div>
+              <div className="stat-card-active-indicator" />
             </div>
 
-            <div className="stat-card">
+            <div
+              className={`stat-card clickable ${selectedKpi === "database" ? "active" : ""}`}
+              onClick={() => setSelectedKpi(selectedKpi === "database" ? null : "database")}
+              title="Click to inspect all discovered database foreign-key relationships"
+            >
               <div className="stat-icon">
                 ⌁
               </div>
@@ -1020,9 +1032,14 @@ function App() {
               <div className="stat-description">
                 PostgreSQL relationships
               </div>
+              <div className="stat-card-active-indicator" />
             </div>
 
-            <div className="stat-card">
+            <div
+              className={`stat-card clickable ${selectedKpi === "business" ? "active" : ""}`}
+              onClick={() => setSelectedKpi(selectedKpi === "business" ? null : "business")}
+              title="Click to inspect all discovered business-semantic relationships"
+            >
               <div className="stat-icon">
                 ✦
               </div>
@@ -1042,9 +1059,14 @@ function App() {
               <div className="stat-description">
                 Validated relationships
               </div>
+              <div className="stat-card-active-indicator" />
             </div>
 
-            <div className="stat-card">
+            <div
+              className={`stat-card clickable ${selectedKpi === "connections" ? "active" : ""}`}
+              onClick={() => setSelectedKpi(selectedKpi === "connections" ? null : "connections")}
+              title="Click to inspect all 236 graph connections and edges"
+            >
               <div className="stat-icon">
                 ◎
               </div>
@@ -1062,8 +1084,25 @@ function App() {
               <div className="stat-description">
                 Total graph edges
               </div>
+              <div className="stat-card-active-indicator" />
             </div>
           </section>
+
+          {selectedKpi && (
+            <KpiDetailView
+              selectedKpi={selectedKpi}
+              graphData={graphData}
+              graphSummary={graphSummary}
+              onClose={() => setSelectedKpi(null)}
+              onSelectEntity={(entity) => {
+                setSelectedEntity(entity);
+                const entityPanel = document.querySelector(".entity-panel");
+                if (entityPanel) {
+                  entityPanel.scrollIntoView({ behavior: "smooth" });
+                }
+              }}
+            />
+          )}
 
           <section className="source-overview">
             <div className="source-overview-header">

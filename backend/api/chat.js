@@ -77,11 +77,23 @@ export function graphToDict(graph) {
       label,
       type: edgeType,
       relationship_type: relationshipType,
-      source_column: data?.source_column || "",
-      target_column: data?.target_column || "",
+      source_column: data?.source_column || data?.child_column || "",
+      target_column: data?.target_column || data?.parent_column || "",
+      parent_table: data?.parent_table || "",
+      parent_column: data?.parent_column || "",
+      child_table: data?.child_table || "",
+      child_column: data?.child_column || "",
+      source_table: data?.source_table || "",
+      target_table: data?.target_table || "",
+      source_id: data?.source_id || "",
       target_source_id: data?.target_source_id || "",
       relationship_kind: data?.relationship_kind || "",
-      confidence: data?.confidence ?? null
+      business_relationship: data?.business_relationship || "",
+      reason: data?.reason || "",
+      evidence: data?.evidence || null,
+      confidence: data?.confidence ?? null,
+      matching_identifier_count: data?.matching_identifier_count ?? null,
+      overlap_detected: data?.overlap_detected ?? null
     });
   }
 
