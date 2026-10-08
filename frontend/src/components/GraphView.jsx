@@ -288,9 +288,12 @@ function GraphView({
   sourceTrace,
   selectedEntity,
   loading,
+  refreshing = false,
   onEntitySelect,
+  onRefresh,
 }) {
   const cyRef = useRef(null);
+  const containerRef = useRef(null);
   const timersRef = useRef([]);
   const loadingRef = useRef(loading);
   const onEntitySelectRef = useRef(onEntitySelect);
@@ -298,6 +301,24 @@ function GraphView({
   /* Keep refs current so long-lived callbacks never go stale. */
   loadingRef.current = loading;
   onEntitySelectRef.current = onEntitySelect;
+
+  /* Synchronize Cytoscape canvas dimensions whenever container resizes without recomputing layout */
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const ro = new ResizeObserver(() => {
+      const cy = cyRef.current;
+      if (cy && !cy.destroyed()) {
+        cy.resize();
+      }
+    });
+
+    ro.observe(containerRef.current);
+
+    return () => {
+      ro.disconnect();
+    };
+  }, []);
 
   /* ---------------------------------------------------------------- */
   /* Graph elements                                                    */
@@ -730,6 +751,7 @@ function GraphView({
   /* ---------------------------------------------------------------- */
   return (
     <div
+      ref={containerRef}
       style={{
         position: "relative",
         width: "100%",
@@ -763,7 +785,7 @@ function GraphView({
           border: "1px solid rgba(255, 255, 255, 0.08)",
           borderRadius: 12,
           backdropFilter: "blur(10px)",
-          zIndex: 50,
+          zIndex: 10,
         }}
       >
         <div
@@ -846,9 +868,27 @@ function GraphView({
           display: "flex",
           flexDirection: "column",
           gap: 6,
-          zIndex: 60,
+          zIndex: 15,
         }}
       >
+        {onRefresh && (
+          <button
+            type="button"
+            className="graph-control-button"
+            aria-label="Refresh and reset graph"
+            title="Refresh and reset graph"
+            disabled={loading || refreshing}
+            onClick={onRefresh}
+          >
+            <span
+              className={`refresh-icon ${refreshing ? "spinning" : ""}`}
+              style={{ fontSize: 16 }}
+            >
+              ↻
+            </span>
+          </button>
+        )}
+
         <button
           type="button"
           className="graph-control-button"

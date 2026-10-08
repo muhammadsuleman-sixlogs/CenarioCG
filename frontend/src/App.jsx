@@ -1150,10 +1150,6 @@ function App() {
               onClose={() => setSelectedKpi(null)}
               onSelectEntity={(entity) => {
                 setSelectedEntity(entity);
-                const entityPanel = document.querySelector(".entity-panel");
-                if (entityPanel) {
-                  entityPanel.scrollIntoView({ behavior: "smooth" });
-                }
               }}
             />
           )}
@@ -1261,6 +1257,8 @@ function App() {
                   selectedEntity={selectedEntity}
                   onEntitySelect={handleEntitySelect}
                   loading={loading}
+                  refreshing={refreshing}
+                  onRefresh={handleRefresh}
                 />
 
                 <div className="graph-overlay">
@@ -1392,24 +1390,6 @@ function App() {
                   Ask questions across your connected
                   data
                 </p>
-              </div>
-
-              <div className="chat-header-actions">
-                <button
-                  type="button"
-                  className="chat-action-button"
-                  onClick={handleRefresh}
-                  disabled={loading || refreshing}
-                  title="Refresh context graph"
-                >
-                  <span className="refresh-icon">
-                    ↻
-                  </span>
-
-                  {refreshing
-                    ? "Refreshing..."
-                    : "Refresh"}
-                </button>
               </div>
             </div>
 

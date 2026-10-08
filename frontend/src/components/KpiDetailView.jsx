@@ -41,34 +41,41 @@ export default function KpiDetailView({
   onSelectEntity
 }) {
   const [searchQuery, setSearchQuery] = useState("");
-  const [expandedRows, setExpandedRows] = useState(new Set());
+  const [expandedRowsMap, setExpandedRowsMap] = useState({});
   const [filterType, setFilterType] = useState("all"); // For connections: all, database, business, cross_source
 
-  // Reset expanded rows when switching KPIs
-  React.useEffect(() => {
-    setExpandedRows(new Set());
-    setSearchQuery("");
-    setFilterType("all");
-  }, [selectedKpi]);
+  const expandedRows = useMemo(() => {
+    return expandedRowsMap[selectedKpi] || new Set();
+  }, [expandedRowsMap, selectedKpi]);
 
   const toggleRow = (id) => {
-    setExpandedRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
+    setExpandedRowsMap((prev) => {
+      const currentSet = prev[selectedKpi] || new Set();
+      const nextSet = new Set(currentSet);
+      if (nextSet.has(id)) {
+        nextSet.delete(id);
       } else {
-        next.add(id);
+        nextSet.add(id);
       }
-      return next;
+      return {
+        ...prev,
+        [selectedKpi]: nextSet,
+      };
     });
   };
 
   const expandAll = (allIds) => {
-    setExpandedRows(new Set(allIds));
+    setExpandedRowsMap((prev) => ({
+      ...prev,
+      [selectedKpi]: new Set(allIds),
+    }));
   };
 
   const collapseAll = () => {
-    setExpandedRows(new Set());
+    setExpandedRowsMap((prev) => ({
+      ...prev,
+      [selectedKpi]: new Set(),
+    }));
   };
 
   // 1. Entities data
