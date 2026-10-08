@@ -14,8 +14,9 @@
 // These patterns intentionally focus on credential-like fields.
 // They are matched against the complete column name.
 export const SENSITIVE_FIELD_PATTERNS = [
-  "^password$",
-  "^passwd$",
+  "^password.*",
+  ".*password.*",
+  "^passwd.*",
   "^passcode$",
   "^secret$",
   ".*_secret$",

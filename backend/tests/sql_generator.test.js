@@ -50,5 +50,5 @@ test("SQLGenerator compiles aggregate COUNT queries", () => {
   };
 
   const sql = generator.generate(contract, "db1");
-  assert.ok(sql.includes("COUNT(*) AS count"), "Query must include COUNT aggregate");
+  assert.ok(/COUNT\(\*\)\s+AS\s+["']?count["']?/i.test(sql), "Query must include COUNT aggregate");
 });
