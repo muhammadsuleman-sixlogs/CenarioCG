@@ -1,0 +1,20 @@
+{
+  "name": "cenariocg-backend",
+  "version": "1.0.0",
+  "description": "CenarioCG Multi-Source RAG & Security Intelligence Backend",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "dev": "node --watch main.js",
+    "test": "node --test tests/**/*.test.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "openai": "^4.86.1",
+    "pg": "^8.13.3"
+  }
+}

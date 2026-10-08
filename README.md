@@ -190,18 +190,21 @@ SECURITY_API_PREFIX=api
 SECURITY_API_TOKEN=your-jwt-token
 ```
 
-### Step 2: Install Python Dependencies & Start Backend
+### Step 2: Install Node.js Backend & Start Server
 ```powershell
 # Navigate to backend directory
 cd backend
 
-# Install backend dependencies
-pip install -r requirements.txt
+# Install production Node.js dependencies
+npm install
 
-# Start the FastAPI backend server
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
+# Start the Node.js backend server
+npm start
+# (Or in development mode with auto-reload: npm run dev)
 ```
 Backend will be live at `http://127.0.0.1:8000`.
+
+*(Note: The original Python runtime is also preserved and can still be run via `python -m uvicorn main:app --host 127.0.0.1 --port 8000`)*
 
 ### Step 3: Install Frontend Dependencies & Start Dashboard
 ```powershell
@@ -219,29 +222,78 @@ Dashboard will be live at `http://127.0.0.1:5173`.
 |---|---|---|---|
 | `/api/auth/login` | `POST` | Authenticate Super Admin session. Returns session token. | `{"username": "...", "password": "..."}` |
 | `/api/auth/me` | `GET` | Verify active session authentication status. | Returns `{"authenticated": true}` |
+| `/api/auth/logout` | `POST` | End session and invalidate auth cookie. | Returns `{"authenticated": false}` |
 | `/api/chat` | `POST` | Execute natural language query across multi-source RAG pipeline. | `{"question": "show me recent projects"}` |
 | `/api/graph` | `GET` | Retrieve the unified Cytoscape Context Graph schema representation. | Returns nodes, edges, table columns, and relationships. |
 | `/api/health` | `GET` | Health check probe. | Returns `{"status": "healthy"}` |
 
 ---
 
-## 9. Testing & Quality Verification
+## 9. Security & Strict Read-Only Protections
 
-Run the automated test suite across validation, SQL generation, and authentication:
+The platform implements multi-layer defense-in-depth:
+1. **Strict Read-Only Database Guards:**
+   - PostgreSQL session level: Connections execute `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` on connect.
+   - AST / Regex Guard: Blocks any `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `MERGE`, `LOCK`, or `FOR UPDATE` statements.
+   - Rejects multiple statements (semicolon injection protection).
+2. **Confidentiality & Credential Shielding:**
+   - Direct Inquiries Blocked: Prompts requesting passwords, secret tokens, private keys, or API credentials immediately fail closed.
+   - Schema Filtering: Credential columns (`password`, `password_hash`, `api_key`, `token`) are automatically excluded from LLM planning prompts.
+   - Output Sanitizer: Outbound text is continuously scanned and any accidental Bearer tokens or credentials are automatically replaced with `[REDACTED]`.
+
+---
+
+## 10. Testing & Quality Verification
+
+Run the automated Node.js test suite across validation, SQL generation, security, and authentication:
 
 ```powershell
-# Run plan validator test suite (from root or backend/)
-python -m pytest backend/tests/test_question_plan_validator.py
+# From backend directory:
+cd backend
+npm test
 
-# Run parameterized SQL generator test suite
-python -m pytest backend/tests/test_sql_generator.py
-
-# Run session authentication test suite
-python -m pytest backend/tests/test_authentication.py
+# (Or run Node.js built-in test runner directly):
+node --test tests/**/*.test.js
 ```
+All 27 automated tests run with Node's native test runner (`node --test`).
+
+---
+
+## 11. Module-by-Module Migration Parity (Phase 1)
+
+### `backend/config`
+- Preserves full parity with `.env` settings and Python consumption.
+- Automatically strips enclosing quotes from keys (e.g. `OPENAI_API_KEY`).
+- Normalizes CORS `allowOrigins` to guarantee dual `localhost` / `127.0.0.1` access.
+- Exposes complete SIEM cache TTLs, timeout limits, and Context Layer turn/item thresholds.
+
+### `backend/auth`
+- Implements constant-time timing-safe comparisons (`crypto.timingSafeEqual`) without length-mismatch throw vulnerabilities.
+- Preserves multi-space Bearer token, raw dot token, and cookie extraction.
+- Fully compatible with both padded and unpadded Base64/Base64URL HMAC SHA-256 session tokens.
+- Restores `_get_cookie_settings` parity (`sameSite="none"` if secure, `"lax"` for local HTTP).
+
+### `backend/api`
+- Restores complete `graph_to_dict`, `build_graph_trace`, and `build_source_trace` serialization algorithms.
+- Matches exact trace edge ID format: `${source}-${target}-${edgeKey}`.
+- Preserves business, cross-source, and database relationship label precedence rules.
+- Retains all 7 response keys on `/api/chat` (`question`, `answer`, `sources`, `graph`, `graph_summary`, `graph_trace`, `source_trace`).
+- Preserves HTTP 400 and 401 status codes and error detail payloads.
+
+### `backend/context`
+- **`context_manager.js`**: Restores `ContextManager` conversational memory: bounded turn tracking (`addTurn`), entity retention across follow-up queries, text length capping, and `getPlanningContext` marking conversation history as reference-only.
+- **`context_store.js`**: Restores `loadContext`, `loadAllContexts`, and `saveContext` with strict missing-file error propagation and DB1 legacy fallback.
+- **`context_graph.js`**: Restores `buildContextGraph`, `getRelatedTables`, `getRelationships`, `MultiDiGraph` predecessor/successor traversal, parent -> child foreign key direction, and exact UI summary keys (`nodes`, `edges`).
+- **`business_logic_store.js`**: Dedicated modular store for loading and persisting validated business relationships partitioned by `source_id`.
+- **`business_logic_validator.js`**: Deterministic schema validation for candidate business relationships verifying table/column presence, confidence range, and evidence.
+- **`business_logic_inference.js` & `business_logic_pipeline.js`**: LLM relationship inference and automated validation pipeline.
+- **`context_builder.js`**: Read-only schema discovery compiler constructing `context_db1.json` and `context_db2.json` directly from PostgreSQL metadata.
+- **`cross_source_inference.js`, `cross_source_evidence.js`, `cross_source_business_logic.js`**: Multi-source relationship candidate generation, cryptographic value-hash evidence collection, and deterministic validation rules.
 
 ---
 
 <p align="center">
+
   <b>CenarioCG Context Layer</b> — Empowering Super Administrators with authoritative, safe, multi-source intelligence.
 </p>
+
