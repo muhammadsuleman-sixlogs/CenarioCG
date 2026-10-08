@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import GraphView from "./components/GraphView";
 import KpiDetailView from "./components/KpiDetailView";
+import StreamingMarkdown from "./components/StreamingMarkdown";
+import AgentFeedbackRow from "./components/AgentFeedbackRow";
+import AdminFeedbackModal from "./components/AdminFeedbackModal";
 import "./App.css";
 
 const API_BASE_URL =
@@ -48,8 +51,8 @@ function getNodeSource(node) {
 function getSourceLabel(sourceId) {
   const source = String(sourceId || "").toLowerCase();
 
-  if (source === "db1") return "DB1";
-  if (source === "db2") return "DB2";
+  if (source === "db1") return "Base DB";
+  if (source === "db2") return "Companion DB";
   if (source === "security_logs") return "Security Logs";
   if (source === "security_logs_api") return "Security Logs";
   if (source === "postgresql") return "PostgreSQL";
@@ -366,6 +369,8 @@ function App() {
   const [selectedEntity, setSelectedEntity] = useState(null);
   const [selectedSource, setSelectedSource] = useState(null);
   const [selectedKpi, setSelectedKpi] = useState(null);
+  const [showAdminFeedback, setShowAdminFeedback] = useState(false);
+  const [feedbackCount, setFeedbackCount] = useState(0);
 
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
@@ -605,10 +610,13 @@ function App() {
     }
 
     setRefreshing(true);
+    setGraphTrace(EMPTY_GRAPH_TRACE);
+    setSourceTrace(EMPTY_SOURCE_TRACE);
+    setSelectedEntity(null);
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/api/graph`,
+        `${API_BASE_URL}/api/graph?t=${Date.now()}`,
         {
           method: "GET",
           credentials: "include",
@@ -651,7 +659,28 @@ function App() {
   };
 
   const handleRefresh = async () => {
+    setGraphTrace(EMPTY_GRAPH_TRACE);
+    setSourceTrace(EMPTY_SOURCE_TRACE);
+    setSelectedEntity(null);
+    setSelectedSource(null);
     await loadGraph();
+    await fetchFeedbackCount();
+  };
+
+  const fetchFeedbackCount = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/feedback`, {
+        headers: {
+          ...getAuthHeaders(),
+        },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setFeedbackCount(data?.stats?.total || 0);
+      }
+    } catch {
+      // Ignore background error
+    }
   };
 
   const handleNewChat = () => {
@@ -713,11 +742,12 @@ function App() {
     }
 
     loadGraph();
+    fetchFeedbackCount();
   }, [authenticated]);
 
-  const handleEntitySelect = (entity) => {
+  const handleEntitySelect = useCallback((entity) => {
     setSelectedEntity(entity);
-  };
+  }, []);
 
   const handleAsk = async () => {
     const trimmedQuestion = question.trim();
@@ -726,17 +756,27 @@ function App() {
       return;
     }
 
+    const userTimestamp = new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
     setMessages((previous) => [
       ...previous,
       {
         role: "user",
         content: trimmedQuestion,
+        timestamp: userTimestamp,
       },
     ]);
 
     setQuestion("");
     setLoading(true);
     setSelectedSource(null);
+
+    // Clear previous highlights immediately so graph returns to original full/default state while processing
+    setGraphTrace(EMPTY_GRAPH_TRACE);
+    setSourceTrace(EMPTY_SOURCE_TRACE);
 
     try {
       const response = await fetch(
@@ -799,15 +839,24 @@ function App() {
           : [],
       };
 
+      const assistantTimestamp = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
       setMessages((previous) => [
         ...previous,
         {
+          id: `msg-${Date.now()}`,
           role: "assistant",
           content:
             data?.answer ||
             "I could not generate an answer.",
           sources: answerSourceTrace,
           response_data: responseWithTrace,
+          isStreaming: true,
+          precedingQuestion: trimmedQuestion,
+          timestamp: assistantTimestamp,
         },
       ]);
 
@@ -833,15 +882,24 @@ function App() {
         error
       );
 
+      const assistantTimestamp = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
       setMessages((previous) => [
         ...previous,
         {
+          id: `msg-${Date.now()}`,
           role: "assistant",
           content:
             error?.message ||
             "Sorry, I could not process your question right now.",
           sources: EMPTY_SOURCE_TRACE,
           response_data: null,
+          isStreaming: false,
+          precedingQuestion: trimmedQuestion,
+          timestamp: assistantTimestamp,
         },
       ]);
     } finally {
@@ -915,23 +973,6 @@ function App() {
 
         <nav className="sidebar-nav">
           <button
-            className="sidebar-button active"
-            type="button"
-            title="Context Graph"
-            onClick={() => {
-              window.scrollTo({
-                top: 0,
-                behavior: "smooth",
-              });
-            }}
-          >
-            <span>◈</span>
-            <span className="sidebar-button-text">
-              Context Graph
-            </span>
-          </button>
-
-          <button
             className="sidebar-button new-chat-button"
             type="button"
             title="New Chat"
@@ -964,6 +1005,19 @@ function App() {
           </div>
 
           <div className="header-right">
+            <button
+              type="button"
+              className="header-feedback-btn"
+              onClick={() => setShowAdminFeedback(true)}
+              title="Inspect Agent Feedback & Optimization Log"
+            >
+              <span className="feedback-btn-sparkle">💬</span>
+              <span>Feedback</span>
+              {feedbackCount > 0 && (
+                <span className="header-feedback-badge">{feedbackCount}</span>
+              )}
+            </button>
+
             <div className="system-status">
               <span className="system-dot" />
               Context Layer Active
@@ -1104,30 +1158,12 @@ function App() {
             />
           )}
 
-          <section className="source-overview">
-            <div className="source-overview-header">
-              <div>
-                <div className="source-overview-title">
-                  Connected Data Sources
-                </div>
-
-                <div className="source-overview-subtitle">
-                  Dynamically discovered Context
-                  Layer sources
-                </div>
-              </div>
-
-              <div className="source-overview-live">
-                <span />
-                LIVE
-              </div>
-            </div>
-
-            <div className="source-list">
+          <section className="source-overview unified-source-bar">
+            <div className="source-cards-inline">
               {sourceSummary.length > 0 ? (
                 sourceSummary.map((source) => (
                   <div
-                    className="source-card"
+                    className="source-card compact"
                     key={source.sourceId}
                   >
                     <div className="source-card-icon">
@@ -1155,28 +1191,35 @@ function App() {
                 </div>
               )}
             </div>
-          </section>
 
-          {activeAnswerSources.length > 0 && (
-            <section className="answer-source-bar">
-              <span className="answer-source-label">
+            <div className="query-sources-inline-group">
+              <div className="query-sources-divider" />
+              <span className="query-sources-label">
                 CURRENT QUERY SOURCES
               </span>
-
-              <div className="answer-source-list">
-                {activeAnswerSources.map(
-                  (source) => (
+              <div className="query-sources-list">
+                {activeAnswerSources.length > 0 ? (
+                  activeAnswerSources.map((source) => (
                     <span
-                      className="answer-source-pill"
+                      className="query-source-pill"
                       key={source}
                     >
                       {getSourceLabel(source)}
                     </span>
-                  )
+                  ))
+                ) : (
+                  <span className="query-source-pill idle">
+                    Ready
+                  </span>
                 )}
               </div>
-            </section>
-          )}
+            </div>
+
+            <div className="source-overview-live">
+              <span />
+              LIVE
+            </div>
+          </section>
 
           <section className="workspace">
             <div className="panel graph-panel">
@@ -1215,6 +1258,7 @@ function App() {
                   graphData={graphData}
                   graphTrace={graphTrace}
                   sourceTrace={sourceTrace}
+                  selectedEntity={selectedEntity}
                   onEntitySelect={handleEntitySelect}
                   loading={loading}
                 />
@@ -1354,17 +1398,6 @@ function App() {
                 <button
                   type="button"
                   className="chat-action-button"
-                  onClick={handleNewChat}
-                  disabled={loading}
-                  title="Start a new chat"
-                >
-                  <span>＋</span>
-                  New Chat
-                </button>
-
-                <button
-                  type="button"
-                  className="chat-action-button"
                   onClick={handleRefresh}
                   disabled={loading || refreshing}
                   title="Refresh context graph"
@@ -1399,33 +1432,22 @@ function App() {
                       type="button"
                       onClick={() =>
                         handleSuggestion(
-                          "Which records were created most recently?"
+                          "What is the total number of companies?"
                         )
                       }
                     >
-                      Recent records
+                      Total companies
                     </button>
 
                     <button
                       type="button"
                       onClick={() =>
                         handleSuggestion(
-                          "What is the status of this ticket?"
+                          "What is the total number of tickets?"
                         )
                       }
                     >
-                      Ticket status
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleSuggestion(
-                          "How are the entities connected?"
-                        )
-                      }
-                    >
-                      Entity relationships
+                      Total ticket
                     </button>
                   </div>
                 </div>
@@ -1442,11 +1464,20 @@ function App() {
                         </div>
 
                         <div className="message-content">
-                          {message.role ===
-                          "assistant" ? (
-                            <ReactMarkdown>
-                              {message.content}
-                            </ReactMarkdown>
+                          {message.role === "assistant" ? (
+                            <StreamingMarkdown
+                              content={message.content}
+                              isStreaming={message.isStreaming}
+                              onComplete={() => {
+                                setMessages((previous) =>
+                                  previous.map((msg, i) =>
+                                    i === index
+                                      ? { ...msg, isStreaming: false }
+                                      : msg
+                                  )
+                                );
+                              }}
+                            />
                           ) : (
                             message.content
                           )}
@@ -1557,6 +1588,27 @@ function App() {
                               </div>
                             );
                           })()}
+
+                        {message.role === "assistant" && !message.isStreaming && (
+                          <AgentFeedbackRow
+                            message={message}
+                            precedingQuestion={
+                              message.precedingQuestion ||
+                              (messages[index - 1]?.role === "user"
+                                ? messages[index - 1].content
+                                : "")
+                            }
+                            apiBaseUrl={API_BASE_URL}
+                            getAuthHeaders={getAuthHeaders}
+                            onFeedbackRecorded={fetchFeedbackCount}
+                          />
+                        )}
+
+                        {message.timestamp && !message.isStreaming && (
+                          <div className={`message-time ${message.role}`}>
+                            {message.timestamp}
+                          </div>
+                        )}
                       </div>
                     )
                   )}
@@ -1865,6 +1917,14 @@ function App() {
             </div>
           </div>
         )}
+
+        <AdminFeedbackModal
+          isOpen={showAdminFeedback}
+          onClose={() => setShowAdminFeedback(false)}
+          apiBaseUrl={API_BASE_URL}
+          getAuthHeaders={getAuthHeaders}
+          onFeedbackChanged={(count) => setFeedbackCount(count)}
+        />
       </main>
     </div>
   );

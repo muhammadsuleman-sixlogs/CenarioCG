@@ -7,6 +7,14 @@ function getSourceBadgeClass(sourceId) {
   return "badge-default";
 }
 
+function formatSourceLabel(sourceId) {
+  const s = String(sourceId || "").toLowerCase();
+  if (s.includes("db1")) return "Base DB";
+  if (s.includes("db2")) return "Companion DB";
+  if (s.includes("security")) return "Security Logs";
+  return sourceId || "Base DB";
+}
+
 function cleanNodeName(id) {
   if (!id) return "";
   const str = String(id);
@@ -362,7 +370,7 @@ export default function KpiDetailView({
                         </td>
                         <td>
                           <span className={`kpi-source-badge ${getSourceBadgeClass(source)}`}>
-                            {source.toUpperCase() || "DB1"}
+                            {formatSourceLabel(source)}
                           </span>
                         </td>
                         <td>
@@ -470,14 +478,14 @@ export default function KpiDetailView({
                         </td>
                         <td className="kpi-cell-primary">
                           <span className={`kpi-source-badge ${getSourceBadgeClass(sourceDb)}`}>
-                            {sourceDb.toUpperCase()}
+                            {formatSourceLabel(sourceDb)}
                           </span>
                           <span className="kpi-entity-name">{sourceTable}</span>
                         </td>
                         <td className="kpi-cell-arrow">➔</td>
                         <td className="kpi-cell-primary">
                           <span className={`kpi-source-badge ${getSourceBadgeClass(sourceDb)}`}>
-                            {sourceDb.toUpperCase()}
+                            {formatSourceLabel(sourceDb)}
                           </span>
                           <span className="kpi-entity-name">{targetTable}</span>
                         </td>
@@ -505,7 +513,7 @@ export default function KpiDetailView({
                             <div className="kpi-attributes-wrapper">
                               <div className="kpi-attr-header">
                                 <span className="kpi-attr-title">Foreign-Key Connection Specification</span>
-                                <span className="kpi-dim-text">Source: {sourceDb.toUpperCase()}</span>
+                                <span className="kpi-dim-text">Source: {formatSourceLabel(sourceDb)}</span>
                               </div>
 
                               <div className="kpi-rel-detail-grid">
@@ -582,14 +590,14 @@ export default function KpiDetailView({
                         </td>
                         <td className="kpi-cell-primary">
                           <span className={`kpi-source-badge ${getSourceBadgeClass(sourceDb)}`}>
-                            {sourceDb.toUpperCase()}
+                            {formatSourceLabel(sourceDb)}
                           </span>
                           <span className="kpi-entity-name">{sourceTable}</span>
                         </td>
                         <td className="kpi-cell-arrow">➔</td>
                         <td className="kpi-cell-primary">
                           <span className={`kpi-source-badge ${getSourceBadgeClass(sourceDb)}`}>
-                            {sourceDb.toUpperCase()}
+                            {formatSourceLabel(sourceDb)}
                           </span>
                           <span className="kpi-entity-name">{targetTable}</span>
                         </td>
@@ -610,7 +618,7 @@ export default function KpiDetailView({
                             <div className="kpi-attributes-wrapper">
                               <div className="kpi-attr-header">
                                 <span className="kpi-attr-title">Validated Business Semantics</span>
-                                <span className="kpi-dim-text">Source: {sourceDb.toUpperCase()}</span>
+                                <span className="kpi-dim-text">Source: {formatSourceLabel(sourceDb)}</span>
                               </div>
 
                               <div className="kpi-rel-detail-grid">
@@ -699,14 +707,14 @@ export default function KpiDetailView({
                         </td>
                         <td className="kpi-cell-primary">
                           <span className={`kpi-source-badge ${getSourceBadgeClass(sourceDb)}`}>
-                            {sourceDb.toUpperCase()}
+                            {formatSourceLabel(sourceDb)}
                           </span>
                           <span className="kpi-entity-name">{cleanNodeName(sourceNode)}</span>
                         </td>
                         <td className="kpi-cell-arrow">➔</td>
                         <td className="kpi-cell-primary">
                           <span className={`kpi-source-badge ${getSourceBadgeClass(targetDb)}`}>
-                            {targetDb.toUpperCase()}
+                            {formatSourceLabel(targetDb)}
                           </span>
                           <span className="kpi-entity-name">{cleanNodeName(targetNode)}</span>
                         </td>

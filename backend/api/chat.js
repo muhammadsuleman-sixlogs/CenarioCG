@@ -365,8 +365,10 @@ router.post("/chat", async (req, res) => {
 
 router.get("/graph", (req, res) => {
   try {
-    const graphData = graphToDict(contextGraph);
-    const graphSummary = getGraphSummary(contextGraph);
+    const freshContexts = Object.values(loadAllContexts());
+    const freshContextGraph = buildMultiSourceContextGraph(freshContexts);
+    const graphData = graphToDict(freshContextGraph);
+    const graphSummary = getGraphSummary(freshContextGraph);
 
     return res.json({
       graph: graphData,

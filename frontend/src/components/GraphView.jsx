@@ -27,8 +27,8 @@ function getNodeSource(node) {
 function getSourceLabel(sourceId) {
   const source = String(sourceId || "").toLowerCase();
 
-  if (source === "db1") return "DB1";
-  if (source === "db2") return "DB2";
+  if (source === "db1") return "Base DB";
+  if (source === "db2") return "Companion DB";
   if (source === "security_logs") return "Security Logs";
   if (source === "postgresql") return "PostgreSQL";
 
@@ -36,7 +36,7 @@ function getSourceLabel(sourceId) {
 }
 
 const TRACE_CLASSES =
-  "trace-node trace-edge trace-active trace-edge-active thinking-node thinking-edge";
+  "trace-node trace-edge trace-active trace-edge-active thinking-node thinking-edge entity-selected entity-selected-edge";
 
 /* ------------------------------------------------------------------ */
 /* Cenario theme                                                       */
@@ -247,6 +247,35 @@ const STYLESHEET = [
       "z-index": 30,
     },
   },
+
+  /* Selected entity via KPI click or graph tap */
+  {
+    selector: ".entity-selected",
+    style: {
+      "border-color": "#38bdf8",
+      "border-width": 4,
+      width: 68,
+      height: 68,
+      "shadow-blur": 24,
+      "shadow-color": "#0ea5e9",
+      "shadow-opacity": 1,
+      opacity: 1,
+      "z-index": 210,
+    },
+  },
+  {
+    selector: ".entity-selected-edge",
+    style: {
+      width: 3.5,
+      "line-color": "#38bdf8",
+      "target-arrow-color": "#38bdf8",
+      opacity: 1,
+      "shadow-blur": 12,
+      "shadow-color": "#0ea5e9",
+      "shadow-opacity": 0.8,
+      "z-index": 160,
+    },
+  },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -257,6 +286,7 @@ function GraphView({
   graphData,
   graphTrace,
   sourceTrace,
+  selectedEntity,
   loading,
   onEntitySelect,
 }) {
@@ -408,7 +438,7 @@ function GraphView({
   };
 
   /* ---------------------------------------------------------------- */
-  /* Cytoscape ready                                                   */
+  /* Cytoscape ready (stable attachment once only)                    */
   /* ---------------------------------------------------------------- */
   const handleCyReady = (cy) => {
     if (cyRef.current === cy) {
@@ -416,8 +446,6 @@ function GraphView({
     }
 
     cyRef.current = cy;
-
-    runLayout();
 
     cy.on("tap", "node", (event) => {
       const node = event.target;
@@ -507,8 +535,9 @@ function GraphView({
     clearTimers();
     resetVisualState(cy);
 
-    cy.nodes().style({ opacity: 0.1 });
-    cy.edges().style({ opacity: 0.035, label: "" });
+    // Keep the complete graph visible! Dim non-relevant nodes slightly so trace glows
+    cy.nodes().style({ opacity: 0.35 });
+    cy.edges().style({ opacity: 0.15, label: "" });
 
     const traceNodes = [];
 
@@ -579,38 +608,104 @@ function GraphView({
   /* Effects                                                           */
   /* ---------------------------------------------------------------- */
 
-  /* Re-layout whenever the graph elements change. Declared BEFORE the
-     trace effect so the trace zoom runs on the fresh layout. */
+  const graphFingerprintRef = useRef("");
+
+  /* Re-layout ONLY when actual graph dataset changes (initial load or new schema) */
   useEffect(() => {
-    if (cyRef.current && elements.length > 0) {
+    const cy = cyRef.current;
+    if (!cy || cy.destroyed()) {
+      return;
+    }
+
+    const nodes = graphData?.nodes || [];
+    const edges = graphData?.edges || [];
+    if (nodes.length === 0) {
+      return;
+    }
+
+    const currentFingerprint = `${nodes.length}-${edges.length}-${nodes[0]?.id}`;
+
+    // Only load elements into Cytoscape and compute layout if not loaded yet or data changed!
+    if (graphFingerprintRef.current !== currentFingerprint) {
+      graphFingerprintRef.current = currentFingerprint;
+
+      clearTimers();
+
+      cy.batch(() => {
+        cy.elements().remove();
+        if (elements.length > 0) {
+          cy.add(elements);
+        }
+      });
+
+      resetVisualState(cy);
       runLayout();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [elements]);
+  }, [graphData, elements]);
 
-  /* Question started */
+  /* Handle entity selection from KPI table, graph tap, or external selection */
   useEffect(() => {
-    if (loading) {
-      startThinkingAnimation();
+    const cy = cyRef.current;
+    if (!cy || cy.destroyed()) return;
+
+    cy.elements().removeClass("entity-selected entity-selected-edge");
+
+    if (!selectedEntity) {
+      return;
     }
 
+    const targetId = String(selectedEntity.id || "");
+    const matchingNode = cy.getElementById(targetId);
+
+    if (matchingNode.length > 0) {
+      matchingNode.addClass("entity-selected");
+      matchingNode.connectedEdges().addClass("entity-selected-edge");
+
+      // Smoothly pan/center onto the node without changing layout or recreating anything
+      cy.animate(
+        {
+          center: { eles: matchingNode },
+        },
+        { duration: 400 }
+      );
+    }
+  }, [selectedEntity]);
+
+  /* Question started: clear previous highlights immediately, keep graph stable */
+  useEffect(() => {
+    if (loading) {
+      const cy = cyRef.current;
+      if (cy && !cy.destroyed()) {
+        clearTimers();
+        resetVisualState(cy);
+      }
+    }
     return () => {
       clearTimers();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
-  /* Answer arrived */
+  /* Final trace applied when LLM answer arrives, or cleared when trace is empty */
   useEffect(() => {
+    const cy = cyRef.current;
+    if (!cy || cy.destroyed()) {
+      return;
+    }
+
+    // Only apply highlights when NOT loading and an actual answer trace exists
     if (
       !loading &&
       graphTrace &&
       (traceNodeIds.size > 0 || traceEdgeIds.size > 0)
     ) {
       showFinalTrace();
+    } else if (!loading) {
+      // Clear previous answer's highlights and return to original full/default state
+      clearTimers();
+      resetVisualState(cy);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, graphTrace, sourceTrace, traceNodeIds, traceEdgeIds, elements]);
+  }, [loading, graphTrace, traceNodeIds, traceEdgeIds]);
 
   /* Unmount cleanup */
   useEffect(() => {
@@ -647,6 +742,7 @@ function GraphView({
       }}
     >
       <CytoscapeComponent
+        key="cenario-context-graph-canvas"
         elements={elements}
         stylesheet={STYLESHEET}
         cy={handleCyReady}
@@ -727,12 +823,12 @@ function GraphView({
       <div className="graph-source-legend">
         <span>
           <i className="source-dot db1" />
-          DB1
+          Base DB
         </span>
 
         <span>
           <i className="source-dot db2" />
-          DB2
+          Companion DB
         </span>
 
         <span>
@@ -814,4 +910,4 @@ function GraphView({
   );
 }
 
-export default GraphView;
+export default React.memo(GraphView);

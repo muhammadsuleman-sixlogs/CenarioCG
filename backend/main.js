@@ -3,6 +3,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { settings } from "./config/settings.js";
 import chatRouter from "./api/chat.js";
+import feedbackRouter from "./api/feedback.js";
 import {
   authenticateRequest,
   loginUser,
@@ -100,6 +101,7 @@ app.post("/api/auth/logout", (req, res) => {
 
 // 6. Chat and Graph Routes
 app.use("/api", chatRouter);
+app.use("/api/feedback", feedbackRouter);
 
 // 7. Base and Health Routes
 app.get("/", (req, res) => {
