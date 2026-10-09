@@ -549,7 +549,7 @@ function App() {
       if (!response.ok) {
         throw new Error(
           data.detail ||
-            "Invalid username or password."
+          "Invalid username or password."
         );
       }
 
@@ -575,7 +575,7 @@ function App() {
 
       setLoginError(
         error?.message ||
-          "Unable to sign in right now."
+        "Unable to sign in right now."
       );
     } finally {
       setLoginLoading(false);
@@ -646,7 +646,7 @@ function App() {
 
       setGraphSummary(
         data?.graph_summary ||
-          EMPTY_GRAPH_SUMMARY
+        EMPTY_GRAPH_SUMMARY
       );
     } catch (error) {
       console.error(
@@ -809,7 +809,7 @@ function App() {
       if (!response.ok) {
         throw new Error(
           data?.detail ||
-            "Unable to process the question."
+          "Unable to process the question."
         );
       }
 
@@ -866,7 +866,7 @@ function App() {
 
       setGraphTrace(
         data?.graph_trace ||
-          EMPTY_GRAPH_TRACE
+        EMPTY_GRAPH_TRACE
       );
 
       setSourceTrace(answerSourceTrace);
@@ -1095,7 +1095,7 @@ function App() {
               title="Click to inspect all discovered business-semantic relationships"
             >
               <div className="stat-icon">
-                ✦
+                C
               </div>
 
               <div>
@@ -1397,7 +1397,7 @@ function App() {
               {messages.length === 0 ? (
                 <div className="chat-empty">
                   <div className="chat-icon">
-                    ✦
+                    C
                   </div>
 
                   <h3>Ask Cenario</h3>
@@ -1479,9 +1479,9 @@ function App() {
 
                             if (
                               dataSources.length ===
-                                0 &&
+                              0 &&
                               externalSources.length ===
-                                0
+                              0
                             ) {
                               return null;
                             }
@@ -1709,101 +1709,101 @@ function App() {
 
                     {selectedSource.details
                       .source_type && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          SOURCE TYPE
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            SOURCE TYPE
+                          </div>
 
-                        <div className="source-detail-value">
-                          {
-                            selectedSource.details
-                              .source_type
-                          }
+                          <div className="source-detail-value">
+                            {
+                              selectedSource.details
+                                .source_type
+                            }
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
                     {selectedSource.details
                       .source_id && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          SOURCE ID
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            SOURCE ID
+                          </div>
 
-                        <div className="source-detail-value">
-                          {
-                            selectedSource.details
-                              .source_id
-                          }
+                          <div className="source-detail-value">
+                            {
+                              selectedSource.details
+                                .source_id
+                            }
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
                     {selectedSource.details
                       .tables?.length > 0 && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          TABLES
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            TABLES
+                          </div>
 
-                        <div className="source-tag-list">
-                          {selectedSource.details.tables.map(
-                            (table) => (
-                              <span
-                                className="source-tag"
-                                key={String(table)}
-                              >
-                                {String(table)}
-                              </span>
-                            )
-                          )}
+                          <div className="source-tag-list">
+                            {selectedSource.details.tables.map(
+                              (table) => (
+                                <span
+                                  className="source-tag"
+                                  key={String(table)}
+                                >
+                                  {String(table)}
+                                </span>
+                              )
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
                     {selectedSource.details
                       .entities?.length > 0 && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          ENTITIES
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            ENTITIES
+                          </div>
 
-                        <div className="source-tag-list">
-                          {selectedSource.details.entities.map(
-                            (entity) => (
-                              <span
-                                className="source-tag"
-                                key={String(entity)}
-                              >
-                                {String(entity)}
-                              </span>
-                            )
-                          )}
+                          <div className="source-tag-list">
+                            {selectedSource.details.entities.map(
+                              (entity) => (
+                                <span
+                                  className="source-tag"
+                                  key={String(entity)}
+                                >
+                                  {String(entity)}
+                                </span>
+                              )
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
                     {selectedSource.details
                       .columns?.length > 0 && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          COLUMNS USED
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            COLUMNS USED
+                          </div>
 
-                        <div className="source-column-list">
-                          {selectedSource.details.columns.map(
-                            (column) => (
-                              <span
-                                className="source-column"
-                                key={String(column)}
-                              >
-                                {String(column)}
-                              </span>
-                            )
-                          )}
+                          <div className="source-column-list">
+                            {selectedSource.details.columns.map(
+                              (column) => (
+                                <span
+                                  className="source-column"
+                                  key={String(column)}
+                                >
+                                  {String(column)}
+                                </span>
+                              )
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
                     {selectedSource.details.query && (
                       <div className="source-detail-section">
@@ -1823,69 +1823,69 @@ function App() {
                     {typeof selectedSource.details
                       .row_count ===
                       "number" && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          ROWS RETRIEVED
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            ROWS RETRIEVED
+                          </div>
 
-                        <div className="source-detail-value">
-                          {
-                            selectedSource.details
-                              .row_count
-                          }
+                          <div className="source-detail-value">
+                            {
+                              selectedSource.details
+                                .row_count
+                            }
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
                     {selectedSource.details
                       .resource && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          RESOURCE
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            RESOURCE
+                          </div>
 
-                        <div className="source-detail-value">
-                          {
-                            selectedSource.details
-                              .resource
-                          }
+                          <div className="source-detail-value">
+                            {
+                              selectedSource.details
+                                .resource
+                            }
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
                     {typeof selectedSource.details
                       .event_count ===
                       "number" && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          EVENTS RETRIEVED
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            EVENTS RETRIEVED
+                          </div>
 
-                        <div className="source-detail-value">
-                          {
-                            selectedSource.details
-                              .event_count
-                          }
+                          <div className="source-detail-value">
+                            {
+                              selectedSource.details
+                                .event_count
+                            }
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
                     {selectedSource.details
                       .truncated !==
                       undefined && (
-                      <div className="source-detail-section">
-                        <div className="section-label">
-                          RESULT STATUS
-                        </div>
+                        <div className="source-detail-section">
+                          <div className="section-label">
+                            RESULT STATUS
+                          </div>
 
-                        <div className="source-detail-value">
-                          {selectedSource.details
-                            .truncated
-                            ? "Results truncated"
-                            : "Complete result set"}
+                          <div className="source-detail-value">
+                            {selectedSource.details
+                              .truncated
+                              ? "Results truncated"
+                              : "Complete result set"}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
                   </>
                 ) : (
                   <div className="source-empty-state">
