@@ -30,6 +30,19 @@ function tokenWords(value) {
     .map(token => token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token);
 }
 
+// Status labels are business metadata, but users routinely omit spaces,
+// punctuation, or use a small grammatical variant ("inprogress",
+// "in-progress", "in progress").  Compare only normalized forms; the value
+// still comes from the approved semantic mapping or bounded runtime
+// verification, never from this helper.
+function normalizedSemanticPhrase(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .replace(/ies$/g, "y")
+    .replace(/s$/g, "");
+}
+
 /**
  * Single semantic planner for the Context Layer.
  *
@@ -682,9 +695,13 @@ export class QuestionPlanner {
     if (!column || !candidate.columns.includes(column)) return null;
     const mappings = semantics.mappings && typeof semantics.mappings === "object" ? semantics.mappings : {};
     const queryTokens = new Set((String(question).toLowerCase().match(/[a-z0-9_]+/g) || []).map(token => token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token));
+    const normalizedQuestion = normalizedSemanticPhrase(question);
     for (const [label, value] of Object.entries(mappings)) {
       const labelTokens = String(label).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-      if (labelTokens.length > 0 && labelTokens.every(token => queryTokens.has(token))) {
+      const normalizedLabel = normalizedSemanticPhrase(label);
+      const tokenMatch = labelTokens.length > 0 && labelTokens.every(token => queryTokens.has(token));
+      const compactMatch = normalizedLabel.length > 0 && normalizedQuestion.includes(normalizedLabel);
+      if (tokenMatch || compactMatch) {
         return { table: candidate.table, field: column, operator: "case_insensitive_equals", value };
       }
     }
@@ -727,7 +744,7 @@ export class QuestionPlanner {
     // predicate or a small, domain-neutral lifecycle vocabulary is treated as
     // an unverified status request.
     if (/\b(?:status|state|workflow|lifecycle)\s*(?:is|are|=|:)?\s*[a-z0-9_]+\b/i.test(text)) return true;
-    return /\b(?:pending|open|closed|resolved|unresolved|active|inactive|completed|cancelled|canceled|on[-\s]?hold|in[-\s]?progress)\b/i.test(text);
+    return /\b(?:pending|open|closed|resolved|unresolved|active|inactive|completed|cancelled|canceled|on[-\s]?hold|in[-\s]?progress|inprogress)\b/i.test(text);
   }
 
   repair_plan(question, invalidPlan, validationErrors = null, conversationContext = null) {
@@ -1875,6 +1892,11 @@ The final execution plan step objects must use:
       completed.needs_conversation_context ?? false
     );
 
+    // A stable, provider-independent intent contract for downstream stages.
+    // Keep the legacy top-level fields for compatibility, but give validators,
+    // tracing, and tests one canonical representation of what was understood.
+    completed.intent = this._build_intent_contract(completed, question, conversationContext);
+
     let confidence = completed.confidence;
     try {
       confidence = Number(confidence);
@@ -1901,6 +1923,28 @@ The final execution plan step objects must use:
     }
 
     return completed;
+  }
+
+  _build_intent_contract(plan, question, conversationContext = null) {
+    const active = this._conversation_reference(conversationContext);
+    const filters = Array.isArray(plan.filters) ? deepcopy(plan.filters) : [];
+    const explicitEntities = Array.isArray(plan.entities) ? deepcopy(plan.entities) : [];
+    return {
+      version: 1,
+      question: String(question || ""),
+      entities: explicitEntities,
+      entity_target: plan.entity_target ? deepcopy(plan.entity_target) : null,
+      operations: Array.isArray(plan.operations) ? [...plan.operations] : [],
+      mandatory_filters: filters.filter(filter => filter && filter.mandatory !== false),
+      time_constraints: filters.filter(filter => filter && /(?:created|updated|date|time|at|before|after|since|until)/i.test(String(filter.field || filter.column || ""))),
+      sorting: Array.isArray(plan.sorting) ? deepcopy(plan.sorting) : [],
+      limit: plan.limit ?? null,
+      required_relationships: Array.isArray(plan.relationships) ? deepcopy(plan.relationships) : [],
+      requested_fields: Array.isArray(plan.required_columns) ? [...plan.required_columns] : [],
+      conversation_reference: plan.needs_conversation_context ? (active ? deepcopy(active) : null) : null,
+      unresolved_ambiguities: Array.isArray(plan.ambiguous_context_candidates) ? deepcopy(plan.ambiguous_context_candidates) : [],
+      source_ids: Array.isArray(plan.postgresql_sources) ? [...plan.postgresql_sources] : []
+    };
   }
 
   _ensure_verified_status_filter(plan, question) {
@@ -2019,7 +2063,7 @@ The final execution plan step objects must use:
         if (!semantics || semantics.validation_status !== "validated" || !Array.isArray(semantics.provenance) || semantics.provenance.length === 0) return false;
         if (String(semantics.column || "").trim().toLowerCase() !== column.toLowerCase()) return false;
         return Object.values(semantics.mappings || {}).some(value =>
-          String(value).trim().toLowerCase() === String(filter.value ?? "").trim().toLowerCase()
+          normalizedSemanticPhrase(value) === normalizedSemanticPhrase(filter.value)
         );
       });
 

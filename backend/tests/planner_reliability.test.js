@@ -58,3 +58,46 @@ test("metadata fallback produces a safe count plan when the semantic planner is 
   assert.deepStrictEqual(plan.required_tables, ["companies"]);
   assert.deepStrictEqual(plan.operations, ["count"]);
 });
+
+test("approved status mappings resolve compact and punctuated natural-language variants", () => {
+  const planner = new QuestionPlanner({
+    db1: {
+      tables: {
+        projects: {
+          primary_keys: ["id"],
+          columns: [{ name: "id" }, { name: "status" }, { name: "name" }]
+        }
+      },
+      semantic_catalog: {
+        entities: {
+          projects: {
+            entity_type: "project",
+            synonyms: ["project", "projects"],
+            status_semantics: {
+              column: "status",
+              mappings: { "in progress": "in_progress", active: "active" },
+              validation_status: "validated",
+              provenance: ["approved-fixture"]
+            }
+          }
+        }
+      }
+    }
+  });
+  const candidate = { source_id: "db1", table: "projects", columns: ["id", "status", "name"], entity_type: "project", matched_aliases: ["project", "projects"] };
+  const filter = planner._verified_status_filter(candidate, "Show projects whose status is inprogress");
+  assert.deepStrictEqual(filter, { table: "projects", field: "status", operator: "case_insensitive_equals", value: "in_progress" });
+});
+
+test("normalized plans expose one intent contract without changing legacy fields", () => {
+  const planner = new QuestionPlanner({ db1: { tables: { users: { columns: [{ name: "id" }] } } } });
+  const plan = planner._normalize_plan({
+    data_sources: ["postgresql"], postgresql_sources: ["db1"], required_tables: ["users"],
+    required_columns: ["users.id"], filters: [{ table: "users", field: "id", operator: "=", value: "u1" }],
+    relationships: [], operations: ["lookup"], needs_conversation_context: false
+  }, "Show user u1");
+  assert.equal(plan.intent.version, 1);
+  assert.deepStrictEqual(plan.intent.source_ids, ["db1"]);
+  assert.equal(plan.intent.mandatory_filters[0].value, "u1");
+  assert.deepStrictEqual(plan.required_tables, ["users"]);
+});
