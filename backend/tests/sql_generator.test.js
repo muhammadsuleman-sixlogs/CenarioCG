@@ -52,3 +52,76 @@ test("SQLGenerator compiles aggregate COUNT queries", () => {
   const sql = generator.generate(contract, "db1");
   assert.ok(/COUNT\(\*\)\s+AS\s+["']?count["']?/i.test(sql), "Query must include COUNT aggregate");
 });
+
+test("SQLGenerator omits protected projection columns but keeps permitted user fields", () => {
+  const context = loadContext("db1");
+  const generator = new SQLGenerator(context, "db1");
+
+  const sql = generator.generate({
+    question: "List users",
+    required_tables: ["users"],
+    required_columns: ["users.id", "users.email", "users.password_hash"],
+    relationships: [],
+    filters: [],
+    operations: ["lookup"],
+    grouping: [],
+    sorting: [],
+    limit: 10,
+  }, "db1");
+
+  assert.match(sql, /"users"\."id"/i);
+  assert.match(sql, /"users"\."email"/i);
+  assert.doesNotMatch(sql, /password_hash/i);
+});
+
+test("SQLGenerator omits protected DB2 token projections without rejecting permitted fields", () => {
+  const context = loadContext("db2");
+  const generator = new SQLGenerator(context, "db2");
+
+  const sql = generator.generate({
+    question: "List connected calendar accounts",
+    required_tables: ["google_oauth_tokens"],
+    required_columns: [
+      "google_oauth_tokens.id",
+      "google_oauth_tokens.user_email",
+      "google_oauth_tokens.access_token",
+      "google_oauth_tokens.refresh_token",
+    ],
+    relationships: [],
+    filters: [],
+    operations: ["lookup"],
+    grouping: [],
+    sorting: [],
+    limit: 10,
+  }, "db2");
+
+  assert.match(sql, /"google_oauth_tokens"\."id"/i);
+  assert.match(sql, /"google_oauth_tokens"\."user_email"/i);
+  assert.doesNotMatch(sql, /access_token|refresh_token/i);
+});
+
+test("SQLGenerator keeps invoice projections safe when a provider includes share tokens", () => {
+  const context = loadContext("db1");
+  const generator = new SQLGenerator(context, "db1");
+
+  const sql = generator.generate({
+    question: "List invoices",
+    required_tables: ["invoices"],
+    required_columns: [
+      "invoices.id",
+      "invoices.invoice_number",
+      "invoices.public_share_token",
+      "invoices.share_password_hash",
+    ],
+    relationships: [],
+    filters: [],
+    operations: ["lookup"],
+    grouping: [],
+    sorting: [],
+    limit: 10,
+  }, "db1");
+
+  assert.match(sql, /"invoices"\."id"/i);
+  assert.match(sql, /"invoices"\."invoice_number"/i);
+  assert.doesNotMatch(sql, /public_share_token|share_password_hash/i);
+});

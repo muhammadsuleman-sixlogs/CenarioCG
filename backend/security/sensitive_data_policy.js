@@ -26,6 +26,8 @@ export const SENSITIVE_FIELD_PATTERNS = [
   ".*_access[_-]?token$",
   "^refresh[_-]?token$",
   ".*_refresh[_-]?token$",
+  "^token(?:_.*)?$",
+  ".*_token$",
   "^auth[_-]?token$",
   ".*_auth[_-]?token$",
   "^bearer[_-]?token$",

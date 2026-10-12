@@ -39,6 +39,24 @@ test("graphToDict converts MultiDiGraph into exact frontend node and edge struct
   assert.strictEqual(dict.edges[0].type, "database");
 });
 
+test("graphToDict removes protected columns from frontend schema metadata", () => {
+  const g = new MultiDiGraph();
+  g.addNode("db1:users", {
+    table_name: "users",
+    node_type: "table",
+    source_id: "db1",
+    columns: [
+      { name: "id", type: "uuid" },
+      { name: "email", type: "text" },
+      { name: "password_hash", type: "text" },
+    ],
+    primary_keys: ["id"],
+  });
+
+  const node = graphToDict(g).nodes[0];
+  assert.deepStrictEqual(node.columns.map(column => column.name), ["id", "email"]);
+});
+
 test("buildGraphTrace resolves source-qualified nodes and constructs trace edges with exact edgeKeys", () => {
   const g = new MultiDiGraph();
   g.addNode("db1:project_tasks", { table_name: "project_tasks", node_type: "table", source_id: "db1" });

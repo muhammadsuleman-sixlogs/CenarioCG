@@ -10,6 +10,7 @@ import {
   sanitizeOutputText,
   containsSensitiveValue
 } from "../security/output_security_policy.js";
+import { QuestionPlanner } from "../planning/question_planner.js";
 
 test("Sensitive field detection identifies credential column patterns", () => {
   assert.strictEqual(isSensitiveFieldName("password"), true);
@@ -17,10 +18,14 @@ test("Sensitive field detection identifies credential column patterns", () => {
   assert.strictEqual(isSensitiveFieldName("api_key"), true);
   assert.strictEqual(isSensitiveFieldName("client_secret"), true);
   assert.strictEqual(isSensitiveFieldName("auth_token"), true);
+  assert.strictEqual(isSensitiveFieldName("public_share_token"), true);
+  assert.strictEqual(isSensitiveFieldName("token_hash"), true);
+  assert.strictEqual(isSensitiveFieldName("token"), true);
 
   assert.strictEqual(isSensitiveFieldName("username"), false);
   assert.strictEqual(isSensitiveFieldName("email"), false);
   assert.strictEqual(isSensitiveFieldName("project_id"), false);
+  assert.strictEqual(isSensitiveFieldName("prompt_tokens"), false);
 });
 
 test("Sensitive question intent detects queries requesting passwords or secrets", () => {
@@ -63,4 +68,26 @@ test("SanitizeSchemaContext removes sensitive columns from schema context", () =
   const sanitized = sanitizeSchemaContext(schema);
   const userCols = sanitized.tables.users.columns.map(c => c.name);
   assert.deepStrictEqual(userCols, ["id", "email"]);
+});
+
+test("QuestionPlanner does not expose protected columns to the provider context", () => {
+  const planner = new QuestionPlanner({
+    db1: {
+      source_id: "db1",
+      tables: {
+        users: {
+          columns: [
+            { name: "id", data_type: "uuid" },
+            { name: "email", data_type: "text" },
+            { name: "password_hash", data_type: "text" },
+          ],
+          primary_keys: ["id"],
+        },
+      },
+      relationships: [],
+    },
+  });
+
+  const columns = planner._build_context_for_llm().sources.db1.tables.users.columns.map(c => c.name);
+  assert.deepStrictEqual(columns, ["id", "email"]);
 });

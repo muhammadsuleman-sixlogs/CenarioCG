@@ -1331,6 +1331,14 @@ The final execution plan step objects must use:
               continue;
             }
 
+            // The planner must not expose protected schema fields to the AI
+            // provider. The SQL generator remains a second defense for
+            // malformed provider output, but normal planning should never be
+            // prompted with credential-like columns.
+            if (isSensitiveFieldName(columnName)) {
+              continue;
+            }
+
             boundedColumns.push({
               name: String(columnName),
               data_type: column.data_type !== undefined ? column.data_type : column.type,

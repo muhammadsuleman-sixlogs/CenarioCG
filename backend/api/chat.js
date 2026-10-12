@@ -5,6 +5,7 @@ import { buildMultiSourceContextGraph, getGraphSummary } from "../context/contex
 import { ConversationStore } from "../context/conversation_store.js";
 import { resolveAuthorizedWorkspace } from "../auth/authorization.js";
 import { createRequestId, logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
+import { filterSensitiveColumns } from "../security/sensitive_data_policy.js";
 
 const router = express.Router();
 
@@ -51,7 +52,7 @@ export function graphToDict(graph) {
       label: data?.table_name || strNodeId,
       type: data?.node_type || "entity",
       source_id: sourceId,
-      columns: data?.columns || [],
+      columns: filterSensitiveColumns(data?.columns || []),
       primary_keys: data?.primary_keys || []
     });
   }

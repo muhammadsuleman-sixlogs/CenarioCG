@@ -1,7 +1,10 @@
 import { loadContext } from "../context/context_store.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 import { validateSqlSyntax } from "./sql_validator.js";
-import { sanitizeSchemaContext } from "../security/sensitive_data_policy.js";
+import {
+  isSensitiveFieldName,
+  sanitizeSchemaContext,
+} from "../security/sensitive_data_policy.js";
 
 /**
  * Deterministic PostgreSQL SQL compiler.
@@ -842,6 +845,18 @@ export class SQLGenerator {
     const expressions = [];
 
     for (const reference of required_columns) {
+      // Providers may occasionally include a protected column alongside
+      // otherwise valid output fields. Projection is the one safe place to
+      // omit that field: filters, joins, grouping, and metrics must still
+      // fail closed when they reference protected data.
+      const rawReference = typeof reference === "string" ? reference.trim() : "";
+      const requestedColumn = rawReference.includes(".")
+        ? rawReference.split(".").slice(1).join(".").trim()
+        : rawReference;
+      if (isSensitiveFieldName(requestedColumn)) {
+        continue;
+      }
+
       const [table_name, column_name] = this._parse_field_reference(
         reference,
         selected_tables
