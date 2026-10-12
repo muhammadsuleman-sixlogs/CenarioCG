@@ -454,7 +454,7 @@ export default function KpiDetailView({
 
         {/* KPI 2: DATABASE RELATIONSHIPS TABLE */}
         {selectedKpi === "database" && (
-          <table className="kpi-table">
+          <table className="kpi-table kpi-relationship-table">
             <thead>
               <tr>
                 <th style={{ width: "48px" }}></th>
@@ -568,7 +568,7 @@ export default function KpiDetailView({
 
         {/* KPI 3: BUSINESS RELATIONSHIPS TABLE */}
         {selectedKpi === "business" && (
-          <table className="kpi-table">
+          <table className="kpi-table kpi-relationship-table">
             <thead>
               <tr>
                 <th style={{ width: "48px" }}></th>

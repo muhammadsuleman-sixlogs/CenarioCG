@@ -375,6 +375,7 @@ function App() {
   const [chatPosition, setChatPosition] = useState(null);
   const chatPanelRef = useRef(null);
   const chatDragRef = useRef(null);
+  const graphPanelRef = useRef(null);
   const [feedbackCount, setFeedbackCount] = useState(0);
 
   const [question, setQuestion] = useState("");
@@ -812,6 +813,17 @@ function App() {
     setSelectedEntity(entity);
   }, []);
 
+  const handleInspectEntity = useCallback((entity) => {
+    setSelectedEntity(entity);
+
+    requestAnimationFrame(() => {
+      graphPanelRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    });
+  }, []);
+
   const handleAsk = async () => {
     const trimmedQuestion = question.trim();
 
@@ -1208,9 +1220,7 @@ function App() {
               graphData={graphData}
               graphSummary={graphSummary}
               onClose={() => setSelectedKpi(null)}
-              onSelectEntity={(entity) => {
-                setSelectedEntity(entity);
-              }}
+              onSelectEntity={handleInspectEntity}
             />
           )}
 
@@ -1278,7 +1288,7 @@ function App() {
           </section>
 
           <section className="workspace">
-            <div className="panel graph-panel">
+            <div ref={graphPanelRef} className="panel graph-panel">
               <div className="panel-header">
                 <div>
                   <div className="panel-title-row">

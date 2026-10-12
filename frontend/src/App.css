@@ -1057,18 +1057,20 @@ input:focus-visible {
   max-height: 560px;
   overflow-y: auto;
   overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.34) transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--card-2);
 }
 
 .kpi-table-container::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 .kpi-table-container::-webkit-scrollbar-track {
-  background: var(--card-2);
+  background: transparent;
 }
 
 .kpi-table-container::-webkit-scrollbar-thumb {
@@ -3509,7 +3511,7 @@ input:focus-visible {
   cursor: pointer;
   text-align: left;
   font-family: "Inter", system-ui, sans-serif;
-  font-size: 9px;
+  font-size: 10.5px;
 }
 
 .sidebar-logout:hover,
@@ -3551,7 +3553,10 @@ input:focus-visible {
   font-weight: 700;
 }
 
-.page { padding: 16px 22px 32px; }
+.page {
+  /* Keep the first dashboard row clear of the sticky header. */
+  padding: 28px 22px 32px;
+}
 
 .content {
   width: calc(100% - 160px);
@@ -3706,6 +3711,7 @@ input:focus-visible {
   padding: 12px 16px;
   background: #101923;
   border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow: 0 3px 0 #101923, 0 8px 12px rgba(5, 10, 16, 0.32);
 }
 
 .kpi-table .kpi-inspect-btn {
@@ -3719,6 +3725,62 @@ input:focus-visible {
 .kpi-table .kpi-cell-toggle {
   width: 48px;
   padding-right: 8px !important;
+}
+
+/* Relationship tables have seven distinct columns. Keep their content from
+   crossing into the type/confidence columns at normal browser zoom. */
+.kpi-relationship-table th:nth-child(1),
+.kpi-relationship-table td:nth-child(1) { width: 4%; }
+.kpi-relationship-table th:nth-child(2),
+.kpi-relationship-table td:nth-child(2) { width: 22%; }
+.kpi-relationship-table th:nth-child(3),
+.kpi-relationship-table td:nth-child(3) { width: 4%; }
+.kpi-relationship-table th:nth-child(4),
+.kpi-relationship-table td:nth-child(4) { width: 22%; }
+.kpi-relationship-table th:nth-child(5),
+.kpi-relationship-table td:nth-child(5) { width: 26%; }
+.kpi-relationship-table th:nth-child(6),
+.kpi-relationship-table td:nth-child(6) { width: 13%; }
+.kpi-relationship-table th:nth-child(7),
+.kpi-relationship-table td:nth-child(7) { width: 9%; }
+
+.kpi-relationship-table td {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.kpi-relationship-table .kpi-entity-name {
+  display: inline-block;
+  max-width: calc(100% - 62px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.kpi-relationship-table .kpi-fk-badge {
+  min-width: 0;
+}
+
+.kpi-relationship-table .kpi-fk-badge code {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.kpi-relationship-table .kpi-badge-database,
+.kpi-relationship-table .kpi-badge-business,
+.kpi-relationship-table .kpi-badge-cross,
+.kpi-relationship-table .kpi-confidence-pill {
+  white-space: nowrap;
+}
+
+@media (max-width: 1180px) {
+  .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi-detail-panel { padding: 18px; }
+  .kpi-detail-title { font-size: 16px; }
+  .kpi-relationship-table { min-width: 860px; }
 }
 
 @media (max-width: 900px) {

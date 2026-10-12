@@ -715,15 +715,39 @@ function GraphView({
       matchingNode.addClass("entity-selected");
       matchingNode.connectedEdges().addClass("entity-selected-edge");
 
-      // Smoothly pan/center onto the node without changing layout or recreating anything
+      // Focus the selected node and its immediate neighborhood, matching the
+      // answer-trace inspection behavior without rebuilding the graph layout.
+      const focusElements = matchingNode.union(matchingNode.connectedEdges());
       cy.animate(
         {
-          center: { eles: matchingNode },
+          fit: {
+            eles: focusElements,
+            padding: 190,
+          },
         },
-        { duration: 400 }
+        {
+          duration: 650,
+          complete: () => {
+            if (!cy.destroyed()) {
+              const maximumFocusZoom = 1.35;
+              if (cy.zoom() > maximumFocusZoom) {
+                cy.animate(
+                  {
+                    zoom: maximumFocusZoom,
+                    renderedPosition: {
+                      x: cy.width() / 2,
+                      y: cy.height() / 2,
+                    },
+                  },
+                  { duration: 250 }
+                );
+              }
+            }
+          },
+        }
       );
     }
-  }, [selectedEntity]);
+  }, [graphData, selectedEntity]);
 
   /* Question started: clear previous highlights immediately, keep graph stable */
   useEffect(() => {
