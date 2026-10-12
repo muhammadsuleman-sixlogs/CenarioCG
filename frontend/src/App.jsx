@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import GraphView from "./components/GraphView";
 import KpiDetailView from "./components/KpiDetailView";
 import StreamingMarkdown from "./components/StreamingMarkdown";
 import AgentFeedbackRow from "./components/AgentFeedbackRow";
 import AdminFeedbackModal from "./components/AdminFeedbackModal";
+import cenarioLogo from "./assets/cenario-logo.png";
 import "./App.css";
 
 const API_BASE_URL =
@@ -370,10 +370,16 @@ function App() {
   const [selectedSource, setSelectedSource] = useState(null);
   const [selectedKpi, setSelectedKpi] = useState(null);
   const [showAdminFeedback, setShowAdminFeedback] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isChatMinimized, setIsChatMinimized] = useState(false);
+  const [chatPosition, setChatPosition] = useState(null);
+  const chatPanelRef = useRef(null);
+  const chatDragRef = useRef(null);
   const [feedbackCount, setFeedbackCount] = useState(0);
 
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
+  const [conversationId, setConversationId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -433,7 +439,7 @@ function App() {
     return Array.from(sources);
   }, [sourceTrace]);
 
-  const getAuthHeaders = (overrideToken) => {
+  const getAuthHeaders = useCallback((overrideToken) => {
     const token =
       overrideToken ||
       localStorage.getItem("cenariocg_token") ||
@@ -446,9 +452,9 @@ function App() {
     return {
       Authorization: `Bearer ${token}`,
     };
-  };
+  }, []);
 
-  const clearApplicationState = () => {
+  const clearApplicationState = useCallback(() => {
     localStorage.removeItem("cenariocg_token");
     setAuthenticated(false);
 
@@ -462,6 +468,7 @@ function App() {
 
     setQuestion("");
     setMessages([]);
+    setConversationId(null);
     setLoading(false);
     setRefreshing(false);
 
@@ -469,10 +476,11 @@ function App() {
     setGraphTrace(EMPTY_GRAPH_TRACE);
     setSourceTrace(EMPTY_SOURCE_TRACE);
     setGraphSummary(EMPTY_GRAPH_SUMMARY);
-  };
+  }, []);
 
   const clearChatState = () => {
     setMessages([]);
+    setConversationId(null);
     setQuestion("");
     setLoading(false);
     setSelectedSource(null);
@@ -604,11 +612,7 @@ function App() {
     }
   };
 
-  const loadGraph = async () => {
-    if (refreshing) {
-      return;
-    }
-
+  const loadGraph = useCallback(async () => {
     setRefreshing(true);
     setGraphTrace(EMPTY_GRAPH_TRACE);
     setSourceTrace(EMPTY_SOURCE_TRACE);
@@ -656,7 +660,7 @@ function App() {
     } finally {
       setRefreshing(false);
     }
-  };
+  }, [clearApplicationState, getAuthHeaders]);
 
   const handleRefresh = async () => {
     setGraphTrace(EMPTY_GRAPH_TRACE);
@@ -667,7 +671,7 @@ function App() {
     await fetchFeedbackCount();
   };
 
-  const fetchFeedbackCount = async () => {
+  const fetchFeedbackCount = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/feedback`, {
         headers: {
@@ -681,12 +685,65 @@ function App() {
     } catch {
       // Ignore background error
     }
-  };
+  }, [getAuthHeaders]);
 
   const handleNewChat = () => {
     clearChatState();
 
     setSelectedEntity(null);
+    setChatPosition(null);
+    setIsChatOpen(true);
+    setIsChatMinimized(false);
+  };
+
+  const handleChatPointerDown = (event) => {
+    if (event.target.closest("button")) return;
+
+    const panel = chatPanelRef.current;
+    if (!panel) return;
+
+    const bounds = panel.getBoundingClientRect();
+    chatDragRef.current = {
+      offsetX: event.clientX - bounds.left,
+      offsetY: event.clientY - bounds.top,
+    };
+
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.currentTarget.classList.add("is-dragging");
+  };
+
+  const handleChatPointerMove = (event) => {
+    if (!chatDragRef.current) return;
+
+    const panel = chatPanelRef.current;
+    if (!panel) return;
+
+    const width = panel.offsetWidth;
+    const height = panel.offsetHeight;
+    const maxLeft = Math.max(8, window.innerWidth - width - 8);
+    const maxTop = Math.max(8, window.innerHeight - height - 8);
+
+    setChatPosition({
+      left: Math.min(Math.max(8, event.clientX - chatDragRef.current.offsetX), maxLeft),
+      top: Math.min(Math.max(8, event.clientY - chatDragRef.current.offsetY), maxTop),
+    });
+  };
+
+  const handleChatPointerUp = (event) => {
+    chatDragRef.current = null;
+    event.currentTarget.classList.remove("is-dragging");
+  };
+
+  const handleChatMinimize = () => {
+    setChatPosition(null);
+    setIsChatMinimized((value) => !value);
+  };
+
+  const handleChatClose = () => {
+    chatDragRef.current = null;
+    setChatPosition(null);
+    setIsChatMinimized(false);
+    setIsChatOpen(false);
   };
 
   useEffect(() => {
@@ -734,7 +791,7 @@ function App() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     if (!authenticated) {
@@ -743,7 +800,13 @@ function App() {
 
     loadGraph();
     fetchFeedbackCount();
-  }, [authenticated]);
+  }, [authenticated, fetchFeedbackCount, loadGraph]);
+
+  useEffect(() => {
+    if (isChatOpen) {
+      window.getSelection?.()?.removeAllRanges();
+    }
+  }, [isChatOpen]);
 
   const handleEntitySelect = useCallback((entity) => {
     setSelectedEntity(entity);
@@ -790,6 +853,7 @@ function App() {
           },
           body: JSON.stringify({
             question: trimmedQuestion,
+            ...(conversationId ? { conversation_id: conversationId } : {}),
           }),
         }
       );
@@ -838,6 +902,10 @@ function App() {
           ? data.sources
           : [],
       };
+
+      if (typeof data?.conversation_id === "string") {
+        setConversationId(data.conversation_id);
+      }
 
       const assistantTimestamp = new Date().toLocaleTimeString([], {
         hour: "2-digit",
@@ -967,8 +1035,9 @@ function App() {
   return (
     <div className="app">
       <aside className="sidebar">
-        <div className="sidebar-logo">
-          <span>C</span>
+        <div className="sidebar-brand">
+          <img src={cenarioLogo} alt="Cenario" className="cenario-logo" />
+          <span>AI DATA INTELLIGENCE</span>
         </div>
 
         <nav className="sidebar-nav">
@@ -978,7 +1047,7 @@ function App() {
             title="New Chat"
             onClick={handleNewChat}
           >
-            <span>＋</span>
+            <span className="sidebar-plus-icon" aria-hidden="true">+</span>
             <span className="sidebar-button-text">
               New Chat
             </span>
@@ -986,23 +1055,16 @@ function App() {
         </nav>
 
         <div className="sidebar-bottom">
-          <div className="status-dot" />
-
-          <span className="sidebar-status-text">
-            Connected
-          </span>
+          <button type="button" className="sidebar-logout" onClick={handleLogout}>
+            <span aria-hidden="true">↪</span>
+            Logout
+          </button>
         </div>
       </aside>
 
       <main className="content">
         <header className="header">
-          <div>
-            <div className="header-eyebrow">
-              AI DATA INTELLIGENCE
-            </div>
-
-            <h1>CENARIO</h1>
-          </div>
+          <div className="header-spacer" aria-hidden="true" />
 
           <div className="header-right">
             <button
@@ -1023,15 +1085,13 @@ function App() {
               Context Layer Active
             </div>
 
-            <button
-              type="button"
-              className="header-avatar header-logout-button"
-              onClick={handleLogout}
-              title="Logout"
-              aria-label="Logout"
-            >
-              Logout
-            </button>
+            <div className="header-profile" aria-label="Signed in as Super Admin">
+              <span className="header-avatar">S</span>
+              <span className="header-profile-copy">
+                <strong>Super Admin</strong>
+                <small>Administrator</small>
+              </span>
+            </div>
           </div>
         </header>
 
@@ -1261,16 +1321,6 @@ function App() {
                   onRefresh={handleRefresh}
                 />
 
-                <div className="graph-overlay">
-                  <div className="graph-overlay-title">
-                    Context Layer
-                  </div>
-
-                  <div className="graph-overlay-text">
-                    {(graphData.nodes || []).length}{" "}
-                    visible entities
-                  </div>
-                </div>
               </div>
             </div>
 
@@ -1375,25 +1425,37 @@ function App() {
             </aside>
           </section>
 
-          <section className="panel chat-panel">
-            <div className="panel-header chat-header">
-              <div>
+          {isChatOpen && (
+          <section
+            ref={chatPanelRef}
+            className={`panel chat-panel floating-chat ${isChatMinimized ? "is-minimized" : ""}`}
+            style={chatPosition ? { left: `${chatPosition.left}px`, top: `${chatPosition.top}px`, right: "auto", bottom: "auto" } : undefined}
+          >
+            <div
+              className="panel-header chat-header"
+              onClick={(event) => {
+                if (isChatMinimized && !event.target.closest("button")) {
+                  setIsChatMinimized(false);
+                }
+              }}
+              onPointerDown={handleChatPointerDown}
+              onPointerMove={handleChatPointerMove}
+              onPointerUp={handleChatPointerUp}
+              onPointerCancel={handleChatPointerUp}
+            >
+              <div className="chat-brand">
+                <span className="chat-avatar" aria-hidden="true">C</span>
                 <div className="panel-title-row">
-                  <h2>AI Assistant</h2>
-
-                  <span className="ai-badge">
-                    AI
-                  </span>
+                  <h2>Cenario AI</h2>
                 </div>
-
-                <p>
-                  Ask questions across your connected
-                  data
-                </p>
+              </div>
+              <div className="chat-header-actions">
+                <button type="button" aria-label={isChatMinimized ? "Expand chat" : "Minimize chat"} title={isChatMinimized ? "Expand chat" : "Minimize chat"} onClick={handleChatMinimize}>{isChatMinimized ? "↗" : "−"}</button>
+                <button type="button" aria-label="Close chat" title="Close chat" onClick={handleChatClose}>×</button>
               </div>
             </div>
 
-            <div className="chat-content">
+            {!isChatMinimized && <div className="chat-content">
               {messages.length === 0 ? (
                 <div className="chat-empty">
                   <div className="chat-icon">
@@ -1438,6 +1500,7 @@ function App() {
                       <div
                         key={`msg-${index}`}
                         className={`message ${message.role}`}
+                        onMouseDown={message.role === "user" ? (event) => event.preventDefault() : undefined}
                       >
                         <div className="message-role">
                           {message.role}
@@ -1502,7 +1565,7 @@ function App() {
                                     return (
                                       <button
                                         type="button"
-                                        className="message-source-pill"
+                                        className="message-source-pill message-source-link"
                                         key={sourceId}
                                         onClick={() =>
                                           setSelectedSource(
@@ -1518,10 +1581,9 @@ function App() {
                                             }
                                           )
                                         }
+                                        title={`Inspect ${getSourceLabel(sourceId)} provenance`}
                                       >
-                                        {getSourceLabel(
-                                          sourceId
-                                        )}
+                                        Sources ↗
                                       </button>
                                     );
                                   }
@@ -1541,7 +1603,7 @@ function App() {
                                     return (
                                       <button
                                         type="button"
-                                        className="message-source-pill"
+                                        className="message-source-pill message-source-link"
                                         key={sourceId}
                                         onClick={() =>
                                           setSelectedSource(
@@ -1557,10 +1619,9 @@ function App() {
                                             }
                                           )
                                         }
+                                        title={`Inspect ${getSourceLabel(sourceId)} provenance`}
                                       >
-                                        {getSourceLabel(
-                                          sourceId
-                                        )}
+                                        Sources ↗
                                       </button>
                                     );
                                   }
@@ -1649,9 +1710,17 @@ function App() {
                   <span>→</span>
                 </button>
               </div>
-            </div>
+            </div>}
           </section>
+          )}
         </div>
+
+        {!isChatOpen && (
+          <button type="button" className="chat-launcher" onClick={() => { setChatPosition(null); setIsChatOpen(true); setIsChatMinimized(false); }}>
+            <span className="chat-avatar" aria-hidden="true">C</span>
+            <span>Chat with Cenario AI</span>
+          </button>
+        )}
 
         {selectedSource && (
           <div

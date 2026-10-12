@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 export default function AdminFeedbackModal({
   isOpen,
@@ -14,7 +14,7 @@ export default function AdminFeedbackModal({
   const [search, setSearch] = useState("");
   const [expandedItems, setExpandedItems] = useState(new Set());
 
-  const loadFeedback = async () => {
+  const loadFeedback = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch(`${apiBaseUrl}/api/feedback`, {
@@ -38,13 +38,17 @@ export default function AdminFeedbackModal({
     } finally {
       setLoading(false);
     }
-  };
+  }, [apiBaseUrl, getAuthHeaders, onFeedbackChanged]);
 
   useEffect(() => {
-    if (isOpen) {
+    if (!isOpen) return undefined;
+
+    const timer = window.setTimeout(() => {
       loadFeedback();
-    }
-  }, [isOpen]);
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [isOpen, loadFeedback]);
 
   const handleDelete = async (id, e) => {
     e.stopPropagation();

@@ -1,26 +1,20 @@
 import { isSensitiveFieldName } from "../security/sensitive_data_policy.js";
+import { executableSql, hasMultipleStatements } from "../database/readonly_guard.js";
 
 /**
  * Remove SQL comments while preserving structure.
  */
 function removeComments(query) {
-  let cleaned = query.replace(/\/\*[\s\S]*?\*\//g, " ");
-  cleaned = cleaned.replace(/--[^\n]*/g, " ");
-  return cleaned;
+  return executableSql(query, { preserveQuotedIdentifiers: true });
 }
 
 /**
  * Mask string literals to prevent values inside quotes from triggering column checks.
  */
 function maskStringLiterals(query) {
-  return query.replace(/'(?:''|[^'])*'/g, "''");
-}
-
-function hasMultipleStatements(query) {
-  const stripped = query.trim();
-  if (!stripped.includes(";")) return false;
-  const withoutTrailing = stripped.replace(/;+$/, "").trim();
-  return withoutTrailing.includes(";");
+  // executableSql already masks single/dollar quoted text, quoted identifiers,
+  // and comments without losing executable identifier tokens.
+  return executableSql(query, { preserveQuotedIdentifiers: true });
 }
 
 export function _validate_no_sensitive_fields(query) {

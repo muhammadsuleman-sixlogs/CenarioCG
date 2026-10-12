@@ -43,3 +43,10 @@ cache/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local agent instructions and browser/test captures
+AGENTS.md
+.playwright-mcp/
+*-response.json
+*-fixed.json
+pending-*.json

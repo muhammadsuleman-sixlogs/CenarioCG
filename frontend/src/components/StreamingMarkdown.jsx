@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 
 export default function StreamingMarkdown({
@@ -9,25 +9,34 @@ export default function StreamingMarkdown({
   const [displayedText, setDisplayedText] = useState(isStreaming ? "" : (content || ""));
   const [isTyping, setIsTyping] = useState(Boolean(isStreaming));
   const completeRef = useRef(onComplete);
-  completeRef.current = onComplete;
+
+  useEffect(() => {
+    completeRef.current = onComplete;
+  }, [onComplete]);
 
   useEffect(() => {
     if (!isStreaming) {
-      setDisplayedText(content || "");
-      setIsTyping(false);
-      return;
+      const resetTimer = window.setTimeout(() => {
+        setDisplayedText(content || "");
+        setIsTyping(false);
+      }, 0);
+      return () => window.clearTimeout(resetTimer);
     }
 
     const fullText = content || "";
     const totalLength = fullText.length;
     if (totalLength === 0) {
-      setIsTyping(false);
-      if (completeRef.current) completeRef.current();
-      return;
+      const completeTimer = window.setTimeout(() => {
+        setIsTyping(false);
+        if (completeRef.current) completeRef.current();
+      }, 0);
+      return () => window.clearTimeout(completeTimer);
     }
 
-    setDisplayedText("");
-    setIsTyping(true);
+    const startTimer = window.setTimeout(() => {
+      setDisplayedText("");
+      setIsTyping(true);
+    }, 0);
 
     let currentIndex = 0;
     // Typing speed calculation:
@@ -51,7 +60,10 @@ export default function StreamingMarkdown({
       }
     }, intervalMs);
 
-    return () => clearInterval(timer);
+    return () => {
+      window.clearTimeout(startTimer);
+      clearInterval(timer);
+    };
   }, [content, isStreaming]);
 
   return (

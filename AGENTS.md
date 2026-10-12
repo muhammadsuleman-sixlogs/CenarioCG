@@ -88,6 +88,10 @@ flowchart TD
 
 ## 5. Critical Guidelines & Architectural Rules for AI Agents
 
+> **Authorization and conversation boundary:** Chat requests must retain the authenticated principal, resolve workspace permissions from server-side `WORKSPACE_AUTHORIZATION_JSON`, and use server-generated conversation IDs. Never trust browser-supplied source permissions, workspace scope, or historical entity state.
+
+> **Context freshness:** Context snapshots are local application artifacts. Publish only validated, non-empty snapshots atomically and label their timestamp/freshness. Schema discovery uses read-only catalog access and must never mutate a source.
+
 > [!IMPORTANT]
 > **1. STRICT READ-ONLY DATABASE ACCESS**
 > All database connection pools (`getDb1Pool`, `getDb2Pool`) execute `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` on connection. Never create, modify, or run `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, or schema-altering SQL statements.
@@ -121,3 +125,12 @@ cd backend && npm test
 # Start React + Vite frontend dev server (port 5173)
 cd frontend && npm run dev
 ```
+
+## 7. Release and repository hygiene
+
+`AGENTS.md` is local agent guidance and is intentionally excluded from Git.
+Do not stage `.playwright-mcp/`, captured `*-response.json` files,
+`pending-*.json`, credentials, or other local runtime artifacts. Before a push,
+review `git diff --cached`, run the complete backend suite, and build the
+frontend. Only application code, intentional application-owned metadata,
+regression tests, and maintained project documentation should be committed.

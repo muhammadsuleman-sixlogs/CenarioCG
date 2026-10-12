@@ -22,7 +22,7 @@ app.use(
       if (settings.allowOrigins.includes(origin)) {
         return callback(null, true);
       }
-      return callback(null, true); // Permissive fallback matching previous config
+      return callback(new Error("Origin is not allowed by CORS policy."));
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -88,7 +88,8 @@ app.post("/api/auth/login", (req, res) => {
 
 app.get("/api/auth/me", (req, res) => {
   return res.json({
-    authenticated: true
+    authenticated: true,
+    principal: req.auth?.principal || null
   });
 });
 

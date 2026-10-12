@@ -1,6 +1,7 @@
 import fs from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
+import { attachSemanticCatalog, loadSemanticCatalog } from "./semantic_catalog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -35,12 +36,29 @@ export function save_context(context, source_id = "db1") {
     fs.mkdirSync(CONTEXT_DIR, { recursive: true });
   }
 
-  const context_file = _get_context_file(source_id);
-  fs.writeFileSync(
-    context_file,
-    JSON.stringify(context, null, 2),
-    "utf-8"
-  );
+  const sourceId = String(source_id).trim().toLowerCase();
+  if (context.source_id && String(context.source_id).trim().toLowerCase() !== sourceId) {
+    throw new Error("Context source_id does not match the target source.");
+  }
+  if (!context.tables || typeof context.tables !== "object" || Object.keys(context.tables).length === 0) {
+    throw new Error("Refusing to publish an empty Context Layer snapshot.");
+  }
+  const snapshot = {
+    ...context,
+    source_id: sourceId,
+    snapshot: {
+      ...(context.snapshot && typeof context.snapshot === "object" ? context.snapshot : {}),
+      version: 1,
+      generated_at: new Date().toISOString(),
+      validation_status: "validated",
+      table_count: Object.keys(context.tables).length
+    }
+  };
+  const context_file = _get_context_file(sourceId);
+  const temporaryFile = `${context_file}.tmp`;
+  // Atomic replace prevents readers from observing a partial discovery result.
+  fs.writeFileSync(temporaryFile, JSON.stringify(snapshot, null, 2), "utf-8");
+  fs.renameSync(temporaryFile, context_file);
 
   console.log(`${source_id.toUpperCase()} context saved to: ${context_file}`);
 }
@@ -71,6 +89,14 @@ export function load_context(source_id = "db1") {
 
 export const loadContext = load_context;
 
+export function getContextFreshness(context, maxAgeMs = 24 * 60 * 60 * 1000, now = Date.now()) {
+  const generatedAt = context?.snapshot?.generated_at;
+  const timestamp = generatedAt ? Date.parse(generatedAt) : NaN;
+  if (!Number.isFinite(timestamp)) return { freshness_status: "unknown", age_ms: null };
+  const ageMs = Math.max(0, now - timestamp);
+  return { freshness_status: ageMs > maxAgeMs ? "stale" : "fresh", age_ms: ageMs };
+}
+
 /**
  * Load all available PostgreSQL Context Layers.
  *
@@ -97,8 +123,13 @@ export function load_all_contexts() {
   if (Object.keys(contexts).length === 0) {
     throw new Error("No PostgreSQL Context Layer files were found.");
   }
-
-  return contexts;
+  // The semantic overlay is application-owned metadata. A malformed overlay
+  // must never replace or mutate the technical schema snapshots.
+  try {
+    return attachSemanticCatalog(contexts, loadSemanticCatalog()).contexts;
+  } catch {
+    return contexts;
+  }
 }
 
 export const loadAllContexts = load_all_contexts;
@@ -114,6 +145,7 @@ export default {
   saveContext,
   load_context,
   loadContext,
+  getContextFreshness,
   load_all_contexts,
   loadAllContexts,
 };

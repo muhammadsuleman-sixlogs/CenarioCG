@@ -299,8 +299,10 @@ function GraphView({
   const onEntitySelectRef = useRef(onEntitySelect);
 
   /* Keep refs current so long-lived callbacks never go stale. */
-  loadingRef.current = loading;
-  onEntitySelectRef.current = onEntitySelect;
+  useEffect(() => {
+    loadingRef.current = loading;
+    onEntitySelectRef.current = onEntitySelect;
+  }, [loading, onEntitySelect]);
 
   /* Synchronize Cytoscape canvas dimensions whenever container resizes without recomputing layout */
   useEffect(() => {
@@ -397,6 +399,23 @@ function GraphView({
       }
     });
 
+    // Some responses identify tables by their short name (for example
+    // `sessions`) while Cytoscape nodes use the canonical `db2:sessions` id.
+    // Resolve those short names against the graph so the trace still lands on
+    // the rendered nodes.
+    (graphData?.nodes || []).forEach((node) => {
+      const nodeId = node?.id === undefined || node?.id === null
+        ? ""
+        : String(node.id);
+      const nodeLabel = node?.label === undefined || node?.label === null
+        ? ""
+        : String(node.label);
+
+      if (ids.has(nodeLabel) || ids.has(nodeId.split(":").slice(1).join(":"))) {
+        ids.add(nodeId);
+      }
+    });
+
     (sourceTrace?.external_sources || []).forEach((source) => {
       if (source && source.id !== undefined && source.id !== null) {
         ids.add(`external-source:${String(source.id)}`);
@@ -404,7 +423,7 @@ function GraphView({
     });
 
     return ids;
-  }, [graphTrace, sourceTrace]);
+  }, [graphData, graphTrace, sourceTrace]);
 
   const traceEdgeIds = useMemo(() => {
     const ids = new Set();
@@ -416,6 +435,25 @@ function GraphView({
     });
 
     return ids;
+  }, [graphTrace]);
+
+  const traceEdgeKeys = useMemo(() => {
+    const keys = new Set();
+
+    (graphTrace?.edges || []).forEach((edge) => {
+      const source = edge?.source === undefined || edge?.source === null
+        ? ""
+        : String(edge.source);
+      const target = edge?.target === undefined || edge?.target === null
+        ? ""
+        : String(edge.target);
+
+      if (source && target) {
+        keys.add(`${source}->${target}`);
+      }
+    });
+
+    return keys;
   }, [graphTrace]);
 
   /* ---------------------------------------------------------------- */
@@ -507,43 +545,6 @@ function GraphView({
   };
 
   /* ---------------------------------------------------------------- */
-  /* Thinking animation                                                */
-  /* ---------------------------------------------------------------- */
-  const startThinkingAnimation = () => {
-    const cy = cyRef.current;
-
-    if (!cy || cy.destroyed()) {
-      return;
-    }
-
-    clearTimers();
-    resetVisualState(cy);
-
-    let edgeIndex = 0;
-    const edges = cy.edges().toArray();
-
-    const pulse = () => {
-      if (!loadingRef.current || edges.length === 0) {
-        return;
-      }
-
-      const edge = edges[edgeIndex % edges.length];
-
-      edge.addClass("thinking-edge");
-
-      const timer = setTimeout(() => {
-        edge.removeClass("thinking-edge");
-        edgeIndex += 1;
-        pulse();
-      }, 90);
-
-      timersRef.current.push(timer);
-    };
-
-    pulse();
-  };
-
-  /* ---------------------------------------------------------------- */
   /* Final trace                                                       */
   /* ---------------------------------------------------------------- */
   const showFinalTrace = () => {
@@ -570,22 +571,54 @@ function GraphView({
       }
     });
 
+    const isTracedEdge = (edge) => {
+      const edgeKey = `${edge.source().id()}->${edge.target().id()}`;
+      const reverseEdgeKey = `${edge.target().id()}->${edge.source().id()}`;
+
+      return traceEdgeIds.has(edge.id()) ||
+        traceEdgeKeys.has(edgeKey) ||
+        traceEdgeKeys.has(reverseEdgeKey) ||
+        (traceNodeIds.has(edge.source().id()) && traceNodeIds.has(edge.target().id()));
+    };
+
     cy.edges().forEach((edge) => {
-      if (traceEdgeIds.has(edge.id())) {
+      if (isTracedEdge(edge)) {
         edge.addClass("trace-edge");
         edge.style({ opacity: 1 });
       }
     });
 
-    if (traceNodes.length) {
+    const traceEdges = cy.edges().filter(isTracedEdge);
+    const traceElements = cy.collection([...traceNodes, ...traceEdges]);
+
+    if (traceElements.length) {
       cy.animate(
         {
           fit: {
-            eles: cy.collection(traceNodes),
-            padding: 150,
+            eles: traceElements,
+            padding: 260,
           },
         },
-        { duration: 900 }
+        {
+          duration: 900,
+          complete: () => {
+            if (cy.destroyed()) return;
+
+            const maximumTraceZoom = 1.35;
+            if (cy.zoom() > maximumTraceZoom) {
+              cy.animate(
+                {
+                  zoom: maximumTraceZoom,
+                  renderedPosition: {
+                    x: cy.width() / 2,
+                    y: cy.height() / 2,
+                  },
+                },
+                { duration: 300 }
+              );
+            }
+          },
+        }
       );
     }
 
@@ -601,7 +634,7 @@ function GraphView({
         node.addClass("trace-active");
 
         node.connectedEdges().forEach((edge) => {
-          if (traceEdgeIds.has(edge.id())) {
+          if (isTracedEdge(edge)) {
             edge.addClass("trace-edge-active");
           }
         });
@@ -726,7 +759,7 @@ function GraphView({
       resetVisualState(cy);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, graphTrace, traceNodeIds, traceEdgeIds]);
+  }, [loading, graphTrace, traceNodeIds, traceEdgeIds, traceEdgeKeys]);
 
   /* Unmount cleanup */
   useEffect(() => {

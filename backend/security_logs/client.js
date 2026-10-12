@@ -249,7 +249,7 @@ export class SecurityLogClient {
     this._cache.delete(key);
     this._cache.set(key, entry);
 
-    return deepClone(entry.value);
+    return { value: deepClone(entry.value), cached_at: entry.cached_at, cache_age_ms: now - entry.cached_at };
   }
 
   _cache_set(key, value, ttlSeconds) {
@@ -259,6 +259,7 @@ export class SecurityLogClient {
 
     const entry = {
       value: deepClone(value),
+      cached_at: Date.now(),
       expires_at: Date.now() + ttlSeconds * 1000,
     };
 
@@ -310,7 +311,7 @@ export class SecurityLogClient {
     if (!force_refresh) {
       const cached = this._cache_get(cacheKey);
       if (cached !== null) {
-        return cached;
+        return { ...cached.value, __cenariocg_freshness: { freshness_status: "cache_hit", cached_at: new Date(cached.cached_at).toISOString(), cache_age_ms: cached.cache_age_ms } };
       }
     }
 
@@ -369,7 +370,7 @@ export class SecurityLogClient {
         }
 
         this._cache_set(cacheKey, data, ttlSeconds);
-        return deepClone(data);
+        return { ...deepClone(data), __cenariocg_freshness: { freshness_status: "live", cached_at: null, cache_age_ms: 0 } };
       } catch (err) {
         clearTimeout(timer);
 

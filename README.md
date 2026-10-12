@@ -11,6 +11,13 @@
 
 ## 1. Executive Overview & Super Admin Purpose
 
+### Operational safety requirements
+
+- Connected PostgreSQL and security-log systems are authoritative and strictly read-only. CenarioCG must never run source writes, DDL, locking reads, migrations, or cross-database SQL joins.
+- `/api/chat` requires a signed authenticated principal, a server-side `WORKSPACE_AUTHORIZATION_JSON` allow-list, and a server-owned conversation ID. A browser cannot grant itself a workspace or source.
+- `WORKSPACE_AUTHORIZATION_JSON` is local configuration and must not be committed. Its structure is `{ "principal": { "workspace-id": { "postgresql_sources": ["db1"], "security_resources": [] } } }`. Use `DEFAULT_WORKSPACE_ID` only when that workspace is explicitly present in the principal mapping.
+- Context refresh is explicit (`refreshContextSnapshot`) and read-only. It atomically publishes only non-empty validated metadata snapshots; it does not claim automatic change detection without an external scheduler or source event feed.
+
 **CenarioCG** is an enterprise-grade, agentic Retrieval-Augmented Generation (RAG) and Security Intelligence platform designed specifically for **Super Administrators, Executive Stakeholders, and Security Auditors**.
 
 ### The Problem It Solves
@@ -231,6 +238,21 @@ npm test
 # (Or run Node.js built-in test runner directly):
 node --test tests/**/*.test.js
 ```
+
+The current offline backend regression suite covers authorization, semantic
+catalog routing, temporal language, categorical filters, conversation
+references, dependent cross-source plans, read-only SQL enforcement, and
+connection-failure handling. Live database verification is separate and must
+only be performed with explicit authorization; the authoritative sources remain
+read-only.
+
+### Repository hygiene
+
+Do not commit credentials, local agent instructions, Playwright traces, or
+captured browser response bodies. These local-only artifacts are excluded by
+`.gitignore`. Commit application code, semantic metadata intentionally owned by
+the application, regression tests, and documentation required to reproduce the
+verified behavior.
 
 ---
 

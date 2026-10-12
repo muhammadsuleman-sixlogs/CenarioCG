@@ -36,7 +36,6 @@ function getNodeSourceId(id) {
 export default function KpiDetailView({
   selectedKpi,
   graphData,
-  graphSummary,
   onClose,
   onSelectEntity
 }) {
@@ -105,6 +104,12 @@ export default function KpiDetailView({
     if (!graphData?.edges) return [];
     return graphData.edges;
   }, [graphData]);
+
+  const connectionCounts = useMemo(() => ({
+    database: allConnections.filter((edge) => String(edge.relationship_type || edge.type || "").toLowerCase().includes("database")).length,
+    business: allConnections.filter((edge) => String(edge.relationship_type || edge.type || "").toLowerCase().includes("business")).length,
+    cross_source: allConnections.filter((edge) => String(edge.relationship_type || edge.type || "").toLowerCase().includes("cross")).length,
+  }), [allConnections]);
 
   // Filtered views
   const filteredEntities = useMemo(() => {
@@ -275,28 +280,28 @@ export default function KpiDetailView({
                 className={`kpi-filter-pill ${filterType === "all" ? "active" : ""}`}
                 onClick={() => setFilterType("all")}
               >
-                All (236)
+                All ({allConnections.length})
               </button>
               <button
                 type="button"
                 className={`kpi-filter-pill ${filterType === "database" ? "active" : ""}`}
                 onClick={() => setFilterType("database")}
               >
-                Database (100)
+                Database ({connectionCounts.database})
               </button>
               <button
                 type="button"
                 className={`kpi-filter-pill ${filterType === "business" ? "active" : ""}`}
                 onClick={() => setFilterType("business")}
               >
-                Business (96)
+                Business ({connectionCounts.business})
               </button>
               <button
                 type="button"
                 className={`kpi-filter-pill ${filterType === "cross_source" ? "active" : ""}`}
                 onClick={() => setFilterType("cross_source")}
               >
-                Cross-Source (40)
+                Cross-Source ({connectionCounts.cross_source})
               </button>
             </div>
           )}
@@ -306,11 +311,13 @@ export default function KpiDetailView({
               type="button"
               className="kpi-btn-secondary"
               onClick={() => {
-                let ids = [];
-                if (selectedKpi === "entities") ids = filteredEntities.map((n) => n.id);
-                else if (selectedKpi === "database") ids = filteredDbRelationships.map((r, i) => r.id || `db-${i}`);
-                else if (selectedKpi === "business") ids = filteredBusinessRelationships.map((r, i) => r.id || `biz-${i}`);
-                else ids = filteredAllConnections.map((r, i) => r.id || `conn-${i}`);
+                const ids = selectedKpi === "entities"
+                  ? filteredEntities.map((n) => n.id)
+                  : selectedKpi === "database"
+                    ? filteredDbRelationships.map((r, i) => r.id || `db-${i}`)
+                    : selectedKpi === "business"
+                      ? filteredBusinessRelationships.map((r, i) => r.id || `biz-${i}`)
+                      : filteredAllConnections.map((r, i) => r.id || `conn-${i}`);
 
                 if (expandedRows.size === ids.length) {
                   collapseAll();

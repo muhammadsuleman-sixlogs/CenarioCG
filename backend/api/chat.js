@@ -2,6 +2,9 @@ import express from "express";
 import { RAGPipeline } from "../pipeline/rag_pipeline.js";
 import { loadAllContexts } from "../context/context_store.js";
 import { buildMultiSourceContextGraph, getGraphSummary } from "../context/context_graph.js";
+import { ConversationStore } from "../context/conversation_store.js";
+import { resolveAuthorizedWorkspace } from "../auth/authorization.js";
+import { createRequestId, logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
 
 const router = express.Router();
 
@@ -9,8 +12,9 @@ const router = express.Router();
 // Application services
 // --------------------------------------------------
 
-// Create the existing RAG pipeline once when the backend starts.
-const ragPipeline = new RAGPipeline();
+// Immutable context metadata is loaded by the pipeline; mutable history belongs
+// to a server-owned conversation, never a module-global pipeline instance.
+const conversationStore = new ConversationStore();
 
 // --------------------------------------------------
 // Multi-source Context Graph
@@ -309,6 +313,8 @@ export function buildSourceTrace(sources, dataSources = null) {
 // --------------------------------------------------
 
 router.post("/chat", async (req, res) => {
+  const requestId = createRequestId();
+  res.setHeader("X-Request-ID", requestId);
   try {
     const rawQuestion = req.body?.question;
     const question = typeof rawQuestion === "string" ? rawQuestion.trim() : "";
@@ -320,8 +326,22 @@ router.post("/chat", async (req, res) => {
       });
     }
 
-    // Existing RAG pipeline
-    const result = await ragPipeline.ask(question);
+    const principal = req.auth?.principal;
+    const authorization = resolveAuthorizedWorkspace(principal, req.body?.workspace_id);
+    const { conversation, created } = conversationStore.getOrCreate({
+      conversationId: req.body?.conversation_id,
+      principal,
+      workspaceId: authorization.workspace_id
+    });
+
+    // A request-local orchestrator owns only the selected conversation manager.
+    // Context metadata and source pools remain process-reused underneath.
+    const ragPipeline = new RAGPipeline(conversation.context_manager);
+    const result = await ragPipeline.ask(question, {
+      workspace_id: authorization.workspace_id,
+      authorization,
+      request_id: requestId
+    });
 
     // Multi-source Context Graph
     const graphData = graphToDict(contextGraph);
@@ -342,9 +362,12 @@ router.post("/chat", async (req, res) => {
       graph_summary: graphSummary,
       graph_trace: graphTrace,
       source_trace: sourceTrace
+      ,request_id: requestId
+      ,conversation_id: conversation.id
+      ,conversation_created: created
     });
   } catch (err) {
-    console.error(`CHAT ERROR: ${err.name || "Error"}: ${err.message || err}`);
+    logRuntimeDiagnostic(err, { requestId, phase: "chat_request" });
 
     const status = err.statusCode || err.status;
     if (status && status < 500) {

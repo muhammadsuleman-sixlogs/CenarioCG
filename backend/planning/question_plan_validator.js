@@ -42,6 +42,7 @@ export class QuestionPlanValidator {
 
   static ALLOWED_FILTER_OPERATORS = new Set([
     "=",
+    "case_insensitive_equals",
     "!=",
     "<>",
     ">",
@@ -149,6 +150,58 @@ export class QuestionPlanValidator {
 
   _getSourceContext(sourceId) {
     return this._get_source_context(sourceId);
+  }
+
+  _validate_semantic_metadata(plan) {
+    const errors = [];
+    for (const candidate of Array.isArray(plan.semantic_candidates) ? plan.semantic_candidates : []) {
+      const sourceId = String(candidate?.source_id || "").trim().toLowerCase();
+      const table = String(candidate?.table || "").trim();
+      if (!sourceId || !table) {
+        errors.push("semantic_candidates must contain source_id and table.");
+      } else if (!this._get_source_context(sourceId).tables?.[table]) {
+        errors.push(`semantic candidate references unknown table: ${sourceId}.${table}`);
+      }
+    }
+    for (const step of Array.isArray(plan.semantic_path) ? plan.semantic_path : []) {
+      const sourceId = String(step?.source_id || "").trim().toLowerCase();
+      const table = String(step?.table || "").trim();
+      const column = String(step?.column || "").trim();
+      const columns = this._get_source_context(sourceId).tables?.[table]?.columns || [];
+      if (!sourceId || !table || !column) errors.push("semantic_path steps must contain source_id, table, and column.");
+      else if (!columns.some(item => String(item?.name || item) === column)) errors.push(`semantic path references unknown column: ${sourceId}.${table}.${column}`);
+    }
+    return errors;
+  }
+
+  _validate_required_status_filters(plan) {
+    const question = String(plan?.question || "");
+    if (!/\b(?:pending|open|closed|resolved|unresolved|active|inactive|completed|cancelled|canceled|on[-\s]?hold|in[-\s]?progress)\b/i.test(question)) return [];
+
+    const errors = [];
+    for (const sourceId of Array.isArray(plan?.postgresql_sources) ? plan.postgresql_sources : []) {
+      const context = this._get_source_context(sourceId);
+      for (const table of Array.isArray(plan?.required_tables) ? plan.required_tables : []) {
+        const semantics = context?.semantic_catalog?.entities?.[table]?.status_semantics;
+        const statusColumn = String(semantics?.column || "").trim();
+        const discoveredStatusColumns = (context?.tables?.[table]?.columns || [])
+          .map(column => String(column?.name || column || ""))
+          .filter(column => /^(status|state|workflow_state|lifecycle_state)$/i.test(column));
+        if (discoveredStatusColumns.length === 0) continue;
+        const hasStatusColumn = statusColumn && discoveredStatusColumns.some(column => column.toLowerCase() === statusColumn.toLowerCase());
+        const hasRuntimeVerification = (plan.filters || []).some(filter => filter?.verification === "runtime_distinct_required");
+        if ((!statusColumn || !hasStatusColumn) && !hasRuntimeVerification) {
+          errors.push(`Verified status semantics are unavailable for ${sourceId}.${table}.`);
+          continue;
+        }
+        const hasFilter = (plan.filters || []).some(filter => {
+          const field = String(filter?.field || filter?.column || filter?.column_name || "").split(".").at(-1);
+          return field.toLowerCase() === statusColumn.toLowerCase() && String(filter?.table || table).split(".").at(-1).toLowerCase() === table.toLowerCase();
+        });
+        if (!hasFilter && !hasRuntimeVerification) errors.push(`Required verified status filter is missing for ${sourceId}.${table}.${statusColumn}.`);
+      }
+    }
+    return errors;
   }
 
   static _find_key_ci(mapping, requested) {
@@ -324,10 +377,12 @@ export class QuestionPlanValidator {
       normalized.postgresql_sources,
       normalized.required_tables
     );
-    normalized.relationships = this._canonical_relationships(
+    const relationshipResult = this._canonical_relationships(
       normalized.relationships ?? [],
       normalized.postgresql_sources
     );
+    normalized.relationships = relationshipResult.relationships;
+    normalized.relationship_errors = relationshipResult.errors;
     normalized.filters = this._canonical_filters(
       normalized.filters ?? [],
       normalized.postgresql_sources,
@@ -394,7 +449,7 @@ export class QuestionPlanValidator {
     if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
       const mode = String(normalized.mode || "single").trim().toLowerCase();
       if (mode === "single" && topLevelPlan) {
-        let sourceId = "db1";
+        let sourceId = null;
         const pgSources = topLevelPlan.postgresql_sources ?? [];
         if (Array.isArray(pgSources) && pgSources.length > 0) {
           sourceId = String(pgSources[0]).trim().toLowerCase();
@@ -459,6 +514,10 @@ export class QuestionPlanValidator {
         stepSourceIds = [stepSourceId.trim().toLowerCase()];
       } else {
         stepSourceIds = this._canonical_string_list(originalStep.postgresql_sources ?? []);
+        const topLevelSources = this._canonical_string_list(topLevelPlan?.postgresql_sources ?? []);
+        if (stepSourceIds.length === 0 && topLevelSources.length === 1) {
+          stepSourceIds = topLevelSources.map(source => source.trim().toLowerCase());
+        }
       }
 
       const preferredTables = this._preferred_tables_from_step(originalStep);
@@ -577,10 +636,12 @@ export class QuestionPlanValidator {
         contractTables,
         preferredTables
       );
-      contract.relationships = this._canonical_relationships(
+      const contractRelationshipResult = this._canonical_relationships(
         contract.relationships ?? [],
         contractSourceIds
       );
+      contract.relationships = contractRelationshipResult.relationships;
+      contract.relationship_errors = contractRelationshipResult.errors;
       contract.filters = this._canonical_filters(
         contract.filters ?? [],
         contractSourceIds,
@@ -610,6 +671,11 @@ export class QuestionPlanValidator {
       }
 
       step.contract = contract;
+      if (typeof step.source_id === "string" && step.source_id.trim()) {
+        step.source_id = step.source_id.trim().toLowerCase();
+      } else if (stepSourceIds.length === 1) {
+        step.source_id = stepSourceIds[0];
+      }
       canonicalSteps.push(step);
     }
 
@@ -1061,7 +1127,7 @@ export class QuestionPlanValidator {
 
   _canonical_relationships(value, sourceIds = null) {
     if (value === null || value === undefined) {
-      return [];
+      return { relationships: [], errors: [] };
     }
     if (!Array.isArray(value)) {
       value = [value];
@@ -1097,27 +1163,31 @@ export class QuestionPlanValidator {
     }
 
     const result = [];
+    const errors = [];
     for (const item of value) {
       if (!item || typeof item !== "object" || Array.isArray(item)) {
-        continue;
+        errors.push("Plan contains an invalid relationship definition."); continue;
       }
       const desired = endpoints(item);
       if (desired === null) {
-        continue;
+        errors.push("Plan contains a relationship without complete source and target columns."); continue;
       }
       if (known.some(k => {
         const ep = endpoints(k);
         return ep !== null && matches(desired, ep);
       })) {
         result.push(item);
+      } else {
+        errors.push(`Plan references undiscovered relationship: ${desired.join(" -> ")}`);
       }
     }
-
-    return result;
+    return { relationships: result, errors };
   }
 
   _canonicalRelationships(value, sourceIds = null) {
-    return this._canonical_relationships(value, sourceIds);
+    // Historical callers expect the canonical relationship list. Validation
+    // diagnostics remain available through validate(plan).
+    return this._canonical_relationships(value, sourceIds).relationships;
   }
 
   _canonical_filters(value, sourceIds = null, candidateTables = null) {
@@ -2338,6 +2408,7 @@ export class QuestionPlanValidator {
     const requiredTables = normalizedPlan.required_tables ?? [];
     const requiredColumns = normalizedPlan.required_columns ?? [];
     const relationships = normalizedPlan.relationships ?? [];
+    errors.push(...(normalizedPlan.relationship_errors || []));
     const operations = normalizedPlan.operations ?? [];
     const entities = normalizedPlan.entities ?? [];
     const filters = normalizedPlan.filters ?? [];
@@ -2367,6 +2438,8 @@ export class QuestionPlanValidator {
     errors.push(...this._validate_operations(operations));
     errors.push(...this._validate_limit(normalizedPlan.limit));
     errors.push(...this._validate_confidence(normalizedPlan.confidence));
+    errors.push(...this._validate_semantic_metadata(normalizedPlan));
+    errors.push(...this._validate_required_status_filters(normalizedPlan));
 
     const normalizedDataSources = Array.isArray(dataSources)
       ? dataSources.filter(s => typeof s === "string").map(s => s.trim().toLowerCase())

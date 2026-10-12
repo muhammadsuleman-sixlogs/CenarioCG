@@ -3,6 +3,7 @@
  */
 
 export * from "./context_store.js";
+export * from "./semantic_catalog.js";
 export * from "./context_builder.js";
 export * from "./context_manager.js";
 export * from "./context_graph.js";

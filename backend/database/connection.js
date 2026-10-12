@@ -34,12 +34,6 @@ export function getDb1Pool() {
       )
     );
 
-    poolDb1.on("connect", (client) => {
-      // Enforce read-only at the PostgreSQL session level
-      client.query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;").catch(() => {});
-      client.query("SET default_transaction_read_only = on;").catch(() => {});
-    });
-
     poolDb1.on("error", (err) => {
       console.warn("PostgreSQL DB1 pool client idle error:", err.message);
     });
@@ -59,12 +53,6 @@ export function getDb2Pool() {
       )
     );
 
-    poolDb2.on("connect", (client) => {
-      // Enforce read-only at the PostgreSQL session level
-      client.query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;").catch(() => {});
-      client.query("SET default_transaction_read_only = on;").catch(() => {});
-    });
-
     poolDb2.on("error", (err) => {
       console.warn("PostgreSQL DB2 pool client idle error:", err.message);
     });
@@ -72,32 +60,53 @@ export function getDb2Pool() {
   return poolDb2;
 }
 
-export function getPool(sourceId = "db1") {
-  if (sourceId === "db2") {
-    return getDb2Pool();
-  }
-  return getDb1Pool();
+export function getPool(sourceId) {
+  const normalized = typeof sourceId === "string" ? sourceId.trim().toLowerCase() : "";
+  if (normalized === "db1") return getDb1Pool();
+  if (normalized === "db2") return getDb2Pool();
+  throw new Error(`Unsupported PostgreSQL source: '${sourceId ?? ""}'.`);
 }
 
 /**
- * Acquire a read-only PostgreSQL client connection.
- *
- * Provides compatibility for callers expecting either a pool or a client:
- * client.connect() resolves to the client itself.
+ * Check out one client, protect it from an unhandled socket error while it is
+ * checked out, and initialize its session serially.  `pool.on("connect")`
+ * cannot await initialization, which previously allowed these SET commands
+ * to overlap with the caller's first query.
  */
-export async function getConnection(sourceId = "db1") {
-  const pool = getPool(sourceId);
+export async function checkoutReadOnlyClient(pool) {
   const client = await pool.connect();
+  const originalRelease = typeof client.release === "function" ? client.release.bind(client) : null;
+  let released = false;
+  const releaseOnce = (error = undefined) => {
+    if (released) return;
+    released = true;
+    if (typeof client.removeListener === "function") client.removeListener("error", onClientError);
+    if (originalRelease) originalRelease(error);
+  };
+  const onClientError = (error) => {
+    // Checked-out pg clients do not use the pool's idle-client listener. A
+    // listener here prevents ECONNRESET from becoming an unhandled EventEmitter
+    // error and releases the broken connection with an error so pg discards it.
+    console.warn("PostgreSQL checked-out client error:", String(error?.message || error || "unknown error"));
+    releaseOnce(error instanceof Error ? error : new Error("PostgreSQL client error"));
+  };
+  if (typeof client.once === "function") client.once("error", onClientError);
+  if (originalRelease) client.release = releaseOnce;
 
-  // Enforce read-only transaction mode immediately on checkout
-  await client.query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;");
-
-  // Dual-compatibility: allow calling .connect() on the acquired client
-  if (!client.connect) {
-    client.connect = () => Promise.resolve(client);
+  try {
+    await client.query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;");
+    await client.query("SET default_transaction_read_only = on;");
+    return client;
+  } catch (error) {
+    releaseOnce(error);
+    throw error;
   }
+}
 
-  return client;
+/** Acquire a source-explicit read-only PostgreSQL client connection. */
+export async function getConnection(sourceId) {
+  const pool = getPool(sourceId);
+  return checkoutReadOnlyClient(pool);
 }
 
 export async function getDb2Connection() {
@@ -121,6 +130,7 @@ export async function closeAllPools() {
 export const get_connection = getConnection;
 export const get_db2_connection = getDb2Connection;
 export const close_all_pools = closeAllPools;
+export const checkout_readonly_client = checkoutReadOnlyClient;
 
 export default {
   getDb1Pool,
@@ -128,6 +138,7 @@ export default {
   getPool,
   getConnection,
   getDb2Connection,
+  checkoutReadOnlyClient,
   closeAllPools,
   get_connection,
   get_db2_connection,

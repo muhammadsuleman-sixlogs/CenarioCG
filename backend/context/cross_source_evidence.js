@@ -32,7 +32,7 @@ export const _quote_identifier = quoteIdentifier;
  */
 export function _getConnection(sourceId) {
   if (sourceId === "db1") {
-    return getConnection();
+    return getConnection("db1");
   } else if (sourceId === "db2") {
     return getDb2Connection();
   } else {
@@ -73,8 +73,8 @@ export async function loadIdentifierHashes(sourceId, tableName, columnName) {
   validateReadOnlyQuery(query);
   validateSqlSyntax(query);
 
-  const pool = _getConnection(sourceId);
-  const client = await pool.connect();
+  const client = await _getConnection(sourceId);
+  let queryError = null;
 
   try {
     // Defense in depth: set session transaction read only
@@ -93,8 +93,11 @@ export async function loadIdentifierHashes(sourceId, tableName, columnName) {
       distinct_count: hashes.size,
       hashes
     };
+  } catch (error) {
+    queryError = error;
+    throw error;
   } finally {
-    client.release();
+    client.release(queryError || undefined);
   }
 }
 

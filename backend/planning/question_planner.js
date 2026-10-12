@@ -4,6 +4,9 @@ import { fileURLToPath } from "url";
 import { getOpenAIClient, OPENAI_MODEL } from "../llm/openai_client.js";
 import { loadAllContexts } from "../context/context_store.js";
 import { isSensitiveQuestionIntent } from "../security/sensitive_data_policy.js";
+import { findSemanticCandidates, findVerifiedPaths } from "../context/semantic_catalog.js";
+import { isSensitiveFieldName } from "../security/sensitive_data_policy.js";
+import { extractEntitySearchText } from "../entity_resolution/entity_search.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,6 +23,11 @@ function deepcopy(obj) {
     copy[key] = deepcopy(obj[key]);
   }
   return copy;
+}
+
+function tokenWords(value) {
+  return (String(value || "").toLowerCase().match(/[a-z0-9_]+/g) || [])
+    .map(token => token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token);
 }
 
 /**
@@ -224,8 +232,17 @@ export class QuestionPlanner {
       throw err;
     }
 
+    // A specific-record lookup has a smaller, stronger contract than an LLM
+    // relationship plan: one authorized semantic entity plus one discovered
+    // identifier/display filter.  Prefer it before invoking a provider so a
+    // malformed provider plan cannot add unrelated tables to a detail query.
+    const deterministicDetail = this._build_metadata_fallback_plan(trimmedQuestion, conversationContext);
+    if (this._is_bounded_detail_lookup(trimmedQuestion, deterministicDetail)) {
+      return this._normalize_plan(deterministicDetail, trimmedQuestion, conversationContext);
+    }
+
     if (!this.client) {
-      this.client = getOpenAIClient();
+      try { this.client = getOpenAIClient(); } catch { this.client = null; }
     }
 
     const context = this._build_context_for_llm();
@@ -252,25 +269,52 @@ export class QuestionPlanner {
     }
 
     if (!content && this.client?.chat?.completions?.create) {
-      const completion = await this.client.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" },
-        temperature: 0.1,
-      });
-      content = (completion.choices?.[0]?.message?.content ?? "").trim();
+      try {
+        const completion = await this.client.chat.completions.create({
+          model: OPENAI_MODEL,
+          messages: [{ role: "user", content: prompt }],
+          response_format: { type: "json_object" },
+          temperature: 0.1,
+        });
+        content = (completion.choices?.[0]?.message?.content ?? "").trim();
+      } catch {
+        content = "";
+      }
     }
 
     if (!content) {
-      throw new Error("Question planner returned an empty response.");
+      const fallback = this._build_metadata_fallback_plan(trimmedQuestion, conversationContext);
+      if (fallback) return this._normalize_plan(fallback, trimmedQuestion, conversationContext);
+      throw new Error("Question planner could not produce a schema-grounded retrieval plan.");
     }
 
-    const rawPlan = this._parse_json_response(content);
+    let rawPlan;
+    try { rawPlan = this._parse_json_response(content); } catch {
+      const fallback = this._build_metadata_fallback_plan(trimmedQuestion, conversationContext);
+      if (fallback) return this._normalize_plan(fallback, trimmedQuestion, conversationContext);
+      throw new Error("Question planner returned an invalid retrieval plan.");
+    }
 
     let normalizedPlan = this._normalize_plan(
       rawPlan,
-      trimmedQuestion
+      trimmedQuestion,
+      conversationContext
     );
+
+    // Provider output may preserve a technical tie between authorized
+    // candidates even when this operation can safely retrieve each source
+    // independently. Reuse the existing deterministic metadata fallback for
+    // count questions only; singular and relationship ambiguity remains strict.
+    if (
+      this._is_count_question(trimmedQuestion, []) &&
+      Array.isArray(normalizedPlan.ambiguous_context_candidates) &&
+      normalizedPlan.ambiguous_context_candidates.length > 1
+    ) {
+      const independentFallback = this._build_metadata_fallback_plan(trimmedQuestion, conversationContext);
+      if (independentFallback?.candidate_resolution?.mode === "independent") {
+        normalizedPlan = this._normalize_plan(independentFallback, trimmedQuestion, conversationContext);
+      }
+    }
 
     normalizedPlan = this._complete_temporal_plan_if_needed(
       normalizedPlan,
@@ -278,6 +322,404 @@ export class QuestionPlanner {
     );
 
     return normalizedPlan;
+  }
+
+  _build_metadata_fallback_plan(question, conversationContext = null) {
+    const active = this._conversation_reference(conversationContext);
+    const refersBack = /\b(?:it|its|that|this|those|these|details?)\b/i.test(question);
+    const recordSet = active?.record_set;
+    if (recordSet && this._is_record_set_reference(question) && active.source_id && active.table && Array.isArray(recordSet.values) && recordSet.values.length > 0) {
+      const tableInfo = this.contexts?.[active.source_id]?.tables?.[active.table] || {};
+      const safeColumns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(Boolean);
+      return {
+        data_sources: ["postgresql"],
+        postgresql_sources: [String(active.source_id).toLowerCase()],
+        required_tables: [active.table],
+        required_columns: safeColumns.map(column => `${active.table}.${column}`).slice(0, 20),
+        filters: [{ table: active.table, field: recordSet.key_column, operator: "in", value: recordSet.values }],
+        relationships: [],
+        operations: ["lookup"],
+        limit: Math.max(recordSet.values.length, 1),
+        needs_conversation_context: true,
+        entity_target: { source_id: active.source_id, table: active.table },
+        confidence: 0.9,
+        reasoning: "A plural contextual reference was resolved to the source-qualified identities returned by the preceding retrieval."
+      };
+    }
+    const semanticCandidates = findSemanticCandidates(question, this.contexts);
+    const candidates = semanticCandidates.length > 0 ? semanticCandidates.map(candidate => {
+      const info = this.contexts[candidate.source_id]?.tables?.[candidate.table] || {};
+      const columns = Array.isArray(info.columns) ? info.columns : [];
+      return {
+        ...candidate,
+        relevance: candidate.score,
+        columns: columns.map(column => String(column?.name || column || "")).filter(Boolean),
+        primary_keys: Array.isArray(info.primary_keys) ? info.primary_keys : []
+      };
+    }) : [];
+    if (candidates.length === 0) {
+      for (const [sourceId, context] of Object.entries(this.contexts || {})) {
+        for (const [table, info] of Object.entries(context?.tables || {})) {
+          const relevance = this._table_question_relevance(sourceId, table, question);
+          if (relevance <= 0) continue;
+          const columns = Array.isArray(info?.columns) ? info.columns : [];
+          candidates.push({ source_id: sourceId, table, relevance, columns: columns.map(column => String(column?.name || column || "")).filter(Boolean), primary_keys: Array.isArray(info?.primary_keys) ? info.primary_keys : [] });
+        }
+      }
+    }
+    for (const candidate of candidates) candidate.columns = candidate.columns.filter(column => column && !isSensitiveFieldName(column));
+    // If the user is asking about the already established entity itself,
+    // preserve that bounded lookup. Requests for a distinct semantic target
+    // (transcript, project, etc.) continue to relationship resolution below.
+    const explicitNewRecord = candidates.some(candidate => this._explicit_identifier_filter(question, candidate) || this._explicit_display_filter(question, candidate));
+    if (active && refersBack && !explicitNewRecord && candidates.length && !candidates.some(candidate => candidate.source_id === active.source_id && candidate.table !== active.table)) {
+      return { data_sources: ["postgresql"], postgresql_sources: [], required_tables: [], required_columns: [], filters: [], relationships: [], operations: ["lookup"], needs_conversation_context: true, confidence: 0.8 };
+    }
+    candidates.sort((left, right) => right.relevance - left.relevance || left.source_id.localeCompare(right.source_id) || left.table.localeCompare(right.table));
+    if (!candidates.length) return null;
+    let best = candidates[0];
+    const isCount = this._is_count_question(question, candidates);
+    const isRecent = this._is_recent_records_question(question);
+    const isIndependent = isCount || /\b(?:list|which|compare|comparison|each|all)\b/i.test(question);
+    let tied = candidates.filter(candidate => candidate.relevance === best.relevance);
+    // A deictic request can be disambiguated by one discovered direct FK from
+    // the established source-qualified reference. This is schema-driven and
+    // never guesses from matching table names.
+    if (active && refersBack && tied.length > 1) {
+      const related = tied.filter(candidate => candidate.source_id === active.source_id && (this.contexts?.[active.source_id]?.relationships || []).some(rel =>
+        (rel.source_table === active.table && rel.target_table === candidate.table) ||
+        (rel.target_table === active.table && rel.source_table === candidate.table)
+      ));
+      if (related.length === 1) {
+        tied = related;
+        best = related[0];
+      }
+    }
+    if (tied.length > 1 && isIndependent) {
+      return this._build_independent_candidate_plan(question, tied, isCount, semanticCandidates);
+    }
+    if (tied.length > 1) {
+      return { data_sources: ["postgresql"], postgresql_sources: [], required_tables: [], required_columns: [], operations: [], ambiguous_context_candidates: tied.map(candidate => ({ source_id: candidate.source_id, table: candidate.table })) };
+    }
+    const temporalCompanion = isRecent ? this._find_temporal_companion(best, candidates) : null;
+    const timeColumn = best.ordering_column || (best.columns.map(name => ({ name, score: this._recent_column_score({ name, type: "" }) })).filter(item => item.score > 0).sort((left, right) => right.score - left.score)[0] || {}).name;
+    const orderingTable = timeColumn ? best.table : temporalCompanion?.table;
+    const orderingColumn = timeColumn || temporalCompanion?.ordering_column;
+    const statusIntent = this._has_unverified_status_intent(best, question);
+    const statusFilter = this._verified_status_filter(best, question) || (isCount ? this._discovered_categorical_filter(best, question) : null);
+    if (statusIntent && !statusFilter) {
+      return {
+        data_sources: ["postgresql"],
+        postgresql_sources: [best.source_id],
+        required_tables: [best.table],
+        required_columns: [],
+        operations: [],
+        clarification_required: {
+          type: "business_status_semantics",
+          message: "I could not verify the requested status meaning for these records. Please specify the status or workflow definition you want me to use."
+        }
+      };
+    }
+    const requiredTables = temporalCompanion ? [best.table, temporalCompanion.table] : [best.table];
+    const identifierFilter = this._explicit_identifier_filter(question, best);
+    const displayFilter = identifierFilter ? null : this._explicit_display_filter(question, best);
+    const requiredColumns = isCount ? [] : Array.from(new Set([
+      ...best.primary_keys.map(column => `${best.table}.${column}`),
+      ...best.columns.map(column => `${best.table}.${column}`),
+      ...(temporalCompanion ? [`${temporalCompanion.table}.${temporalCompanion.ordering_column}`] : [])
+    ])).slice(0, 20);
+    return {
+      data_sources: ["postgresql"], postgresql_sources: [best.source_id], required_tables: requiredTables, required_columns: requiredColumns,
+      relationships: temporalCompanion ? [temporalCompanion.relationship] : [], filters: [statusFilter, identifierFilter, displayFilter].filter(Boolean), operations: [isCount ? "count" : (isRecent ? "ranking" : "lookup")],
+      sorting: isRecent && orderingTable && orderingColumn ? [{ field: `${orderingTable}.${orderingColumn}`, direction: "desc" }] : [], limit: isCount ? null : (isRecent ? 10 : 50), confidence: 0.65,
+      entity_target: { source_id: best.source_id, table: best.table },
+      semantic_candidates: semanticCandidates.length > 0 ? semanticCandidates.slice(0, 8) : undefined,
+      reasoning: "A bounded metadata-only fallback selected one unambiguous authorized semantic catalog candidate after the semantic planner was unavailable."
+    };
+  }
+
+  _conversation_reference(conversationContext) {
+    return conversationContext?.active_context || conversationContext?.pending_reference || null;
+  }
+
+  _is_record_set_reference(question) {
+    return /\b(?:above|those|these|previous|prior)\b|\ball\s+\d+\b/i.test(String(question || ""));
+  }
+
+  _explicit_identifier_filter(question, candidate) {
+    const value = extractEntitySearchText(question);
+    if (!value || !candidate) return null;
+    const text = String(question || "").toLowerCase();
+    if (!/\b(?:id|identifier|code|reference|number|key)\b/.test(text) && !String(value).includes("-")) return null;
+    const beforeIdentifier = text.split(/\b(?:id|identifier|code|reference|number|key)\b/)[0];
+    const label = tokenWords(beforeIdentifier).filter(token => !["with", "the", "a", "an", "about", "for", "of"].includes(token)).at(-1);
+    const aliases = [candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])].flatMap(tokenWords);
+    const labelMatchesCandidate = !label || aliases.includes(label);
+    if (!labelMatchesCandidate) return null;
+    const columns = candidate.columns || [];
+    const scored = columns.map(column => {
+      const normalized = String(column).toLowerCase();
+      let score = 0;
+      if (label && normalized === `${label}_id`) score = 100;
+      else if (label && /(?:code|key|reference|number)$/.test(normalized) && normalized.startsWith(`${label}_`)) score = 90;
+      else if (candidate.identity_key && normalized === String(candidate.identity_key).toLowerCase()) score = 80;
+      else if ((candidate.primary_keys || []).map(String).map(item => item.toLowerCase()).includes(normalized)) score = 60;
+      else if (normalized === "id") score = 20;
+      return { column, score };
+    }).filter(item => item.score > 0).sort((left, right) => right.score - left.score || left.column.localeCompare(right.column));
+    if (!scored.length || (scored[1] && scored[1].score === scored[0].score)) return null;
+    return { table: candidate.table, field: scored[0].column, operator: "=", value };
+  }
+
+  _explicit_display_filter(question, candidate) {
+    const parsingQuestion = this._strip_structural_prefix_for_display_parsing(question);
+    const text = String(parsingQuestion || "").toLowerCase();
+    if (!/\b(?:show|details?|about|information|find)\b/.test(text) || !candidate) return null;
+    if (this._is_record_set_reference(parsingQuestion)) return null;
+    const tokens = tokenWords(parsingQuestion);
+    const entityWords = new Set([candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])].flatMap(tokenWords));
+    const entityIndex = tokens.findIndex(token => entityWords.has(token));
+    if (entityIndex < 1) return null;
+    const quoted = [...String(parsingQuestion).matchAll(/["']([^"']+)["']/g)].map(match => match[1].trim()).filter(Boolean);
+    const ignored = new Set(["show", "me", "the", "a", "an", "all", "details", "detail", "about", "information", "find", "with", "for", "of", "it", "its", "that", "this", "those", "these", "related", "total", "count", "number", "how", "many"]);
+    const valueTokens = tokens.slice(0, entityIndex).filter(token => !ignored.has(token) && !this._is_temporal_modifier_token(token));
+    const displayValue = quoted[0] || valueTokens.join(" ");
+    if (!displayValue || valueTokens.length > 8) return null;
+    const columns = candidate.columns || [];
+    const displayHints = new Set(["title", "name", "label", "subject", "summary"]);
+    const scored = columns.map(column => {
+      const words = String(column).toLowerCase().split(/[^a-z0-9]+|_/).filter(Boolean).map(word => word.endsWith("s") && word.length > 3 ? word.slice(0, -1) : word);
+      let score = 0;
+      if (words.some(word => displayHints.has(word))) score += 50;
+      if (words.some(word => entityWords.has(word))) score += 25;
+      if (String(column).toLowerCase() === "name" || String(column).toLowerCase() === "title") score += 10;
+      return { column, score };
+    }).filter(item => item.score >= 50).sort((left, right) => right.score - left.score || left.column.localeCompare(right.column));
+    if (!scored.length || (scored[1] && scored[0].score === scored[1].score)) return null;
+    return { table: candidate.table, field: scored[0].column, operator: "contains", value: displayValue };
+  }
+
+  _strip_structural_prefix_for_display_parsing(question) {
+    const original = String(question || "");
+    // Remove only a list marker followed by an imperative question verb. This
+    // preserves numeric record values, identifiers, and titles such as
+    // "1.23 meeting" or "#3 meeting" when they are actual user content.
+    const match = original.match(/^\s*(?:(?:\d+\s*[.)])|(?:#\d+)|[-*•])\s+((?:show|find|list|display|give|what|which|how)\b[\s\S]*)$/i);
+    return match ? match[1] : original;
+  }
+
+  _is_bounded_detail_lookup(question, plan) {
+    if (!plan || !Array.isArray(plan.filters) || plan.filters.length !== 1) return false;
+    if (!/\b(?:show|details?|about|information|find)\b/i.test(String(question || ""))) return false;
+    if (!Array.isArray(plan.required_tables) || plan.required_tables.length !== 1) return false;
+    if (!Array.isArray(plan.postgresql_sources) || plan.postgresql_sources.length !== 1) return false;
+    return ["=", "contains", "in"].includes(String(plan.filters[0]?.operator || "").toLowerCase());
+  }
+
+  _is_temporal_modifier_token(token) {
+    return new Set([
+      "recent", "latest", "newest", "recently", "last", "next", "current", "ongoing", "oldest", "earliest",
+      "today", "yesterday", "tomorrow", "upcoming", "scheduled", "overdue", "before", "after", "since", "until",
+      "between", "during", "week", "month", "quarter", "year", "hour", "day", "daily", "weekly", "monthly", "trend"
+    ]).has(String(token || "").toLowerCase());
+  }
+
+  _question_has_quoted_temporal_literal(question) {
+    return /["'][^"']*\b(?:recent|latest|newest|oldest|earliest|today|yesterday|tomorrow)\b[^"']*["']/i.test(String(question || ""));
+  }
+
+  _remove_temporal_text_filters(filters, question) {
+    if (this._question_has_quoted_temporal_literal(question)) return filters;
+    const questionTokens = tokenWords(question);
+    const hasTemporalIntent = questionTokens.some(token => this._is_temporal_modifier_token(token));
+    if (!hasTemporalIntent) return filters;
+    return (filters || []).filter(filter => {
+      if (!filter || String(filter.operator || "").toLowerCase() !== "contains") return true;
+      const valueTokens = tokenWords(filter.value);
+      // Only remove a filter when its complete value is temporal language;
+      // real names such as "recent planning" remain a user text search.
+      return valueTokens.length === 0 || !valueTokens.every(token => this._is_temporal_modifier_token(token));
+    });
+  }
+
+  // A count request may be phrased as "total <plural entity>".  Treat it as
+  // a count only when that final entity token is actually supported by a
+  // discovered candidate; this avoids interpreting a metric such as "total
+  // budget" as a row count.
+  _is_count_question(question, candidates = []) {
+    const text = String(question || "").toLowerCase().trim();
+    if (/\b(?:count|how\s+many|number\s+of|total\s+number)\b/i.test(text)) return true;
+    const match = text.match(/\btotal\s+([a-z0-9_]+s?)\b/i);
+    if (!match) return false;
+    const requested = tokenWords(match[1])[0];
+    if (!requested) return false;
+    return candidates.some(candidate => {
+      const entityWords = [candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])]
+        .flatMap(tokenWords);
+      return entityWords.includes(requested);
+    });
+  }
+
+  // If the requested records do not carry a timestamp, a directly related
+  // discovered table can provide ordering only when it is also semantically
+  // present in the question and the FK is schema-validated.  This keeps
+  // "latest related record" plans grounded without assuming naming patterns.
+  _find_temporal_companion(candidate, candidates) {
+    if (!candidate || candidate.ordering_column) return null;
+    const context = this.contexts?.[candidate.source_id];
+    const related = (context?.relationships || []).filter(relationship => {
+      const source = String(relationship?.source_table || "");
+      const target = String(relationship?.target_table || "");
+      return source === candidate.table || target === candidate.table;
+    });
+    for (const other of candidates) {
+      if (other.source_id !== candidate.source_id || other.table === candidate.table || !other.ordering_column) continue;
+      const relationship = related.find(item =>
+        (item.source_table === candidate.table && item.target_table === other.table) ||
+        (item.target_table === candidate.table && item.source_table === other.table)
+      );
+      if (relationship) return { ...other, relationship };
+    }
+    return null;
+  }
+
+  _build_independent_candidate_plan(question, candidates, isCount, semanticCandidates = []) {
+    const uniqueCandidates = [...new Map(candidates.map(candidate => [`${candidate.source_id}:${candidate.table}`, candidate])).values()];
+    const statusFilters = uniqueCandidates.map(candidate => this._verified_status_filter(candidate, question));
+    const statusIntent = uniqueCandidates.some(candidate => this._has_unverified_status_intent(candidate, question));
+    if (statusIntent && (statusFilters.some(filter => !filter) || new Set(statusFilters.filter(Boolean).map(filter => JSON.stringify(filter))).size > 1)) {
+      return {
+        data_sources: ["postgresql"],
+        postgresql_sources: uniqueCandidates.map(candidate => candidate.source_id),
+        required_tables: [...new Set(uniqueCandidates.map(candidate => candidate.table))],
+        required_columns: [],
+        operations: [],
+        clarification_required: {
+          type: "business_status_semantics",
+          message: "I found conflicting or unverified status meanings for these records. Please specify the status or workflow definition you want me to use."
+        }
+      };
+    }
+    const identityCandidates = uniqueCandidates.filter(candidate => candidate.identity_key && candidate.identity_group && candidate.identity_mapping_id && candidate.identity_validation_status === "validated" && Array.isArray(candidate.identity_provenance) && candidate.identity_provenance.length > 0);
+    const canDeduplicate = isCount && identityCandidates.length === uniqueCandidates.length && new Set(identityCandidates.map(candidate => `${candidate.identity_group}:${candidate.identity_mapping_id}`)).size === 1;
+    const steps = uniqueCandidates.map((candidate, index) => {
+      const columns = canDeduplicate
+        ? [`${candidate.table}.${candidate.identity_key}`]
+        : (isCount ? [] : candidate.columns.map(column => `${candidate.table}.${column}`).slice(0, 20));
+      const operations = canDeduplicate ? ["lookup"] : [isCount ? "count" : "lookup"];
+      return {
+        id: `s${index + 1}`,
+        type: "source_query",
+        source_id: candidate.source_id,
+        contract: {
+          question,
+          data_sources: ["postgresql"],
+          postgresql_sources: [candidate.source_id],
+          required_tables: [candidate.table],
+          required_columns: columns,
+          relationships: [],
+          filters: statusFilters[index] ? [statusFilters[index]] : [],
+          operations,
+          limit: isCount ? (canDeduplicate ? 50000 : null) : 50,
+          sorting: [],
+          entities: []
+        },
+        depends_on: [],
+        inputs: [],
+        input_bindings: [],
+        key_columns: [],
+        output_columns: columns,
+        purpose: `Independent authorized retrieval for ${candidate.source_id}.${candidate.table}.`
+      };
+    });
+    return {
+      data_sources: ["postgresql"],
+      postgresql_sources: [...new Set(uniqueCandidates.map(candidate => candidate.source_id))],
+      required_tables: [...new Set(uniqueCandidates.map(candidate => candidate.table))],
+      required_columns: [],
+      relationships: [],
+      filters: [],
+      operations: [isCount ? "count" : "lookup"],
+      limit: isCount ? null : 50,
+      confidence: 0.65,
+      semantic_candidates: semanticCandidates.length > 0 ? semanticCandidates : uniqueCandidates.map(candidate => ({ source_id: candidate.source_id, table: candidate.table })),
+      candidate_resolution: {
+        mode: "independent",
+        overlap_status: canDeduplicate ? "verified" : "unknown",
+        deduplication: canDeduplicate ? "verified_identity" : "not_performed",
+        targets: uniqueCandidates.map(candidate => ({
+          source_id: candidate.source_id,
+          table: candidate.table,
+          identity_key: canDeduplicate ? candidate.identity_key : null,
+          identity_mapping_id: canDeduplicate ? candidate.identity_mapping_id : null
+        }))
+      },
+      execution_plan: {
+        mode: "multi_step",
+        steps,
+        final_step: steps[steps.length - 1]?.id || null,
+        reason: canDeduplicate
+          ? "Independent source retrieval with application-owned verified identity deduplication."
+          : "Independent source retrieval; source results remain separate because overlap is unverified."
+      },
+      reasoning: "Multiple equally relevant candidates were retained as independent authorized retrieval targets because the requested operation does not require choosing one source."
+    };
+  }
+
+  _verified_status_filter(candidate, question) {
+    const entity = this.contexts?.[candidate.source_id]?.semantic_catalog?.entities?.[candidate.table];
+    const semantics = entity?.status_semantics;
+    if (!semantics || semantics.validation_status !== "validated" || !Array.isArray(semantics.provenance) || semantics.provenance.length === 0) return null;
+    const column = String(semantics.column || "").trim();
+    if (!column || !candidate.columns.includes(column)) return null;
+    const mappings = semantics.mappings && typeof semantics.mappings === "object" ? semantics.mappings : {};
+    const queryTokens = new Set((String(question).toLowerCase().match(/[a-z0-9_]+/g) || []).map(token => token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token));
+    for (const [label, value] of Object.entries(mappings)) {
+      const labelTokens = String(label).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      if (labelTokens.length > 0 && labelTokens.every(token => queryTokens.has(token))) {
+        return { table: candidate.table, field: column, operator: "case_insensitive_equals", value };
+      }
+    }
+    return null;
+  }
+
+  _discovered_categorical_filter(candidate, question) {
+    const columns = Array.isArray(candidate?.columns) ? candidate.columns.map(String) : [];
+    const categorical = columns.filter(column => /(?:^|_)(?:status|state|category|type|priority|stage|kind|class)(?:$|_)/i.test(column));
+    if (!categorical.length) return null;
+    const ranked = categorical.sort((left, right) => {
+      const score = value => /^(status|state|workflow_state|lifecycle_state)$/i.test(value) ? 2 : 1;
+      return score(right) - score(left) || left.localeCompare(right);
+    });
+    const score = value => /^(status|state|workflow_state|lifecycle_state)$/i.test(value) ? 2 : 1;
+    if (ranked.length > 1 && score(ranked[0]) === score(ranked[1])) return null;
+    const preferred = ranked[0];
+    const questionTokens = tokenWords(question);
+    const entityTokens = [candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])].flatMap(tokenWords);
+    const ignored = new Set(["show", "me", "the", "a", "an", "all", "total", "count", "number", "of", "how", "many", "which", "what", "are", "is", "with", "where", "status", "state", "workflow", "lifecycle", "records"]);
+    const valueTokens = questionTokens.filter(token => !entityTokens.includes(token) && !ignored.has(token) && !this._is_temporal_modifier_token(token));
+    if (!valueTokens.length || valueTokens.length > 4) return null;
+    return {
+      table: candidate.table,
+      field: preferred,
+      operator: "case_insensitive_equals",
+      value: valueTokens.join(" "),
+      verification: "runtime_distinct_required",
+      provenance: "authorized_discovered_categorical_column"
+    };
+  }
+
+  _has_unverified_status_intent(candidate, question) {
+    const hasStatusColumn = candidate.columns.some(column => /^(status|state|workflow_state|lifecycle_state)$/i.test(String(column).trim()));
+    if (!hasStatusColumn) return false;
+    const text = String(question || "").toLowerCase();
+    // A status column alone is not evidence that every non-table word is a
+    // status value.  That broad heuristic turned ordinary aggregation terms
+    // such as "total" into a status clarification.  Only an explicit status
+    // predicate or a small, domain-neutral lifecycle vocabulary is treated as
+    // an unverified status request.
+    if (/\b(?:status|state|workflow|lifecycle)\s*(?:is|are|=|:)?\s*[a-z0-9_]+\b/i.test(text)) return true;
+    return /\b(?:pending|open|closed|resolved|unresolved|active|inactive|completed|cancelled|canceled|on[-\s]?hold|in[-\s]?progress)\b/i.test(text);
   }
 
   repair_plan(question, invalidPlan, validationErrors = null, conversationContext = null) {
@@ -291,7 +733,8 @@ export class QuestionPlanner {
 
     return this._normalize_plan(
       deepcopy(invalidPlan),
-      question.trim()
+      question.trim(),
+      conversationContext
     );
   }
 
@@ -913,14 +1356,24 @@ The final execution plan step objects must use:
 
       sources[String(sourceId).trim().toLowerCase()] = {
         source_type: context.source_type || "postgresql",
+        catalog_status: context.semantic_catalog_status || { validation_status: "unknown", freshness_status: "unknown" },
         tables: boundedTables,
         relationships: boundedRelationships,
         business_relationships: boundedBusinessRelationships,
+        semantic_entities: Object.fromEntries(Object.entries(context.semantic_catalog?.entities || {}).slice(0, this.MAX_CONTEXT_TABLES_PER_SOURCE).map(([table, entity]) => [table, {
+          entity_type: entity.entity_type,
+          description: entity.description,
+          synonyms: entity.synonyms,
+          source_qualified_meaning: entity.source_qualified_meaning,
+          ordering: entity.ordering,
+          provenance: entity.provenance
+        }]))
       };
     }
 
     return {
       sources,
+      verified_paths: Object.values(this.contexts).flatMap(context => context.semantic_catalog?.verified_paths || []).slice(0, this.MAX_CONTEXT_RELATIONSHIPS)
     };
   }
 
@@ -959,7 +1412,7 @@ The final execution plan step objects must use:
   }
 
   _is_recent_records_question(question) {
-    const text = question.toLowerCase().split(/\s+/).join(" ");
+    const text = String(question || "").replace(/["'][^"']*["']/g, " ").toLowerCase().split(/\s+/).join(" ");
     return Array.from(this.RECENT_QUESTION_TERMS).some(term => text.includes(term));
   }
 
@@ -1083,7 +1536,10 @@ The final execution plan step objects must use:
       return a.table.localeCompare(b.table);
     });
 
-    return candidates.slice(0, this.MAX_RECENT_CANDIDATES);
+    // Do not truncate before the caller can narrow by authorized source and
+    // semantic entity. A global top-N list made a valid DB2 temporal table
+    // disappear behind unrelated DB1 tables with the same timestamp score.
+    return candidates;
   }
 
   _complete_temporal_plan_if_needed(plan, question) {
@@ -1093,29 +1549,42 @@ The final execution plan step objects must use:
       typeof plan !== "object" ||
       Array.isArray(plan) ||
       JSON.stringify(plan.data_sources) !== JSON.stringify(["postgresql"]) ||
-      (Array.isArray(plan.required_tables) && plan.required_tables.length > 0) ||
       (Array.isArray(plan.sorting) && plan.sorting.length > 0)
     ) {
       return plan;
     }
 
     let candidates = this._build_recent_record_candidates();
+    const semantic = findSemanticCandidates(question, this.contexts);
+    if (semantic.length > 0) {
+      const semanticKeys = new Set(semantic.map(candidate => `${candidate.source_id}:${candidate.table}`));
+      const focused = candidates.filter(candidate => semanticKeys.has(`${candidate.source_id}:${candidate.table}`));
+      if (focused.length > 0) candidates = focused;
+    }
     const allowed = new Set(Array.isArray(plan.postgresql_sources) ? plan.postgresql_sources : []);
     if (allowed.size > 0) {
       candidates = candidates.filter(c => allowed.has(c.source_id));
     }
+    const requestedTables = new Set((plan.required_tables || []).map(item => String(item).toLowerCase()));
+    if (requestedTables.size > 0) candidates = candidates.filter(candidate => requestedTables.has(candidate.table.toLowerCase()));
     if (candidates.length === 0) {
       return plan;
     }
 
-    const selected = [];
-    const seen = new Set();
-    for (const candidate of candidates) {
-      if (!seen.has(candidate.source_id)) {
-        selected.push(candidate);
-        seen.add(candidate.source_id);
-      }
+    // Table/column relevance is metadata-derived. It selects a target only
+    // when the question distinguishes it; ties are retained as ambiguity for
+    // the caller instead of querying arbitrary sources.
+    const scored = candidates.map(candidate => ({
+      ...candidate,
+      relevance: this._table_question_relevance(candidate.source_id, candidate.table, question)
+    })).sort((a, b) => b.relevance - a.relevance || b.score - a.score || a.source_id.localeCompare(b.source_id) || a.table.localeCompare(b.table));
+    const best = scored[0];
+    if (!best || (requestedTables.size === 0 && best.relevance <= 0)) return plan;
+    const tied = scored.filter(candidate => candidate.relevance === best.relevance && candidate.score === best.score);
+    if (requestedTables.size === 0 && tied.length > 1) {
+      return { ...plan, ambiguous_context_candidates: tied.map(({ source_id, table, time_column }) => ({ source_id, table, time_column })) };
     }
+    const selected = [best];
 
     const columns = selected
       .filter(c => c.time_column)
@@ -1136,6 +1605,25 @@ The final execution plan step objects must use:
       "Recent-record retrieval was completed from discovered temporal columns because the initial plan did not identify a retrieval field.";
     result.confidence = Math.max(Number(result.confidence || 0), 0.70);
     return result;
+  }
+
+  _table_question_relevance(sourceId, tableName, question) {
+    const tokens = new Set((String(question).toLowerCase().match(/[a-z0-9_]+/g) || [])
+      .map(token => token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token)
+      .filter(token => token.length > 2 && !this.RECENT_QUESTION_TERMS.has(token)));
+    const words = String(tableName).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map(word => word.endsWith("s") && word.length > 3 ? word.slice(0, -1) : word);
+    const matchedTableWords = words.filter(word => tokens.has(word));
+    let score = matchedTableWords.length * 10;
+    // Prefer a table whose complete normalized name is represented by the
+    // question. Related child/log/attachment tables retain a lower score and
+    // do not displace the requested entity merely because they share a prefix.
+    if (words.length > 0 && matchedTableWords.length === words.length) score += 8;
+    const columns = this.contexts?.[sourceId]?.tables?.[tableName]?.columns || [];
+    for (const column of columns) {
+      const columnWords = String(column?.name || "").toLowerCase().split(/[^a-z0-9]+/);
+      if (columnWords.some(word => tokens.has(word))) score++;
+    }
+    return score;
   }
 
   _infer_postgresql_sources(plan, question) {
@@ -1255,7 +1743,7 @@ The final execution plan step objects must use:
     return raw;
   }
 
-  _normalize_plan(plan, question) {
+  _normalize_plan(plan, question, conversationContext = null) {
     if (!plan || typeof plan !== "object" || Array.isArray(plan)) {
       throw new Error("Question plan must be a dictionary.");
     }
@@ -1265,6 +1753,20 @@ The final execution plan step objects must use:
     normalized.question = question;
     normalized.data_sources = this._normalize_data_sources(normalized);
     normalized.postgresql_sources = this._normalize_postgresql_sources(normalized);
+
+    // An unresolved business/source ambiguity is a terminal planning state.
+    // Do not let the generic schema-anchor fallback attach an unrelated table
+    // (for example a table that merely shares a column token) while retaining
+    // the ambiguity marker.  The pipeline will turn this into a precise
+    // clarification before validation or SQL generation.
+    if (
+      Array.isArray(normalized.ambiguous_context_candidates) &&
+      normalized.ambiguous_context_candidates.length > 1 &&
+      normalized.candidate_resolution?.mode !== "independent" &&
+      !this._conversation_reference(conversationContext)
+    ) {
+      return normalized;
+    }
 
     if (normalized.data_sources.includes("postgresql")) {
       normalized.postgresql_sources = this._infer_postgresql_sources(
@@ -1287,10 +1789,13 @@ The final execution plan step objects must use:
       normalized.postgresql_sources ?? []
     );
 
-    const completed = this._complete_schema_anchor_plan(
-      normalized,
-      question
-    );
+    // Conversation-qualified plans must be completed before the generic
+    // schema-anchor fallback.  Otherwise a follow-up such as "that meeting"
+    // can be anchored to an unrelated table that happens to share a token and
+    // never receives the established source-qualified entity filter.
+    const crossSourceCompleted = this._complete_verified_cross_source_followup(normalized, question, conversationContext);
+    const activeCompleted = this._complete_active_context_plan(crossSourceCompleted, question, conversationContext);
+    const completed = this._complete_schema_anchor_plan(activeCompleted, question);
 
     completed.relationships = this._normalize_relationships(
       completed.relationships ?? []
@@ -1299,6 +1804,30 @@ The final execution plan step objects must use:
     completed.filters = this._normalize_filters(
       completed.filters ?? []
     );
+    completed.filters = this._normalize_verified_status_filters(
+      completed.filters,
+      completed.postgresql_sources ?? [],
+      completed.required_tables ?? []
+    );
+    completed.filters = this._remove_temporal_text_filters(completed.filters, question);
+    const active = this._conversation_reference(conversationContext);
+    if (active && completed.needs_conversation_context !== false && Array.isArray(completed.required_tables)) {
+      const sourceId = active.source_id;
+      const contexts = this.contexts || {};
+      const sourceContext = contexts[sourceId] || {};
+      const references = Object.entries(active).filter(([key, value]) => /(?:^|_)id$/.test(key) && value !== null && value !== undefined);
+      for (const [column, value] of references) {
+          const applies = completed.required_tables.some(table => (sourceContext.tables?.[table]?.columns || []).some(col => String(col?.name || col).toLowerCase() === column.toLowerCase()));
+        if (applies && !completed.filters.some(filter => String(filter.field || filter.column || "").toLowerCase() === column.toLowerCase())) {
+          const table = completed.required_tables.find(candidate => (sourceContext.tables?.[candidate]?.columns || []).some(col => String(col?.name || col).toLowerCase() === column.toLowerCase()));
+          completed.filters.push({ table, column, operator: "=", value });
+        }
+      }
+    }
+    this._apply_active_relationship_context(completed, conversationContext, question);
+    this._apply_active_context_to_execution_plan(completed, conversationContext);
+    const statusSafePlan = this._ensure_verified_status_filter(completed, question);
+    if (statusSafePlan !== completed) return statusSafePlan;
 
     completed.operations = this._normalize_operations(
       completed.operations ?? []
@@ -1356,6 +1885,356 @@ The final execution plan step objects must use:
     }
 
     return completed;
+  }
+
+  _ensure_verified_status_filter(plan, question) {
+    if (!plan || typeof plan !== "object") return plan;
+    const statusCandidate = { columns: [] };
+    for (const table of Array.isArray(plan.required_tables) ? plan.required_tables : []) {
+      for (const context of Object.values(this.contexts || {})) {
+        statusCandidate.columns.push(...(context?.tables?.[table]?.columns || []).map(column => String(column?.name || column || "")));
+      }
+    }
+    const countIntent = /\b(?:count|how\s+many|number\s+of|total)\b/i.test(String(question || ""));
+    const derivedStatusFilters = [];
+    for (const sourceId of Array.isArray(plan.postgresql_sources) ? plan.postgresql_sources : []) {
+      for (const table of Array.isArray(plan.required_tables) ? plan.required_tables : []) {
+        const columns = (this.contexts?.[sourceId]?.tables?.[table]?.columns || [])
+          .map(column => String(column?.name || column || "")).filter(Boolean);
+        const entity = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table] || {};
+        const candidate = {
+          source_id: sourceId,
+          table,
+          columns,
+          entity_type: entity.entity_type,
+          matched_aliases: [table, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
+        };
+        const verified = this._verified_status_filter(candidate, question) ||
+          (countIntent ? this._discovered_categorical_filter(candidate, question) : null);
+        if (verified) derivedStatusFilters.push(verified);
+      }
+    }
+    const statusIntent = this._has_unverified_status_intent(statusCandidate, question) || derivedStatusFilters.length > 0;
+    if (!statusIntent) {
+      const filters = Array.isArray(plan.filters) ? plan.filters : [];
+      const userFilters = filters.filter(filter => !this._is_status_filter(filter, plan));
+      const providerStatusClarification = plan.clarification_required?.type === "business_status_semantics";
+      if (userFilters.length === filters.length && !providerStatusClarification) return plan;
+      const sanitized = { ...plan, filters: userFilters };
+      if (providerStatusClarification) delete sanitized.clarification_required;
+      return sanitized;
+    }
+
+    let updated = plan;
+    for (const sourceId of Array.isArray(plan.postgresql_sources) ? plan.postgresql_sources : []) {
+      for (const table of Array.isArray(plan.required_tables) ? plan.required_tables : []) {
+        const tableInfo = this.contexts?.[sourceId]?.tables?.[table] || {};
+        const columns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(Boolean);
+        const entity = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table] || {};
+        const candidate = {
+          source_id: sourceId,
+          table,
+          columns,
+          entity_type: entity.entity_type,
+          matched_aliases: [table, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
+        };
+        const verified = this._verified_status_filter(candidate, question) ||
+          (countIntent ? this._discovered_categorical_filter(candidate, question) : null);
+        const statusColumn = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table]?.status_semantics?.column || verified?.field;
+        const hasStatusFilter = statusColumn && (updated.filters || []).some(filter => {
+          const field = String(filter?.field || filter?.column || filter?.column_name || "").split(".").at(-1);
+          return field.toLowerCase() === String(statusColumn).toLowerCase() && String(filter?.table || table).split(".").at(-1).toLowerCase() === table.toLowerCase();
+        });
+        if (verified && !hasStatusFilter) {
+          updated.filters = [...(updated.filters || []), verified];
+        } else if (verified && hasStatusFilter && verified.verification === "runtime_distinct_required") {
+          updated.filters = (updated.filters || []).map(filter => {
+            const field = String(filter?.field || filter?.column || filter?.column_name || "").split(".").at(-1);
+            return field.toLowerCase() === String(verified.field).toLowerCase() && String(filter?.table || table).split(".").at(-1).toLowerCase() === table.toLowerCase()
+              ? { ...filter, operator: "case_insensitive_equals", verification: verified.verification, provenance: verified.provenance }
+              : filter;
+          });
+        } else if (statusIntent && !verified && !hasStatusFilter && columns.some(column => /^(status|state|workflow_state|lifecycle_state)$/i.test(column))) {
+          return { ...updated, clarification_required: { type: "business_status_semantics", message: "I could not verify the requested status meaning, so I did not run an unfiltered retrieval." } };
+        }
+      }
+    }
+    return updated;
+  }
+
+  _is_status_filter(filter, plan) {
+    if (!filter || typeof filter !== "object" || Array.isArray(filter)) return false;
+    const parts = String(filter.field || filter.column || filter.column_name || "").split(".");
+    const table = String(filter.table || (parts.length === 2 ? parts[0] : "")).trim().toLowerCase();
+    const column = String(parts.at(-1) || "").trim().toLowerCase();
+    if (!column) return false;
+    if (/^(status|state|workflow_state|lifecycle_state)$/.test(column)) return true;
+    return (Array.isArray(plan.postgresql_sources) ? plan.postgresql_sources : []).some(sourceId => {
+      const semantics = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table]?.status_semantics;
+      return semantics?.validation_status === "validated" &&
+        String(semantics.column || "").trim().toLowerCase() === column;
+    });
+  }
+
+  _normalize_verified_status_filters(filters, sourceIds = [], requiredTables = []) {
+    if (!Array.isArray(filters)) return [];
+
+    const allowedSources = new Set((Array.isArray(sourceIds) ? sourceIds : [])
+      .map(sourceId => String(sourceId || "").trim().toLowerCase())
+      .filter(Boolean));
+
+    return filters.map(filter => {
+      if (!filter || typeof filter !== "object" || Array.isArray(filter)) return filter;
+      if (filter.quoted === true || filter.literal === true) return filter;
+
+      const operator = String(filter.operator || filter.op || "=").trim().toLowerCase();
+      if (operator !== "=") return filter;
+
+      const reference = String(filter.field || filter.column || filter.column_name || "").trim();
+      const parts = reference.split(".");
+      const table = String(filter.table || (parts.length === 2 ? parts[0] : "")).trim();
+      const column = String(parts.length === 2 ? parts[1] : reference).trim();
+      if (!table || !column || (requiredTables.length > 0 && !requiredTables.includes(table))) return filter;
+
+      const sourceCandidates = allowedSources.size > 0 ? [...allowedSources] : Object.keys(this.contexts || {});
+      const isVerifiedStatusValue = sourceCandidates.some(sourceId => {
+        const entity = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table];
+        const semantics = entity?.status_semantics;
+        if (!semantics || semantics.validation_status !== "validated" || !Array.isArray(semantics.provenance) || semantics.provenance.length === 0) return false;
+        if (String(semantics.column || "").trim().toLowerCase() !== column.toLowerCase()) return false;
+        return Object.values(semantics.mappings || {}).some(value =>
+          String(value).trim().toLowerCase() === String(filter.value ?? "").trim().toLowerCase()
+        );
+      });
+
+      return isVerifiedStatusValue
+        ? { ...filter, operator: "case_insensitive_equals" }
+        : filter;
+    });
+  }
+
+  _complete_active_context_plan(plan, question, conversationContext) {
+    const active = this._conversation_reference(conversationContext);
+    const refersBack = /\b(?:it|its|that|this|those|these|details?)\b/i.test(question);
+    if (!active || !refersBack || (plan.required_tables || []).length || plan.execution_plan) return plan;
+    const sourceId = String(active.source_id || "").trim().toLowerCase();
+    const table = String(active.table || "").trim();
+    const tableInfo = this.contexts?.[sourceId]?.tables?.[table];
+    if (!sourceId || !table || !tableInfo) return plan;
+    const stableKeys = active.stable_keys && typeof active.stable_keys === "object" ? active.stable_keys : {};
+    if (!Object.keys(stableKeys).length) return plan;
+    const safeColumns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(column => column && !isSensitiveFieldName(column)).slice(0, 20);
+    if (!safeColumns.length) return plan;
+    return { ...plan, data_sources: ["postgresql"], postgresql_sources: [sourceId], required_tables: [table], required_columns: safeColumns.map(column => `${table}.${column}`), filters: Object.entries(stableKeys).map(([column, value]) => ({ table, field: column, operator: "=", value })), operations: ["lookup"], needs_conversation_context: true, confidence: Math.max(Number(plan.confidence || 0), 0.8), reasoning: "A uniquely established conversation entity was used for a bounded, source-qualified detail lookup." };
+  }
+
+  _complete_verified_cross_source_followup(plan, question, conversationContext) {
+    const active = this._conversation_reference(conversationContext);
+    const refersBack = /\b(?:it|its|that|this|those|these|related)\b/i.test(question);
+    if (!active || !refersBack) return plan;
+
+    const sourceId = String(active.source_id || "").trim().toLowerCase();
+    const activeTable = String(active.table || "").trim();
+    const stableKeys = active.stable_keys && typeof active.stable_keys === "object" ? active.stable_keys : {};
+    const explicitMultiSource = /\b(?:both|combine|across|db1|db2|sources?)\b/i.test(question);
+    const hasDirectSameSourceTarget = findSemanticCandidates(question, this.contexts, [sourceId]).some(candidate =>
+      candidate.table !== activeTable && (this.contexts?.[sourceId]?.relationships || []).some(rel =>
+        (rel.source_table === activeTable && rel.target_table === candidate.table) ||
+        (rel.target_table === activeTable && rel.source_table === candidate.table)
+      )
+    );
+    // Prefer the shortest verified same-source relationship unless the user
+    // explicitly asks to combine sources. This avoids expanding a simple
+    // meeting-to-project question into an unnecessary DB1 dependency chain.
+    if (!explicitMultiSource && hasDirectSameSourceTarget) return plan;
+    const paths = findVerifiedPaths(question, this.contexts, null, { active });
+    const path = paths.find(candidate => candidate.steps[0]?.source_id === sourceId && candidate.steps[0]?.table === activeTable);
+    if (!path || !Object.keys(stableKeys).length) return plan;
+
+    const distinctSources = new Set(path.steps.map(step => step.source_id));
+    if (distinctSources.size < 2) return plan;
+    const first = path.steps[0];
+    const stableColumn = Object.keys(stableKeys).find(column => (this.contexts[sourceId]?.tables?.[activeTable]?.columns || []).some(item => String(item?.name || item) === column));
+    if (!stableColumn) return plan;
+    const bindings = path.steps.slice(1).map((node, index) => this._path_binding(path.steps[index], node, path.evidence_relationships));
+    if (bindings.some(binding => !binding)) {
+      return {
+        ...plan,
+        clarification_required: {
+          type: "relationship_path_unavailable",
+          message: "I could not verify an executable relationship path for that follow-up request. Please identify the record more specifically."
+        }
+      };
+    }
+    const base = (source, table, columns, filters = [], limit = 50) => ({
+      question,
+      data_sources: ["postgresql"],
+      postgresql_sources: [source],
+      required_tables: [table],
+      required_columns: columns,
+      relationships: [], filters, operations: ["lookup"], requested_metrics: [], grouping: [], sorting: [], limit,
+      entities: [], confidence: 0.9
+    });
+    const steps = path.steps.map((node, index) => {
+      const tableInfo = this.contexts[node.source_id]?.tables?.[node.table] || {};
+      const safeColumns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(column => column && !isSensitiveFieldName(column)).slice(0, 20);
+      const incomingBinding = index === 0 ? null : bindings[index - 1];
+      const outgoingBinding = index === path.steps.length - 1 ? null : bindings[index];
+      const outputColumns = Array.from(new Set([
+        node.column,
+        incomingBinding?.to_column,
+        outgoingBinding?.from_column,
+        ...(tableInfo.primary_keys || []),
+        ...safeColumns
+      ])).filter(Boolean);
+      const filters = index === 0 ? [{ table: node.table, field: stableColumn, operator: "=", value: stableKeys[stableColumn] }] : [];
+      return {
+        id: `s${index + 1}`,
+        type: index === path.steps.length - 1 ? "final_query" : "source_query",
+        source_id: node.source_id,
+        contract: base(node.source_id, node.table, outputColumns.map(column => `${node.table}.${column}`), filters),
+        depends_on: index === 0 ? [] : [`s${index}`],
+        inputs: [],
+        input_bindings: index === 0 ? [] : [{ from_step: `s${index}`, from_column: incomingBinding.from_column, to_table: node.table, to_column: incomingBinding.to_column, operator: "in" }],
+        output_columns: outputColumns,
+        purpose: `Retrieve the verified relationship-graph step for ${node.source_id}.${node.table}.`
+      };
+    });
+    return {
+      ...plan,
+      data_sources: ["postgresql"],
+      postgresql_sources: ["db1", "db2"],
+      required_tables: [], required_columns: [], relationships: [], filters: [], operations: ["lookup"],
+      execution_plan: { mode: "multi_step", steps, final_step: `s${steps.length}` },
+      semantic_path: path.steps,
+      ambiguous_context_candidates: [],
+      needs_conversation_context: true,
+      confidence: 0.9,
+      reasoning: "A verified authorized cross-source relationship path was selected from a uniquely established conversation entity."
+    };
+  }
+
+  // Resolve every runtime binding from an actual FK or validated cross-source
+  // evidence record.  A path node column is an entry point, not necessarily
+  // the value that must be passed to the next table (for example a bridge
+  // table may receive one key and emit another).
+  _path_binding(previous, current, evidenceRelationships = []) {
+    if (!previous || !current) return null;
+    const previousSource = String(previous.source_id || "").toLowerCase();
+    const currentSource = String(current.source_id || "").toLowerCase();
+    if (!previousSource || !currentSource) return null;
+    if (previousSource === currentSource) {
+      const relationship = (this.contexts?.[previousSource]?.relationships || []).find(item =>
+        (item.source_table === previous.table && item.target_table === current.table) ||
+        (item.target_table === previous.table && item.source_table === current.table)
+      );
+      if (!relationship) return null;
+      return relationship.source_table === previous.table
+        ? { from_column: relationship.source_column, to_column: relationship.target_column }
+        : { from_column: relationship.target_column, to_column: relationship.source_column };
+    }
+    for (const evidence of evidenceRelationships || []) {
+      const [left, right] = String(evidence || "").split(" -> ");
+      const parse = value => {
+        const [source_id, table, column] = String(value || "").split(".");
+        return { source_id: String(source_id || "").toLowerCase(), table, column };
+      };
+      const source = parse(left);
+      const target = parse(right);
+      if (source.source_id === previousSource && source.table === previous.table && target.source_id === currentSource && target.table === current.table) {
+        return { from_column: source.column, to_column: target.column };
+      }
+      if (target.source_id === previousSource && target.table === previous.table && source.source_id === currentSource && source.table === current.table) {
+        return { from_column: target.column, to_column: source.column };
+      }
+    }
+    return null;
+  }
+
+  _apply_active_relationship_context(plan, conversationContext, question = "") {
+    const active = this._conversation_reference(conversationContext);
+    const sourceId = String(active?.source_id || "").trim().toLowerCase();
+    const activeTable = String(active?.table || "").trim();
+    const requiresContext = plan.needs_conversation_context === true || /\b(?:it|its|that|this|those|these|related)\b/i.test(question);
+    if (!requiresContext || !sourceId || !activeTable || !this.contexts?.[sourceId] || !Array.isArray(plan.required_tables) || !plan.required_tables.length) return plan;
+    const context = this.contexts[sourceId];
+    const relationships = Array.isArray(context.relationships) ? context.relationships : [];
+    const targetTables = plan.required_tables.filter(table => String(table).toLowerCase() !== activeTable.toLowerCase());
+    const stableKeys = active.stable_keys && typeof active.stable_keys === "object" ? active.stable_keys : {};
+    // If the target carries the same discovered key, bind that key directly.
+    // Returning unchanged here used to drop the meeting constraint entirely
+    // for transcript follow-ups.
+    const directTarget = targetTables.find(table => Object.keys(stableKeys).some(column => (context.tables?.[table]?.columns || []).some(col => String(col?.name || col).toLowerCase() === String(column).toLowerCase())));
+    if (directTarget) {
+      for (const [column, value] of Object.entries(stableKeys)) {
+        const exists = (context.tables?.[directTarget]?.columns || []).some(col => String(col?.name || col).toLowerCase() === String(column).toLowerCase());
+        if (exists && !(plan.filters || []).some(filter => String(filter.table || "").toLowerCase() === String(directTarget).toLowerCase() && String(filter.field || filter.column || "").toLowerCase() === String(column).toLowerCase())) {
+          plan.filters.push({ table: directTarget, field: column, operator: "=", value });
+        }
+      }
+      plan.needs_conversation_context = true;
+      return plan;
+    }
+    const supported = relationships.filter(relationship => {
+      const left = String(relationship?.source_table || "").toLowerCase();
+      const right = String(relationship?.target_table || "").toLowerCase();
+      return targetTables.some(target => (left === activeTable.toLowerCase() && right === String(target).toLowerCase()) || (right === activeTable.toLowerCase() && left === String(target).toLowerCase()));
+    });
+    if (!supported.length) return plan;
+    // A validated direct edge is sufficient to anchor a same-source follow-up;
+    // multi-hop and cross-source paths remain the dependency planner's job.
+    plan.postgresql_sources = [sourceId];
+    plan.needs_conversation_context = true;
+    plan.required_tables = Array.from(new Set([activeTable, ...plan.required_tables]));
+    plan.relationships = Array.from(new Map([...((plan.relationships || []).map(rel => [JSON.stringify(rel), rel])), ...supported.map(rel => [JSON.stringify(rel), rel])]).values());
+    for (const [column, value] of Object.entries(stableKeys)) {
+      const exists = (context.tables?.[activeTable]?.columns || []).some(col => String(col?.name || col).toLowerCase() === String(column).toLowerCase());
+      if (exists && !(plan.filters || []).some(filter => String(filter.table || "").toLowerCase() === activeTable.toLowerCase() && String(filter.field || filter.column || "").toLowerCase() === String(column).toLowerCase())) {
+        plan.filters.push({ table: activeTable, field: column, operator: "=", value });
+      }
+    }
+    return plan;
+  }
+
+  _apply_active_context_to_execution_plan(plan, conversationContext) {
+    const active = this._conversation_reference(conversationContext);
+    const executionPlan = plan?.execution_plan;
+    if (!active || !executionPlan || !Array.isArray(executionPlan.steps)) return plan;
+
+    const sourceId = String(active.source_id || "").trim().toLowerCase();
+    const activeTable = String(active.table || "").trim();
+    const stableKeys = active.stable_keys && typeof active.stable_keys === "object" ? active.stable_keys : {};
+    const recordSet = active.record_set && typeof active.record_set === "object" ? active.record_set : null;
+    if (!sourceId || !activeTable || (!Object.keys(stableKeys).length && !Array.isArray(recordSet?.values))) return plan;
+
+    const targetStep = executionPlan.steps.find(step => {
+      const type = String(step?.type || "").toLowerCase();
+      const tables = step?.contract?.required_tables || [];
+      return ["source_query", "final_query"].includes(type) &&
+        String(step?.source_id || "").toLowerCase() === sourceId &&
+        tables.some(table => String(table).toLowerCase() === activeTable.toLowerCase());
+    });
+    if (!targetStep?.contract || !Array.isArray(targetStep.contract.filters)) return plan;
+
+    const tableInfo = this.contexts?.[sourceId]?.tables?.[activeTable] || {};
+    const columns = new Set((tableInfo.columns || []).map(column => String(column?.name || column).toLowerCase()));
+    const addFilter = (field, operator, value) => {
+      const normalizedField = String(field || "").split(".").at(-1);
+      if (!normalizedField || !columns.has(normalizedField.toLowerCase())) return;
+      const exists = targetStep.contract.filters.some(filter =>
+        String(filter?.table || "").toLowerCase() === activeTable.toLowerCase() &&
+        String(filter?.field || filter?.column || "").split(".").at(-1).toLowerCase() === normalizedField.toLowerCase()
+      );
+      if (!exists) targetStep.contract.filters.push({ table: activeTable, field: normalizedField, operator, value });
+    };
+
+    if (recordSet && Array.isArray(recordSet.values) && recordSet.values.length > 0) {
+      addFilter(recordSet.key_column, "in", recordSet.values);
+    } else {
+      for (const [field, value] of Object.entries(stableKeys)) addFilter(field, "=", value);
+    }
+    plan.needs_conversation_context = true;
+    return plan;
   }
 
   _normalizePlan(...args) {
@@ -1576,7 +2455,8 @@ The final execution plan step objects must use:
     if (
       !plan.data_sources ||
       JSON.stringify(plan.data_sources) !== JSON.stringify(["postgresql"]) ||
-      (Array.isArray(plan.required_tables) && plan.required_tables.length > 0)
+      (Array.isArray(plan.required_tables) && plan.required_tables.length > 0) ||
+      (plan.execution_plan && typeof plan.execution_plan === "object")
     ) {
       return plan;
     }
@@ -1637,7 +2517,10 @@ The final execution plan step objects must use:
 
     const bestScore = candidates[0][0];
     const best = candidates.filter(item => item[0] === bestScore);
-    const selected = best.slice(0, 2);
+    if (best.length > 1) {
+      return { ...plan, ambiguous_context_candidates: best.map(item => ({ source_id: item[1], table: item[2] })) };
+    }
+    const selected = best.slice(0, 1);
 
     const result = deepcopy(plan);
     result.postgresql_sources = Array.from(new Set(selected.map(item => item[1])));

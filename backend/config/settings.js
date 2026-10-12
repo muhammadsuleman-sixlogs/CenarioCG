@@ -74,8 +74,10 @@ export const settings = {
   // Authentication
   adminUsername: cleanEnvStr(process.env.ADMIN_USERNAME, "admin"),
   adminPassword: cleanEnvStr(process.env.ADMIN_PASSWORD, ""),
-  authSecret: cleanEnvStr(process.env.AUTH_SECRET, "default-secret"),
+  authSecret: cleanEnvStr(process.env.AUTH_SECRET, ""),
   cookieSecure: cleanEnvStr(process.env.COOKIE_SECURE, "false").toLowerCase() === "true",
+  workspaceAuthorizationJson: cleanEnvStr(process.env.WORKSPACE_AUTHORIZATION_JSON, ""),
+  defaultWorkspaceId: cleanEnvStr(process.env.DEFAULT_WORKSPACE_ID, ""),
 
   // Server
   allowOrigins: allowOriginsList,

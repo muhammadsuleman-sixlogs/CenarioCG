@@ -18,6 +18,9 @@ import { isSensitiveQuestionIntent } from "../security/sensitive_data_policy.js"
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 import { validateSqlSyntax } from "../retrieval/sql_validator.js";
 import { getConnection, getDb2Connection } from "../database/connection.js";
+import { SourceRouter } from "../planning/source_router.js";
+import { assertAuthorizedSecurityResource, assertAuthorizedSources } from "../auth/authorization.js";
+import { logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
 
 // Optional dynamic loaders for planning/retrieval components that may be migrated later
 let ComplexQueryPlanner = class {
@@ -99,6 +102,7 @@ export class RAGPipeline {
     this.planner = new QuestionPlanner();
     this.plan_validator = new QuestionPlanValidator();
     this.planValidator = this.plan_validator;
+    this.source_router = options.source_router || new SourceRouter(this.plan_validator.contexts);
 
     this.complex_query_planner = options.complex_query_planner || new ComplexQueryPlanner();
     this.complexQueryPlanner = this.complex_query_planner;
@@ -152,17 +156,150 @@ export class RAGPipeline {
 
     return {
       history,
-      entities
+      entities,
+      active_context: typeof this.context_manager.getActiveContext === "function" ? this.context_manager.getActiveContext() : null,
+      pending_reference: typeof this.context_manager.getPendingReference === "function" ? this.context_manager.getPendingReference() : null
     };
   }
 
-  async _resolveEntity(question, conversationContext) {
+  _restrictToAuthorizedSources(authorization) {
+    if (!authorization) return;
+    const allowed = new Set((authorization.postgresql_sources || []).map(source => String(source).toLowerCase()));
+    const filter = contexts => Object.fromEntries(Object.entries(contexts || {}).filter(([sourceId]) => allowed.has(String(sourceId).toLowerCase())));
+    // A pipeline can be reused by a conversation or test harness.  Always
+    // filter the original local metadata snapshot for this request, never the
+    // subset left by a prior DB1-only/DB2-only request.
+    if (!this._unrestricted_contexts) {
+      this._unrestricted_contexts = this.plan_validator.contexts;
+    }
+    const contexts = filter(this._unrestricted_contexts);
+    if (Object.keys(contexts).length === 0) {
+      const error = new Error("No authorized PostgreSQL Context Layer sources are available.");
+      error.code = "SOURCE_NOT_AUTHORIZED";
+      throw error;
+    }
+    this.plan_validator.contexts = contexts;
+    this.planner.contexts = contexts;
+    this.entity_resolver.contexts = contexts;
+    this.source_router.contexts = contexts;
+  }
+
+  _planningFailure(question, type, answer, details = []) {
+    return sanitizeApiResponse({
+      question, plan: null, plan_repaired: false, data_sources: [], postgresql_source_ids: [],
+      retrieval_status: "planning_failed", source_status: {}, evidence: {}, sources: [], answer,
+      error: { type, details }
+    });
+  }
+
+  _rewriteFollowupQuestion(question, conversationContext) {
+    const active = conversationContext?.active_context;
+    const deicticFollowup = /\b(?:it|its|that|this|those|these|above|previous|prior|related)\b|\ball\s+\d+\b/i.test(question);
+    const namedDetailRequest = /\b(?:details?|about|information)\b/i.test(question);
+    if (!active || (namedDetailRequest && !deicticFollowup) || /\b(?:[A-Za-z0-9]+-[A-Za-z0-9]+|[\w.+-]+@[\w.-]+)\b/.test(question)) return question;
+    const stable = Object.entries(active).find(([key, value]) =>
+      key !== "source_id" && key !== "workspace_id" && /(?:^|_)id$/.test(key) && value !== null && value !== undefined
+    );
+    return stable ? `${question} [resolved ${stable[0]}: ${stable[1]}]` : question;
+  }
+
+  _updateActiveEntityFromExecution(question, plan, results) {
+    const allRows = (results || []).flatMap(item => Array.isArray(item?.retrieval?.rows) ? item.retrieval.rows.map(row => ({ row, source_id: item.source_id, result: item })) : []);
+    const finalStep = plan?.execution_plan?.final_step;
+    // For a dependency plan, only the final retrieval is the answer entity.
+    // Earlier rows are bindings/provenance and must not prevent the final
+    // source-qualified record from becoming the next-turn anchor.
+    const taggedRows = finalStep
+      ? allRows.filter(item => item.result?.execution_step_id === finalStep)
+      : allRows;
+    const rows = finalStep && taggedRows.length > 0
+      ? taggedRows
+      : allRows;
+    const table = plan?.entity_target?.table || plan?.required_tables?.[0];
+    const sourceIds = [...new Set(rows.map(item => String(item.source_id || "").toLowerCase()).filter(Boolean))];
+    const isPluralReference = /\b(?:recent|latest|newest|most recent|all|list|which)\b/i.test(question);
+    if (rows.length > 1 && isPluralReference && sourceIds.length === 1 && table) {
+      const candidateKeys = Object.keys(rows[0].row).filter(key => /(?:^|_)id$/i.test(key) && rows.every(item => Object.prototype.hasOwnProperty.call(item.row, key) && item.row[key] !== null && item.row[key] !== undefined));
+      const keyColumn = candidateKeys[0];
+      const values = keyColumn ? [...new Set(rows.map(item => item.row[keyColumn]).filter(value => value !== null && value !== undefined).map(String))] : [];
+      if (keyColumn && values.length === rows.length) {
+        const priorActive = typeof this.context_manager.getActiveContext === "function" ? this.context_manager.getActiveContext() : null;
+        const inherited = priorActive?.source_id === sourceIds[0] && priorActive?.table === table ? priorActive : {};
+        this.context_manager.setActiveContext({
+          ...inherited,
+          source_id: sourceIds[0],
+          table,
+          record_set: { key_column: keyColumn, values, count: values.length },
+          validation_status: "retrieval_evidence_confirmed",
+          provenance: "successful_source_retrieval"
+        });
+        if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
+        return;
+      }
+    }
+    // A list never becomes active context. Only one real record and an explicit
+    // entity-reference question can safely establish a follow-up anchor.
+    const hasBoundReference = Boolean(plan?.needs_conversation_context) || (plan?.filters || []).some(filter => ["=", "contains"].includes(String(filter?.operator || "").toLowerCase()) && filter?.value !== undefined && filter?.value !== null);
+    const ungroundedCatalogFallback = Array.isArray(plan?.semantic_candidates) && plan.semantic_candidates.length > 0 && !hasBoundReference;
+    if (ungroundedCatalogFallback || !rows.length || !/\b(?:details?|about|show|meeting|project|company|ticket|document|transcript)\b/i.test(question) || /\b(recent|all|list)\b/i.test(question)) return;
+    const { row, source_id, result } = rows[0];
+    const sharedIdentifiers = Object.entries(row).filter(([key, value]) => {
+      if (!/(?:^|_)id$/.test(key) || value === null || value === undefined) return false;
+      return rows.every(candidate => Object.prototype.hasOwnProperty.call(candidate.row, key) && String(candidate.row[key]) === String(value));
+    });
+    // Multiple output rows can still represent one entity (for example
+    // transcript segments). Only invariant identifier values are retained.
+    const stableEntries = sharedIdentifiers.length > 0 ? sharedIdentifiers : (rows.length === 1
+      ? Object.entries(row).filter(([key, value]) => /(?:^|_)id$/.test(key) && value !== null && value !== undefined)
+      : []);
+    if (!stableEntries.length) return;
+    const invariantFields = Object.entries(row).filter(([key, value]) => rows.every(candidate => Object.prototype.hasOwnProperty.call(candidate.row, key) && String(candidate.row[key]) === String(value)));
+    const finalContract = (plan?.execution_plan?.steps || []).find(step => step.id === finalStep)?.contract;
+    const target = plan?.entity_target;
+    const resolvedTable = target?.source_id === source_id && target?.table
+      ? target.table
+      : (result?.sources?.[0]?.tables?.[0] || finalContract?.required_tables?.[0] || (Array.isArray(plan?.required_tables) ? plan.required_tables[0] : undefined));
+    const prior = (typeof this.context_manager.getActiveContext === "function" ? this.context_manager.getActiveContext() : null) || (typeof this.context_manager.getPendingReference === "function" ? this.context_manager.getPendingReference() : null);
+    const priorKeys = prior?.stable_keys && typeof prior.stable_keys === "object" ? Object.entries(prior.stable_keys) : [];
+    // A related child record (for example a transcript) must not replace the
+    // meeting/project that the user established. Keep the parent anchor when
+    // every parent key is present in the returned related evidence.
+    if (plan?.needs_conversation_context && prior?.source_id === source_id && prior?.table !== resolvedTable && priorKeys.length && priorKeys.every(([key, value]) => String(row[key]) === String(value))) {
+      this.context_manager.setActiveContext({ ...prior, validation_status: "retrieval_evidence_confirmed" });
+      if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
+      return;
+    }
+    this.context_manager.setActiveContext({ ...Object.fromEntries(invariantFields), source_id, table: resolvedTable, stable_keys: Object.fromEntries(stableEntries) });
+    if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
+  }
+
+  _rememberPendingReference(question, plan, authorizedSources) {
+    const value = extractEntitySearchText(question);
+    if (!value || !this.context_manager?.setPendingReference) return;
+    const steps = Array.isArray(plan?.execution_plan?.steps) ? plan.execution_plan.steps : [];
+    const candidates = steps.length
+      ? steps.map(step => ({ source_id: step.source_id, contract: step.contract }))
+      : (plan?.postgresql_sources || []).map(source_id => ({ source_id, contract: plan }));
+    const allowed = new Set((authorizedSources || []).map(source => String(source).toLowerCase()));
+    for (const candidate of candidates) {
+      const sourceId = String(candidate.source_id || "").toLowerCase();
+      const contract = candidate.contract || {};
+      const filter = (contract.filters || []).find(item => String(item?.value) === String(value) && item?.operator === "=");
+      const table = String(filter?.table || contract.required_tables?.[0] || "");
+      const column = String(filter?.field || filter?.column || "").split(".").at(-1);
+      if (!sourceId || !table || !column || !allowed.has(sourceId)) continue;
+      this.context_manager.setPendingReference({ source_id: sourceId, table, stable_keys: { [column]: value }, validation_status: "schema_validated_unretrieved", provenance: "explicit_user_identifier" });
+      return;
+    }
+  }
+
+  async _resolveEntity(question, conversationContext, authorizedSources = null) {
     const searchText = extractEntitySearchText(question);
     if (!searchText) {
       return;
     }
 
-    const candidates = await this.entity_resolver.resolve(searchText);
+    const candidates = await this.entity_resolver.resolve(searchText, 5, authorizedSources);
     const normalizedCandidates = normalizeEntityCandidates(candidates);
     const resolvedEntity = selectEntity(normalizedCandidates);
 
@@ -225,7 +362,7 @@ export class RAGPipeline {
     return resource;
   }
 
-  _getPostgresqlSources(plan) {
+  _getPostgresqlSources(plan, conversationContext = null, authorization = null) {
     let sources = plan.postgresql_sources || [];
 
     if (!Array.isArray(sources)) {
@@ -239,10 +376,16 @@ export class RAGPipeline {
     const executionPlan = plan.execution_plan;
     if (executionPlan && typeof executionPlan === "object") {
       const stepSources = [];
+      const missingStepSources = [];
       const steps = Array.isArray(executionPlan.steps) ? executionPlan.steps : [];
       for (const step of steps) {
         if (!step || typeof step !== "object") continue;
         const sourceId = step.source_id;
+        const stepType = String(step.type || step.step_type || "").trim().toLowerCase();
+        if ((stepType === "source_query" || stepType === "final_query") &&
+            (typeof sourceId !== "string" || !sourceId.trim())) {
+          missingStepSources.push(String(step.id || step.step_id || "unknown"));
+        }
         if (typeof sourceId === "string" && sourceId.trim()) {
           stepSources.push(sourceId.trim().toLowerCase());
           continue;
@@ -257,6 +400,11 @@ export class RAGPipeline {
           }
         }
       }
+      if (missingStepSources.length > 0) {
+        const error = new Error(`Execution plan contains executable steps without source_id: ${missingStepSources.join(", ")}`);
+        error.code = "MISSING_SOURCE_ID";
+        throw error;
+      }
       if (stepSources.length > 0) {
         sources = stepSources;
       }
@@ -270,8 +418,12 @@ export class RAGPipeline {
     }
 
     if (sources.length === 0) {
-      throw new Error("PostgreSQL was selected but no PostgreSQL source was specified.");
+      // The router may safely resolve a source from source-qualified schema
+      // requirements; it never supplies an implicit DB1 default.
+      const routed = this.source_router.route(plan, conversationContext);
+      sources = routed.postgresql_sources || [];
     }
+    if (sources.length === 0) throw new Error("PostgreSQL was selected but no PostgreSQL source was specified.");
 
     let availableSources;
     try {
@@ -286,6 +438,7 @@ export class RAGPipeline {
         `Question plan selected unavailable PostgreSQL source(s): ${JSON.stringify(invalidSources)}`
       );
     }
+    if (authorization) assertAuthorizedSources(authorization, sources);
 
     return sources;
   }
@@ -434,6 +587,19 @@ export class RAGPipeline {
 
       const sqlGenerator = this._getSqlGenerator(sourceId);
 
+      const runtimeCategoricalFilters = (contractDict.filters || []).filter(filter => filter?.verification === "runtime_distinct_required");
+      for (const filter of runtimeCategoricalFilters) {
+        const table = String(filter.table || "").trim();
+        const field = String(filter.field || filter.column || filter.column_name || "").split(".").at(-1);
+        if (!table || !field) throw Object.assign(new Error("Categorical filter metadata is incomplete."), { code: "CATEGORICAL_FILTER_INVALID" });
+        const requested = String(filter.value ?? "");
+        const evidenceQuery = sqlGenerator.generateCategoricalExistence(table, field, requested, sourceId);
+        const evidence = await this._executePostgresqlLive(evidenceQuery.query, sourceId, { parameters: evidenceQuery.parameters });
+        if (!Array.isArray(evidence?.rows) || evidence.rows.length === 0) {
+          throw Object.assign(new Error(`Requested categorical value was not verified for ${sourceId}.${table}.${field}.`), { code: "CATEGORICAL_VALUE_UNVERIFIED" });
+        }
+      }
+
       let sql = sqlGenerator.generate(contractDict, sourceId, runtimeBindings);
       let repaired = false;
       let retrieval;
@@ -481,7 +647,7 @@ export class RAGPipeline {
         sources: Array.isArray(source) ? source : [source]
       };
     } catch (exc) {
-      console.warn("POSTGRESQL RETRIEVAL FAILED:", sourceId, exc.name || "Error", exc.message);
+      logRuntimeDiagnostic(exc, { requestId: this.request_id, sourceId, phase: "postgresql_retrieval" });
 
       return {
         source_type: "postgresql",
@@ -513,14 +679,18 @@ export class RAGPipeline {
 
     try {
       return await this.executor.execute(query, sourceId, parameters);
-    } catch {
+    } catch (error) {
+      // Only the built-in executor may use the legacy direct-connection
+      // fallback. Injected/offline executors must surface their failure so a
+      // verification error cannot accidentally open a live connection.
+      if (!(this.executor instanceof RetrievalExecutor)) throw error;
       // Fallback direct execution
       validateReadOnlyQuery(query);
       validateSqlSyntax(query);
 
       const client = sourceId === "db2" ? await getDb2Connection() : await getConnection("db1");
+      let queryError = null;
       try {
-        await client.query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;").catch(() => {});
         const res = await client.query(query, parameters);
         const rows = res.rows || [];
         const columns = (res.fields || []).map(f => f.name);
@@ -530,9 +700,12 @@ export class RAGPipeline {
           columns,
           retrieval_status: rows.length > 0 ? "success_with_data" : "success_empty"
         };
+      } catch (error) {
+        queryError = error;
+        throw error;
       } finally {
         if (typeof client.release === "function") {
-          client.release();
+          client.release(queryError || undefined);
         } else if (typeof client.close === "function") {
           client.close();
         }
@@ -652,11 +825,30 @@ export class RAGPipeline {
   }
 
   _prepareEvidence(postgresResults, securityResult, complexExecution = null) {
-    const evidence = { sources: [] };
+    const evidence = { sources: [], items: [] };
+    let evidenceSequence = 0;
+    const appendLineage = (result) => {
+      const rows = Array.isArray(result?.retrieval?.rows) ? result.retrieval.rows : [];
+      const sources = Array.isArray(result?.sources) ? result.sources : [];
+      const table = sources[0]?.tables?.[0] || null;
+      for (const row of rows) {
+        evidence.items.push({
+          evidence_id: `e${++evidenceSequence}`,
+          source_id: result.source_id || null,
+          execution_step_id: result.execution_step_id || result.step_id || null,
+          table,
+          retrieval_status: result.retrieval_status || "unknown",
+          retrieved_at: result.retrieved_at || null,
+          truncated: Boolean(result.retrieval?.truncated),
+          row
+        });
+      }
+    };
 
     if (complexExecution !== null && complexExecution !== undefined) {
       const stepEvidence = [];
       for (const postgresResult of postgresResults) {
+        appendLineage(postgresResult);
         const retrieval = postgresResult.retrieval || {};
         const sources = postgresResult.sources || [];
         const prepared = this.evidence_manager.prepare(retrieval, sources);
@@ -691,6 +883,7 @@ export class RAGPipeline {
       const combinedProvenance = [];
 
       for (const postgresResult of postgresResults) {
+        appendLineage(postgresResult);
         const retrieval = postgresResult.retrieval || {};
         const rows = Array.isArray(retrieval.rows) ? retrieval.rows : [];
         combinedRows.push(...rows);
@@ -747,6 +940,10 @@ export class RAGPipeline {
     if (securityResult !== null && securityResult !== undefined) {
       const securityRetrieval = securityResult.retrieval || {};
       const securitySources = Array.isArray(securityResult.sources) ? securityResult.sources : [];
+      const securityRows = Array.isArray(securityRetrieval.events) ? securityRetrieval.events : [];
+      for (const row of securityRows) {
+        evidence.items.push({ evidence_id: `e${++evidenceSequence}`, source_id: "security_logs", execution_step_id: null, table: null, retrieval_status: securityResult.retrieval_status || "unknown", retrieved_at: securityRetrieval.retrieved_at || null, freshness_status: securityRetrieval.freshness_status || "unknown", truncated: Boolean(securityRetrieval.truncated), row });
+      }
 
       evidence.security_logs = {
         source_type: "security_logs_api",
@@ -926,18 +1123,65 @@ export class RAGPipeline {
     return [postgresResults, retrievalContracts, complexExecution];
   }
 
+  async _executeIndependentPostgresql(validatedPlan) {
+    const postgresResults = [];
+    const retrievalContracts = {};
+    const steps = Array.isArray(validatedPlan?.execution_plan?.steps) ? validatedPlan.execution_plan.steps : [];
+    for (const step of steps) {
+      const sourceId = String(step?.source_id || "").trim().toLowerCase();
+      if (!sourceId) {
+        const error = new Error(`Independent execution step '${step?.id || "unknown"}' requires source_id.`);
+        error.code = "MISSING_SOURCE_ID";
+        throw error;
+      }
+      const sourcePlan = step.contract && typeof step.contract === "object" ? JSON.parse(JSON.stringify(step.contract)) : JSON.parse(JSON.stringify(validatedPlan));
+      try {
+        const sourceValidation = this._buildSourceValidation(sourcePlan, sourceId);
+        if (!sourceValidation) throw new Error(`Source context unavailable for independent step '${step.id}'.`);
+        const contract = createRetrievalContract(sourceValidation.plan);
+        const contractDict = typeof contract.to_dict === "function" ? contract.to_dict() : contract.toDict();
+        retrievalContracts[step.id] = contractDict;
+        const result = await this._retrievePostgresql(contractDict, sourceId);
+        result.execution_step_id = step.id;
+        result.execution_purpose = step.purpose || "Independent source retrieval.";
+        postgresResults.push(result);
+      } catch (error) {
+        logRuntimeDiagnostic(error, { requestId: this.request_id, sourceId, stepId: step.id, phase: "independent_postgresql_retrieval" });
+        postgresResults.push({
+          source_type: "postgresql",
+          source_id: sourceId,
+          execution_step_id: step.id,
+          execution_purpose: step.purpose || "Independent source retrieval.",
+          retrieval_status: "retrieval_failed",
+          retrieval: { rows: [], row_count: 0, columns: [] },
+          sql: null,
+          repaired: false,
+          sources: [],
+          error: { type: error.name || "Error", message: String(error.message || error) }
+        });
+      }
+    }
+    return [postgresResults, retrievalContracts, null];
+  }
+
   async ask(question, workspaceIdOrContext = null) {
     const cleanQuestion = this._validateQuestion(question);
 
     let workspaceId = null;
     let explicitConversationContext = null;
 
+    let authorization = null;
+    this.request_id = null;
     if (
       workspaceIdOrContext &&
       typeof workspaceIdOrContext === "object" &&
       (workspaceIdOrContext.history || workspaceIdOrContext.entities)
     ) {
       explicitConversationContext = workspaceIdOrContext;
+    } else if (workspaceIdOrContext && typeof workspaceIdOrContext === "object") {
+      workspaceId = this._validateWorkspaceId(workspaceIdOrContext.workspace_id);
+      authorization = workspaceIdOrContext.authorization || null;
+      this.request_id = workspaceIdOrContext.request_id || null;
     } else {
       workspaceId = this._validateWorkspaceId(workspaceIdOrContext);
     }
@@ -964,9 +1208,27 @@ export class RAGPipeline {
 
     const conversationContext = explicitConversationContext || this._getConversationContext();
 
-    await this._resolveEntity(cleanQuestion, conversationContext);
+    const authorizedPostgresqlSources = authorization?.postgresql_sources || null;
+    this._restrictToAuthorizedSources(authorization);
+    await this._resolveEntity(cleanQuestion, conversationContext, authorizedPostgresqlSources);
 
-    const rawPlan = await this.planner.plan(cleanQuestion, conversationContext);
+    const planningQuestion = this._rewriteFollowupQuestion(cleanQuestion, conversationContext);
+    let rawPlan;
+    try {
+      rawPlan = await this.planner.plan(planningQuestion, conversationContext);
+    } catch (error) {
+      return this._planningFailure(cleanQuestion, "PLAN_SCHEMA_INVALID", "I could not identify one verified, authorized data path for that request. Please specify the record or data area you want to inspect.");
+    }
+    if (rawPlan.clarification_required && typeof rawPlan.clarification_required.message === "string") {
+      return this._planningFailure(cleanQuestion, "BUSINESS_CLARIFICATION", rawPlan.clarification_required.message);
+    }
+    if (
+      Array.isArray(rawPlan.ambiguous_context_candidates) &&
+      rawPlan.ambiguous_context_candidates.length > 1 &&
+      rawPlan.candidate_resolution?.mode !== "independent"
+    ) {
+      return this._planningFailure(cleanQuestion, "SOURCE_AMBIGUOUS", "I found multiple schema-supported places that could answer this. Please specify which record or data area you mean.");
+    }
     let validation = this.plan_validator.validate(rawPlan);
 
     let planRepaired = false;
@@ -979,6 +1241,16 @@ export class RAGPipeline {
 
       if (repairFn) {
         const repairedPlan = await repairFn(cleanQuestion, rawPlan, validationErrors, conversationContext);
+        if (repairedPlan.clarification_required && typeof repairedPlan.clarification_required.message === "string") {
+          return this._planningFailure(cleanQuestion, "BUSINESS_CLARIFICATION", repairedPlan.clarification_required.message);
+        }
+        if (
+          Array.isArray(repairedPlan.ambiguous_context_candidates) &&
+          repairedPlan.ambiguous_context_candidates.length > 1 &&
+          repairedPlan.candidate_resolution?.mode !== "independent"
+        ) {
+          return this._planningFailure(cleanQuestion, "SOURCE_AMBIGUOUS", "I found multiple schema-supported places that could answer this. Please specify which record or data area you mean.");
+        }
         const repairedValidation = this.plan_validator.validate(repairedPlan);
 
         if (!repairedValidation.valid) {
@@ -1026,9 +1298,22 @@ export class RAGPipeline {
 
     const dataSources = this._getDataSources(validatedPlan);
     const securityResource = this._getSecurityResource(validatedPlan, dataSources);
+    if (authorization) assertAuthorizedSecurityResource(authorization, securityResource);
     validatedPlan.security_resource = securityResource;
 
-    const postgresqlSources = this._getPostgresqlSources(validatedPlan);
+    let postgresqlSources;
+    try {
+      postgresqlSources = this._getPostgresqlSources(validatedPlan, conversationContext, authorization);
+    } catch (error) {
+      logRuntimeDiagnostic(error, { requestId: this.request_id, phase: "source_resolution" });
+      const message = String(error?.message || "");
+      const ambiguous = /ambiguous|deterministically identify/i.test(message);
+      return this._planningFailure(cleanQuestion, ambiguous ? "SOURCE_AMBIGUOUS" : "SOURCE_NOT_AUTHORIZED", ambiguous
+        ? "I could not safely determine which authorized data source should answer this. Please provide a more specific record or context."
+        : "The required authorized data source is unavailable for this question.");
+    }
+
+    this._rememberPendingReference(cleanQuestion, validatedPlan, postgresqlSources);
 
     let postgresResults = [];
     const retrievalContracts = {};
@@ -1037,8 +1322,16 @@ export class RAGPipeline {
     if (postgresqlSources.length > 0) {
       const shouldDecomposeFn = this.complex_query_planner.should_decompose || this.complex_query_planner.shouldDecompose;
       const shouldDecompose = typeof shouldDecomposeFn === "function" && shouldDecomposeFn.call(this.complex_query_planner, cleanQuestion, validatedPlan);
+      const independentPlan = validatedPlan.candidate_resolution?.mode === "independent" &&
+        Array.isArray(validatedPlan.execution_plan?.steps) &&
+        validatedPlan.execution_plan.steps.every(step => Array.isArray(step?.depends_on) && step.depends_on.length === 0 && Array.isArray(step?.input_bindings) && step.input_bindings.length === 0);
 
-      if (shouldDecompose) {
+      if (independentPlan) {
+        const independentRes = await this._executeIndependentPostgresql(validatedPlan);
+        postgresResults = independentRes[0];
+        Object.assign(retrievalContracts, independentRes[1]);
+        complexExecution = independentRes[2];
+      } else if (shouldDecompose) {
         try {
           const complexRes = await this._executeComplexPostgresql(cleanQuestion, validatedPlan);
           postgresResults = complexRes[0];
@@ -1106,6 +1399,7 @@ export class RAGPipeline {
     }
 
     const sourceStatus = this._buildSourceStatus(postgresResults, securityResult);
+    this._updateActiveEntityFromExecution(cleanQuestion, validatedPlan, postgresResults);
     const retrievalStates = Object.values(sourceStatus).map(item => item.retrieval_status);
 
     const successfulSources = retrievalStates.filter(state =>
@@ -1144,7 +1438,10 @@ export class RAGPipeline {
       return sanitizeApiResponse(result);
     }
 
+    const candidateResolutionResult = this._resolveIndependentCandidateEvidence(validatedPlan, postgresResults);
     const rawEvidence = this._prepareEvidence(postgresResults, securityResult, complexExecution);
+    if (validatedPlan.candidate_resolution) rawEvidence.candidate_resolution = validatedPlan.candidate_resolution;
+    if (candidateResolutionResult) rawEvidence.candidate_resolution_result = candidateResolutionResult;
     const evidence = sanitizeEvidence(rawEvidence);
 
     // Generate answer
@@ -1206,6 +1503,8 @@ export class RAGPipeline {
       answer_generation_error: answerGenerationError
     };
 
+    if (candidateResolutionResult) result.candidate_resolution_result = candidateResolutionResult;
+
     if (postgresResults.length === 1) {
       const pr = postgresResults[0];
       result.sql = pr.sql;
@@ -1237,6 +1536,46 @@ export class RAGPipeline {
     }
 
     return sanitizeApiResponse(result);
+  }
+
+  _resolveIndependentCandidateEvidence(plan, postgresResults) {
+    const resolution = plan?.candidate_resolution;
+    if (!resolution || resolution.mode !== "independent") return null;
+    const targets = Array.isArray(resolution.targets) ? resolution.targets : [];
+    const perSource = postgresResults.map(result => {
+      const rows = Array.isArray(result?.retrieval?.rows) ? result.retrieval.rows : [];
+      const first = rows[0] || {};
+      const rawCount = first.count ?? first.total_count ?? first["COUNT(*)"];
+      const count = rawCount !== undefined && rawCount !== null && rawCount !== "" ? Number(rawCount) : rows.length;
+      return {
+        source_id: result.source_id || null,
+        table: targets.find(target => target.source_id === result.source_id)?.table || null,
+        retrieval_status: result.retrieval_status || "unknown",
+        count: Number.isFinite(count) ? count : null
+      };
+    });
+
+    const output = {
+      overlap_status: resolution.overlap_status || "unknown",
+      deduplication: resolution.deduplication || "not_performed",
+      per_source: perSource,
+      combined_total: null
+    };
+
+    if (resolution.deduplication !== "verified_identity") return output;
+
+    const identityValues = [];
+    for (const result of postgresResults) {
+      const target = targets.find(item => item.source_id === result.source_id);
+      const identityColumn = target?.identity_key;
+      if (!identityColumn) return output;
+      for (const row of Array.isArray(result?.retrieval?.rows) ? result.retrieval.rows : []) {
+        const value = row[identityColumn] ?? row[String(identityColumn).split(".").pop()];
+        if (value !== undefined && value !== null && String(value).trim()) identityValues.push(String(value).trim().toLowerCase());
+      }
+    }
+    output.combined_total = new Set(identityValues).size;
+    return output;
   }
 }
 

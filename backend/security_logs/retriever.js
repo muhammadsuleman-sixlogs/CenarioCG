@@ -71,7 +71,7 @@ export class SecurityLogRetriever {
     return this._extract_data(response);
   }
 
-  _source_metadata({ resource, retrieved_at, workspace_id = null }) {
+  _source_metadata({ resource, retrieved_at, workspace_id = null, freshness = null }) {
     const metadata = {
       source_type: this.SOURCE_TYPE,
       source_id: this.SOURCE_ID,
@@ -83,6 +83,7 @@ export class SecurityLogRetriever {
     if (workspace_id) {
       metadata.workspace_id = workspace_id;
     }
+    if (freshness && typeof freshness === "object") Object.assign(metadata, freshness);
 
     return metadata;
   }
@@ -147,8 +148,7 @@ export class SecurityLogRetriever {
     const retrieved_at = this._now_iso();
 
     const result = this._source_metadata({
-      resource: "security_logs",
-      retrieved_at,
+      resource: "security_logs", retrieved_at, freshness: response.__cenariocg_freshness,
     });
 
     return {
@@ -217,8 +217,7 @@ export class SecurityLogRetriever {
     const retrieved_at = this._now_iso();
 
     const result = this._source_metadata({
-      resource: "cli_audit_logs",
-      retrieved_at,
+      resource: "cli_audit_logs", retrieved_at, freshness: response.__cenariocg_freshness,
     });
 
     return {
@@ -283,8 +282,7 @@ export class SecurityLogRetriever {
     const retrieved_at = this._now_iso();
 
     const result = this._source_metadata({
-      resource: "security_logs_summary",
-      retrieved_at,
+      resource: "security_logs_summary", retrieved_at, freshness: response.__cenariocg_freshness,
     });
 
     return {
@@ -361,7 +359,7 @@ export class SecurityLogRetriever {
     const result = this._source_metadata({
       resource: "workspace_security_logs",
       retrieved_at,
-      workspace_id,
+      workspace_id, freshness: response.__cenariocg_freshness,
     });
 
     return {
@@ -416,7 +414,7 @@ export class SecurityLogRetriever {
 
     const result = this._source_metadata({
       resource: "workspace_siem_status",
-      retrieved_at,
+      retrieved_at, freshness: response.__cenariocg_freshness,
       workspace_id,
     });
 
@@ -444,7 +442,7 @@ export class SecurityLogRetriever {
 
     const result = this._source_metadata({
       resource: "security_overview",
-      retrieved_at,
+      retrieved_at, freshness: response.__cenariocg_freshness,
     });
 
     result.data = this._extract_data(response);

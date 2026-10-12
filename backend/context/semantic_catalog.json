@@ -1,0 +1,75 @@
+{
+  "catalog_version": 1,
+  "technical_fingerprint": "f2bcae67c58503e9d8ee51d7f53e9b91ba7514bd812d5b601df25944998dd05f",
+  "validation_status": "validated",
+  "provenance": {
+    "kind": "application_owned_semantic_overlay",
+    "authority": "schema_and_repository_documentation",
+    "business_approval_required_for_new_mappings": true
+  },
+  "sources": {
+    "db1": {
+      "entities": {
+        "project_details": {
+          "entity_type": "project",
+          "description": "Project execution and operational detail records.",
+          "synonyms": ["project", "projects", "project details"],
+          "source_qualified_meaning": "DB1 project-management project record",
+          "provenance": ["schema:project_details", "README.md:db1-project-management"]
+        }
+      }
+    },
+    "db2": {
+      "entities": {
+        "projects": {
+          "entity_type": "project",
+          "description": "Project intelligence records used to connect meetings and project insights.",
+          "synonyms": ["project", "projects", "project intelligence"],
+          "source_qualified_meaning": "DB2 project-intelligence project record",
+          "provenance": ["schema:projects", "README.md:db2-meeting-intelligence"]
+        },
+        "sessions": {
+          "entity_type": "meeting",
+          "description": "Meeting/session records containing meeting titles and creation time.",
+          "synonyms": ["meeting", "meetings", "meeting session", "call"],
+          "source_qualified_meaning": "DB2 meeting session",
+          "ordering": {"column": "created_at", "meaning": "session_record_creation_time"},
+          "provenance": ["schema:sessions", "README.md:meeting-intelligence"]
+        },
+        "meeting_summaries": {
+          "entity_type": "meeting_summary",
+          "description": "Summaries associated with meetings and sessions.",
+          "synonyms": ["meeting summary", "meeting summaries", "meeting notes"],
+          "source_qualified_meaning": "DB2 generated meeting summary",
+          "ordering": {"column": null, "meaning": "not_available_in_catalog"},
+          "provenance": ["schema:meeting_summaries", "README.md:meeting-intelligence"]
+        },
+        "transcripts": {
+          "entity_type": "transcript",
+          "description": "Transcript records associated with meetings and sessions.",
+          "synonyms": ["transcript", "transcripts", "meeting transcript"],
+          "source_qualified_meaning": "DB2 meeting transcript",
+          "ordering": {"column": null, "meaning": "not_available_in_catalog"},
+          "provenance": ["schema:transcripts", "README.md:meeting-intelligence"]
+        }
+      }
+    }
+  },
+  "verified_paths": [
+    {
+      "id": "db1-project-display-to-db2-project-code-to-db2-session-project",
+      "purpose": "project_to_meetings",
+      "steps": [
+        {"source_id": "db1", "table": "project_details", "column": "project_id_display"},
+        {"source_id": "db2", "table": "projects", "column": "project_code"},
+        {"source_id": "db2", "table": "sessions", "column": "project_id"}
+      ],
+      "evidence_relationships": [
+        "db1.project_details.project_id_display -> db2.projects.project_code",
+        "db2.sessions.project_id -> db2.projects.project_id"
+      ],
+      "validation_status": "validated",
+      "provenance": ["cross_source_relationships.json", "context_db2.json"]
+    }
+  ]
+}

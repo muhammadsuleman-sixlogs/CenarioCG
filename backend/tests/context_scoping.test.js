@@ -23,8 +23,12 @@ test("Regression Test 1: 'show details of meta briefing meeting' -> 'does it hav
   pipeline._updateActiveEntityFromExecution(turn1Question, { required_tables: ["sessions"] }, [
     { source_id: "db2", retrieval: { rows: turn1Rows } }
   ]);
-  // General list query should NOT lock onto a single meeting as active context
-  assert.strictEqual(pipeline.context_manager.getActiveContext(), null);
+  // General list query retains a plural source-qualified record set, never one meeting.
+  assert.deepEqual(pipeline.context_manager.getActiveContext().record_set, {
+    key_column: "session_id",
+    values: turn1Rows.map(row => row.session_id),
+    count: 5
+  });
 
   // Turn 2: "show details of meta briefing meeting" (resolves to specific session)
   const turn2Question = "show details of meta briefing meeting";
@@ -83,6 +87,66 @@ test("Regression Test 1: 'show details of meta briefing meeting' -> 'does it hav
 
   assert.ok(sql.includes(`FROM "transcripts"`), "Must query transcripts table");
   assert.ok(sql.includes(`"session_id" = '${metaBriefingSessionId}'`), "Must filter WHERE session_id = <meta briefing session>");
+});
+
+test("complex follow-up preserves the established parent identity in the first execution step", () => {
+  const planner = new QuestionPlanner({ db2: loadContext("db2") });
+  const active = {
+    source_id: "db2",
+    table: "sessions",
+    stable_keys: { meeting_id: "vou-awaw-ypu" }
+  };
+  const plan = planner._normalize_plan({
+    data_sources: ["postgresql"],
+    postgresql_sources: ["db2"],
+    required_tables: [],
+    required_columns: [],
+    filters: [],
+    operations: ["lookup"],
+    needs_conversation_context: true,
+    execution_plan: {
+      mode: "multi_step",
+      final_step: "s2",
+      steps: [
+        { id: "s1", type: "source_query", source_id: "db2", contract: { required_tables: ["sessions"], required_columns: ["sessions.project_id"], filters: [], operations: ["lookup"] }, depends_on: [], input_bindings: [] },
+        { id: "s2", type: "final_query", source_id: "db2", contract: { required_tables: ["projects"], required_columns: ["projects.project_id"], filters: [], operations: ["lookup"] }, depends_on: ["s1"], input_bindings: [{ from_step: "s1", from_column: "project_id", to_table: "projects", to_column: "project_id", operator: "in" }] }
+      ]
+    }
+  }, "Which project is associated with it?", { active_context: active });
+  assert.deepEqual(plan.execution_plan.steps[0].contract.filters, [{ table: "sessions", field: "meeting_id", operator: "=", value: "vou-awaw-ypu" }]);
+  assert.deepEqual(plan.execution_plan.steps[1].contract.filters, []);
+});
+
+test("plural list follow-ups resolve above/previous records to source-qualified IDs", () => {
+  const pipeline = new RAGPipeline();
+  const rows = [
+    { session_id: "s-1", meeting_title: "alpha" },
+    { session_id: "s-2", meeting_title: "beta" },
+    { session_id: "s-3", meeting_title: "gamma" },
+    { session_id: "s-4", meeting_title: "delta" },
+    { session_id: "s-5", meeting_title: "epsilon" }
+  ];
+  pipeline._updateActiveEntityFromExecution(
+    "show me recent meetings",
+    { execution_plan: { final_step: "s1" }, required_tables: ["sessions"] },
+    [{ source_id: "db2", execution_step_id: undefined, retrieval: { rows } }]
+  );
+
+  const active = pipeline.context_manager.getActiveContext();
+  assert.deepEqual(active.record_set, { key_column: "session_id", values: ["s-1", "s-2", "s-3", "s-4", "s-5"], count: 5 });
+
+  const plan = pipeline.planner._build_metadata_fallback_plan(
+    "show me details of above meetings",
+    { active_context: active }
+  );
+  assert.deepEqual(plan.filters, [{ table: "sessions", field: "session_id", operator: "in", value: ["s-1", "s-2", "s-3", "s-4", "s-5"] }]);
+  assert.ok(!JSON.stringify(plan).toLowerCase().includes("meeting_title.*above"));
+  const sql = new SQLGenerator(loadContext("db2"), "db2").generate(plan, "db2");
+  assert.match(sql, /"session_id"\s+IN\s*\(/i);
+  assert.doesNotMatch(sql, /above/i);
+
+  const noIdentityPlan = pipeline.planner._build_metadata_fallback_plan("show me details of above meetings");
+  assert.ok(!(noIdentityPlan?.filters || []).some(filter => String(filter.value || "").toLowerCase() === "above"));
 });
 
 test("Regression Test 2: Follow-up 'how many action items?' stays scoped to the same session", async () => {

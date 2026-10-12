@@ -58,6 +58,10 @@ export function createSession(username) {
 }
 
 export function validateSession(session) {
+  return Boolean(getSessionPrincipalFromToken(session));
+}
+
+export function getSessionPrincipalFromToken(session) {
   if (!session || typeof session !== "string") {
     return false;
   }
@@ -93,9 +97,10 @@ export function validateSession(session) {
       return false;
     }
 
-    return true;
+    if (!data || typeof data.username !== "string" || !data.username.trim()) return null;
+    return data.username;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -142,13 +147,16 @@ export function setSessionCookie(res, session) {
 
 export function authenticateRequest(req) {
   const session = getSessionFromRequest(req);
-  if (!validateSession(session)) {
+  const principal = getSessionPrincipalFromToken(session);
+  if (!principal) {
     const error = new Error("Authentication required.");
     error.statusCode = 401;
     error.status = 401;
     error.detail = "Authentication required.";
     throw error;
   }
+  req.auth = { principal };
+  return req.auth;
 }
 
 export function loginUser(username, password, res = null) {
@@ -192,6 +200,7 @@ export default {
   getCookieSettings,
   createSession,
   validateSession,
+  getSessionPrincipalFromToken,
   getSessionFromRequest,
   setSessionCookie,
   authenticateRequest,

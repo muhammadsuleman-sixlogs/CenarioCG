@@ -99,6 +99,12 @@ export class ContextManager {
 
     this.history = [];
     this.entities = [];
+    this.active_context = null;
+    // A user can supply an identifier while the source is temporarily
+    // unavailable. Keep only the schema-validated lookup contract so a
+    // follow-up can retry it; this is deliberately not an active entity or
+    // a claim that the record exists.
+    this.pending_reference = null;
   }
 
   // ------------------------------------------------------------------
@@ -317,6 +323,22 @@ export class ContextManager {
     return this.get_last_entities();
   }
 
+  setActiveContext(entity) {
+    if (!entity || typeof entity !== "object" || Array.isArray(entity)) throw new Error("Active context must be an object.");
+    this.active_context = this._bound_object(deepClone(entity), this.max_entity_chars);
+  }
+
+  getActiveContext() { return this.active_context ? deepClone(this.active_context) : null; }
+  clearActiveContext() { this.active_context = null; }
+
+  setPendingReference(reference) {
+    if (!reference || typeof reference !== "object" || Array.isArray(reference)) throw new Error("Pending reference must be an object.");
+    this.pending_reference = this._bound_object(deepClone(reference), this.max_entity_chars);
+  }
+
+  getPendingReference() { return this.pending_reference ? deepClone(this.pending_reference) : null; }
+  clearPendingReference() { this.pending_reference = null; }
+
   // ------------------------------------------------------------------
   // Planner-facing context
   // ------------------------------------------------------------------
@@ -325,6 +347,8 @@ export class ContextManager {
     return {
       history: this.get_history(),
       entities: this.get_entities(),
+      active_context: this.getActiveContext(),
+      pending_reference: this.getPendingReference(),
       authority: {
         conversation_history: "reference_only",
         resolved_entities: "reference_only",
@@ -344,6 +368,8 @@ export class ContextManager {
   clear() {
     this.history = [];
     this.entities = [];
+    this.active_context = null;
+    this.pending_reference = null;
   }
 }
 

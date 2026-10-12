@@ -22,7 +22,9 @@ import { validateSqlSyntax } from "./sql_validator.js";
  */
 export class RetrievalExecutor {
   static CONNECTIONS = {
-    db1: getConnection,
+    // getConnection requires an explicit source. Keep the source binding at
+    // the final execution boundary so an empty identifier cannot reach getPool.
+    db1: () => getConnection("db1"),
     db2: getDb2Connection,
   };
 
@@ -43,12 +45,6 @@ export class RetrievalExecutor {
     const connection = await connectionFactory();
 
     try {
-      // Enforce read-only session
-      if (typeof connection.query === "function") {
-        await connection.query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;");
-        await connection.query("SET default_transaction_read_only = on;");
-      }
-
       // Convert %s placeholders to $1, $2, ... for node-postgres if needed
       let pgQuery = validQuery;
       let finalParams = normalized_parameters;
@@ -96,11 +92,15 @@ export class RetrievalExecutor {
 
   _validate_source(sourceId) {
     if (!sourceId || typeof sourceId !== "string" || !sourceId.trim()) {
-      throw new Error("source_id must be a non-empty string.");
+      const error = new Error("source_id must be a non-empty string.");
+      error.code = "MISSING_SOURCE_ID";
+      throw error;
     }
     const normalized = sourceId.trim().toLowerCase();
     if (!Object.prototype.hasOwnProperty.call(RetrievalExecutor.CONNECTIONS, normalized)) {
-      throw new Error(`Unsupported PostgreSQL source: ${normalized}`);
+      const error = new Error(`Unsupported PostgreSQL source: ${normalized}`);
+      error.code = "UNSUPPORTED_SOURCE_ID";
+      throw error;
     }
     return normalized;
   }
@@ -110,8 +110,13 @@ export class RetrievalExecutor {
       throw new Error("query must be a non-empty string.");
     }
     const normalized = query.trim();
-    validateReadOnlyQuery(normalized);
-    validateSqlSyntax(normalized);
+    try {
+      validateReadOnlyQuery(normalized);
+      validateSqlSyntax(normalized);
+    } catch (error) {
+      if (!error.code) error.code = "SQL_VALIDATION_ERROR";
+      throw error;
+    }
     return normalized;
   }
 

@@ -32,6 +32,7 @@ import { sanitizeSchemaContext } from "../security/sensitive_data_policy.js";
 export class SQLGenerator {
   static ALLOWED_OPERATORS = new Set([
     "=",
+    "case_insensitive_equals",
     "!=",
     "<>",
     ">",
@@ -126,6 +127,26 @@ export class SQLGenerator {
     validateSqlSyntax(sql);
 
     return sql;
+  }
+
+  generateCategoricalExistence(table_name, column_name, value, source_id = null) {
+    const active_source_id = this._resolve_source_id(source_id, { source_id: this.source_id });
+    if (active_source_id !== this.source_id) {
+      throw new Error(
+        `SQLGenerator source mismatch: generator is bound to '${this.source_id}', ` +
+          `but execution requested '${active_source_id}'.`
+      );
+    }
+
+    const table = this._resolve_table(table_name);
+    const column = this._resolve_column(table, column_name);
+    const query = this._normalize_sql(
+      `SELECT 1 AS "exists" FROM ${this._quote_identifier(table)} ` +
+      `WHERE ${this._qualified_identifier(table, column)} ILIKE $1 LIMIT 1`
+    );
+    validateReadOnlyQuery(query);
+    validateSqlSyntax(query);
+    return { query, parameters: [String(value ?? "")] };
   }
 
   repair(query, database_error, contract, source_id = null, runtime_bindings = null) {
@@ -1139,6 +1160,10 @@ export class SQLGenerator {
 
     if (operator === "is_not_null") {
       return `${qualified} IS NOT NULL`;
+    }
+
+    if (operator === "case_insensitive_equals") {
+      return `${qualified} ILIKE ${this._sql_literal(String(value))}`;
     }
 
     if (operator === "in") {

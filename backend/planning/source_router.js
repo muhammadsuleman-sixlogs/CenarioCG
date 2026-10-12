@@ -1,4 +1,5 @@
 import { loadAllContexts } from "../context/context_store.js";
+import { findSemanticCandidates } from "../context/semantic_catalog.js";
 
 /**
  * Resolve the smallest PostgreSQL source set required by a validated plan.
@@ -60,12 +61,19 @@ export class SourceRouter {
 
     // Once the planner starts emitting a per-step execution plan, those
     // step-level source IDs become authoritative.
-    const queryPlan = plan.query_plan;
+    const queryPlan = plan.execution_plan || plan.query_plan;
     if (queryPlan && typeof queryPlan === "object" && !Array.isArray(queryPlan)) {
       const stepSources = [];
+      const missingStepSources = [];
       const steps = Array.isArray(queryPlan.steps) ? queryPlan.steps : [];
       for (const step of steps) {
         if (!step || typeof step !== "object" || Array.isArray(step)) {
+          continue;
+        }
+        const stepType = String(step.type || step.step_type || "").trim().toLowerCase();
+        if ((stepType === "source_query" || stepType === "final_query") &&
+            (typeof step.source_id !== "string" || !step.source_id.trim())) {
+          missingStepSources.push(String(step.id || step.step_id || "unknown"));
           continue;
         }
         let sourceId = step.source_id;
@@ -75,6 +83,11 @@ export class SourceRouter {
             stepSources.push(sourceId);
           }
         }
+      }
+      if (missingStepSources.length > 0) {
+        const error = new Error(`Execution plan contains executable steps without source_id: ${missingStepSources.join(", ")}`);
+        error.code = "MISSING_SOURCE_ID";
+        throw error;
       }
       if (stepSources.length > 0) {
         return stepSources;
@@ -114,6 +127,20 @@ export class SourceRouter {
     const requiredColumns = (Array.isArray(plan.required_columns) ? plan.required_columns : [])
       .filter(item => typeof item === "string" && item.trim())
       .map(item => item.trim());
+
+    // Semantic candidates are produced from the authorized catalog only. They
+    // are a routing hint, never an authorization grant or a substitute for
+    // validator checks on the final tables and columns.
+    if (requiredTables.size === 0 && requestedSources.length === 0) {
+      const candidates = findSemanticCandidates(plan.question || "", this.contexts);
+      if (candidates.length > 0) {
+        const bestScore = candidates[0].score;
+        const best = candidates.filter(candidate => candidate.score === bestScore);
+        const sources = Array.from(new Set(best.map(candidate => candidate.source_id)));
+        if (sources.length === 1) return sources;
+        throw new Error("PostgreSQL source routing could not deterministically identify the required source from the semantic catalog.");
+      }
+    }
 
     if (requiredTables.size === 0) {
       if (availableDeduped.length === 1) {
