@@ -328,7 +328,7 @@ export class QuestionPlanner {
     const active = this._conversation_reference(conversationContext);
     const refersBack = /\b(?:it|its|that|this|those|these|details?)\b/i.test(question);
     const recordSet = active?.record_set;
-    if (recordSet && this._is_record_set_reference(question) && active.source_id && active.table && Array.isArray(recordSet.values) && recordSet.values.length > 0) {
+    if (recordSet && this._is_record_set_reference(question) && !this._has_explicit_new_target(question, active) && active.source_id && active.table && Array.isArray(recordSet.values) && recordSet.values.length > 0) {
       const tableInfo = this.contexts?.[active.source_id]?.tables?.[active.table] || {};
       const safeColumns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(Boolean);
       return {
@@ -444,6 +444,14 @@ export class QuestionPlanner {
 
   _is_record_set_reference(question) {
     return /\b(?:above|those|these|previous|prior)\b|\ball\s+\d+\b/i.test(String(question || ""));
+  }
+
+  _has_explicit_new_target(question, active) {
+    const activeTable = String(active?.table || "").trim().toLowerCase();
+    if (!activeTable) return false;
+
+    const candidates = findSemanticCandidates(question, this.contexts);
+    return candidates.some(candidate => String(candidate?.table || "").trim().toLowerCase() !== activeTable);
   }
 
   _explicit_identifier_filter(question, candidate) {

@@ -3635,12 +3635,21 @@ input:focus-visible {
   user-select: none;
   -webkit-user-select: none;
 }
-.floating-chat .message-content::selection,
-.floating-chat .message-content *::selection,
 .floating-chat .message.user::selection,
 .floating-chat .message.user *::selection {
   background: transparent;
   color: inherit;
+}
+.floating-chat .message.assistant .message-content,
+.floating-chat .message.assistant .message-content * {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+.floating-chat .message.assistant .message-content::selection,
+.floating-chat .message.assistant .message-content *::selection {
+  background: rgba(14, 165, 233, 0.38);
+  color: #ffffff;
 }
 .floating-chat .message-role { display: none; }
 .floating-chat .message-content { border-radius: 12px; }

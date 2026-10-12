@@ -149,6 +149,25 @@ test("plural list follow-ups resolve above/previous records to source-qualified 
   assert.ok(!(noIdentityPlan?.filters || []).some(filter => String(filter.value || "").toLowerCase() === "above"));
 });
 
+test("an explicit new entity takes precedence over a plural context reference", () => {
+  const pipeline = new RAGPipeline();
+  const active = {
+    source_id: "db2",
+    table: "sessions",
+    record_set: { key_column: "id", values: [97, 96, 95, 94, 91], count: 5 }
+  };
+
+  const plan = pipeline.planner._build_metadata_fallback_plan(
+    "show me projects those status is inprogress",
+    { active_context: active }
+  );
+
+  assert.ok(plan, "The planner should produce a plan for the explicit project request");
+  assert.ok((plan.required_tables || []).some(table => String(table).toLowerCase() === "projects"));
+  assert.ok(!(plan.filters || []).some(filter => String(filter.table).toLowerCase() === "sessions"));
+  assert.ok(!(plan.filters || []).some(filter => String(filter.value).toLowerCase() === "those"));
+});
+
 test("Regression Test 2: Follow-up 'how many action items?' stays scoped to the same session", async () => {
   const pipeline = new RAGPipeline();
   const db2Context = loadContext("db2");

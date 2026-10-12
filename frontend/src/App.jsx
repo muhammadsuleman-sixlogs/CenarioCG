@@ -1684,7 +1684,13 @@ function App() {
                 </div>
               )}
 
-              <div className="question-box">
+              <form
+                className="question-box"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  handleAsk();
+                }}
+              >
                 <input
                   type="text"
                   value={question}
@@ -1693,19 +1699,12 @@ function App() {
                       event.target.value
                     )
                   }
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      handleAsk();
-                    }
-                  }}
                   placeholder="Ask a question about your connected data..."
                   disabled={loading}
                 />
 
                 <button
-                  type="button"
-                  onClick={handleAsk}
+                  type="submit"
                   disabled={
                     loading ||
                     !question.trim()
@@ -1719,7 +1718,7 @@ function App() {
 
                   <span>→</span>
                 </button>
-              </div>
+              </form>
             </div>}
           </section>
           )}
