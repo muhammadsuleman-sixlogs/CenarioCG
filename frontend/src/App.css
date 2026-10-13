@@ -1959,6 +1959,8 @@ input:focus-visible {
 
   position: relative;
   overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid var(--border);
 
   background:
     radial-gradient(
@@ -1984,6 +1986,16 @@ input:focus-visible {
   height: 100%;
 
   overflow: hidden;
+  border-radius: inherit;
+}
+
+/* Let the graph viewport own the rounded border so the panel divider does
+   not create a second line at the graph's upper corners. */
+.graph-panel {
+  border-color: transparent;
+}
+.graph-panel > .panel-header {
+  border-bottom-color: transparent;
 }
 
 .graph-overlay {

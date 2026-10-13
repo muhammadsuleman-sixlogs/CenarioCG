@@ -815,8 +815,8 @@ function GraphView({
         height: "100%",
         minHeight: 560,
         background: "#0a0d12",
-        border: "1px solid rgba(255, 255, 255, 0.08)",
-        borderRadius: 18,
+        border: "none",
+        borderRadius: 12,
         overflow: "hidden",
       }}
     >
