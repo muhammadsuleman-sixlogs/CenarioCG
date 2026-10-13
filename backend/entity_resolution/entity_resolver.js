@@ -1,5 +1,5 @@
 import { loadAllContexts } from "../context/context_store.js";
-import { getConnection, getDb2Connection } from "../database/connection.js";
+import { getConnection, getPostgresqlSourceConfig } from "../database/connection.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 
 /**
@@ -190,13 +190,8 @@ export class EntityResolver {
 
   static async _getConnection(sourceId) {
     const normalized = String(sourceId).trim().toLowerCase();
-    if (normalized === "db1") {
-      return await getConnection("db1");
-    }
-    if (normalized === "db2") {
-      return await getDb2Connection();
-    }
-    throw new Error(`Unsupported PostgreSQL entity-resolution source: '${sourceId}'`);
+    getPostgresqlSourceConfig(normalized);
+    return getConnection(normalized);
   }
 
   // ------------------------------------------------------------------

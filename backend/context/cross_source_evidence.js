@@ -1,7 +1,7 @@
 import fs from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
-import { getConnection, getDb2Connection } from "../database/connection.js";
+import { getConnection, getPostgresqlSourceConfig, getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 import { validateSqlSyntax } from "../retrieval/sql_validator.js";
 import { findCrossSourceCandidates } from "./cross_source_inference.js";
@@ -31,13 +31,9 @@ export const _quote_identifier = quoteIdentifier;
  * Return the appropriate read-only PostgreSQL connection / pool.
  */
 export function _getConnection(sourceId) {
-  if (sourceId === "db1") {
-    return getConnection("db1");
-  } else if (sourceId === "db2") {
-    return getDb2Connection();
-  } else {
-    throw new Error(`Unknown source_id: ${sourceId}`);
-  }
+  const normalized = String(sourceId || "").trim().toLowerCase();
+  getPostgresqlSourceConfig(normalized);
+  return getConnection(normalized);
 }
 
 export const _get_connection = _getConnection;
@@ -300,18 +296,20 @@ export function saveEvidenceReport(report) {
 export const save_evidence_report = saveEvidenceReport;
 
 /**
- * Build DB1/DB2 contexts, generate cross-source candidates,
+ * Build two registered source contexts, generate cross-source candidates,
  * and perform the read-only evidence check.
  */
-export async function runCrossSourceEvidence() {
-  console.log("Building DB1 context...");
-  const db1Context = await buildContext("db1");
+export async function runCrossSourceEvidence(sourceIds = getRegisteredPostgresqlSourceIds().slice(0, 2)) {
+  const selected = [...new Set((sourceIds || []).map(sourceId => String(sourceId || "").trim().toLowerCase()))];
+  if (selected.length !== 2 || !selected[0] || !selected[1] || selected[0] === selected[1]) throw new Error("Cross-source evidence requires exactly two distinct registered source IDs.");
+  console.log(`Building ${selected[0]} context...`);
+  const sourceContext = await buildContext(selected[0]);
 
-  console.log("Building DB2 context...");
-  const db2Context = await buildContext("db2");
+  console.log(`Building ${selected[1]} context...`);
+  const targetContext = await buildContext(selected[1]);
 
   console.log("Building cross-source candidates...");
-  const candidates = findCrossSourceCandidates(db1Context, db2Context);
+  const candidates = findCrossSourceCandidates(sourceContext, targetContext);
 
   const report = await collectCrossSourceEvidence(candidates);
   saveEvidenceReport(report);

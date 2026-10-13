@@ -26,6 +26,16 @@ export const USE_LLM_EXPLANATIONS = ["1", "true", "yes"].includes(
 
 export const EXPLAIN_BATCH_SIZE = 20;
 
+export function saveValidatedCrossSourceRelationships(output) {
+  if (!output || typeof output !== "object" || !Array.isArray(output.validated_relationships)) {
+    throw new Error("Cross-source relationship output is malformed.");
+  }
+  fs.mkdirSync(dirname(OUTPUT_FILE), { recursive: true });
+  const temporaryFile = `${OUTPUT_FILE}.tmp`;
+  fs.writeFileSync(temporaryFile, JSON.stringify(output, null, 2), "utf-8");
+  fs.renameSync(temporaryFile, OUTPUT_FILE);
+}
+
 export function _key(candidate) {
   return `${candidate.source_table}|${candidate.source_column}|${candidate.target_table}|${candidate.target_column}`;
 }
@@ -277,8 +287,11 @@ export async function _explain_accepted(accepted) {
 /**
  * Main cross-source validation pipeline.
  */
-export async function validateCrossSourceRelationships(db1Context, db2Context) {
-  const candidates = findCrossSourceCandidates(db1Context, db2Context);
+export async function validateCrossSourceRelationships(sourceContext, targetContext, { publish = true } = {}) {
+  const sourceSystem = String(sourceContext?.source_id || "").trim().toLowerCase();
+  const targetSystem = String(targetContext?.source_id || "").trim().toLowerCase();
+  if (!sourceSystem || !targetSystem || sourceSystem === targetSystem) throw new Error("Cross-source validation requires two distinct source-qualified contexts.");
+  const candidates = findCrossSourceCandidates(sourceContext, targetContext);
 
   console.log("\n" + "=".repeat(70));
   console.log("CROSS-SOURCE VALIDATION (rule-based on data evidence)");
@@ -340,7 +353,7 @@ export async function validateCrossSourceRelationships(db1Context, db2Context) {
   }
 
   const output = {
-    source_systems: ["db1", "db2"],
+    source_systems: [sourceSystem, targetSystem],
     candidate_count: candidates.length,
     validated_count: validated.length,
     rejected_count: rejected.length,
@@ -350,8 +363,9 @@ export async function validateCrossSourceRelationships(db1Context, db2Context) {
     errors
   };
 
-  fs.mkdirSync(dirname(OUTPUT_FILE), { recursive: true });
-  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(output, null, 2), "utf-8");
+  if (publish) {
+    saveValidatedCrossSourceRelationships(output);
+  }
 
   console.log("\n" + "=".repeat(70));
   console.log("VALIDATION SUMMARY");
@@ -385,5 +399,6 @@ export default {
   _extract_json,
   _explain_accepted,
   validateCrossSourceRelationships,
+  saveValidatedCrossSourceRelationships,
   validate_cross_source_relationships: validateCrossSourceRelationships
 };

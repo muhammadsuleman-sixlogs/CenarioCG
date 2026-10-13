@@ -21,11 +21,9 @@ const conversationStore = new ConversationStore();
 // Multi-source Context Graph
 // --------------------------------------------------
 
-// Load all available PostgreSQL Context Layers:
-// { "db1": {...}, "db2": {...} }
-// Pass values to the graph builder.
-const contexts = Object.values(loadAllContexts());
-const contextGraph = buildMultiSourceContextGraph(contexts);
+function loadCurrentContextGraph() {
+  return buildMultiSourceContextGraph(Object.values(loadAllContexts()));
+}
 
 // --------------------------------------------------
 // Graph serialization
@@ -345,6 +343,7 @@ router.post("/chat", async (req, res) => {
     });
 
     // Multi-source Context Graph
+    const contextGraph = loadCurrentContextGraph();
     const graphData = graphToDict(contextGraph);
     const graphSummary = getGraphSummary(contextGraph);
 
@@ -389,8 +388,7 @@ router.post("/chat", async (req, res) => {
 
 router.get("/graph", (req, res) => {
   try {
-    const freshContexts = Object.values(loadAllContexts());
-    const freshContextGraph = buildMultiSourceContextGraph(freshContexts);
+    const freshContextGraph = loadCurrentContextGraph();
     const graphData = graphToDict(freshContextGraph);
     const graphSummary = getGraphSummary(freshContextGraph);
 

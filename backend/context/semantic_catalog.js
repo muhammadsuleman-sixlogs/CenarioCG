@@ -19,6 +19,40 @@ function tableColumns(context, table) {
   return new Set((context?.tables?.[table]?.columns || []).map(column => String(column?.name || column)));
 }
 
+function humanize(value) {
+  return String(value || "").replace(/[_-]+/g, " ").trim();
+}
+
+/**
+ * Schema-derived entries make newly discovered technical objects routable
+ * without granting them business semantics, identity, or cross-source trust.
+ */
+export function deriveTechnicalEntities(context) {
+  const entities = {};
+  for (const [table, info] of Object.entries(context?.tables || {})) {
+    const phrase = humanize(table);
+    if (!phrase) continue;
+    const singular = phrase.endsWith("ies") ? `${phrase.slice(0, -3)}y` : (phrase.endsWith("s") ? phrase.slice(0, -1) : phrase);
+    const columns = Array.isArray(info?.columns) ? info.columns : [];
+    const identifierColumns = columns
+      .map(column => String(column?.name || ""))
+      .filter(column => /(?:^|_)(?:id|uuid|key|code|reference|number|name|title|label)$/i.test(column))
+      .slice(0, 12);
+    entities[table] = {
+      entity_type: `technical:${table}`,
+      description: `Automatically discovered technical entity for ${table}.`,
+      synonyms: [...new Set([phrase, singular, table])],
+      source_qualified_meaning: `Discovered ${context?.source_id || "postgresql"} table`,
+      provenance: [`technical_schema:${context?.source_id || "unknown"}.${table}`],
+      technical_entity: true,
+      trust_level: "discovered_technical",
+      identifier_columns: identifierColumns,
+      primary_keys: Array.isArray(info?.primary_keys) ? [...info.primary_keys] : []
+    };
+  }
+  return entities;
+}
+
 export function catalogFingerprint(contexts) {
   const technical = Object.fromEntries(Object.entries(contexts || {}).sort().map(([sourceId, context]) => [
     sourceId,
@@ -95,17 +129,24 @@ export function getSemanticCatalogStatus(contexts, catalog, now = Date.now(), ma
 export function attachSemanticCatalog(contexts, catalog = null) {
   const semanticCatalog = catalog || loadSemanticCatalog();
   const status = getSemanticCatalogStatus(contexts, semanticCatalog);
-  const semanticUsable = status.validation_status !== "invalid" && status.freshness_status !== "stale";
-  const enriched = Object.fromEntries(Object.entries(contexts || {}).map(([sourceId, context]) => [sourceId, {
-    ...context,
-    semantic_catalog_status: status,
-    semantic_catalog: semanticUsable ? {
-      ...(semanticCatalog.sources?.[sourceId] || { entities: {} }),
-      verified_paths: semanticCatalog.verified_paths || []
-    } : undefined
-  }]));
-  if (!semanticUsable) return { contexts: enriched, catalog: null, status };
-  return { contexts: enriched, catalog: semanticCatalog, status };
+  const fingerprintOnlyMismatch = status.errors.length === 1 && status.errors[0] === "semantic catalog technical fingerprint does not match the loaded schemas";
+  // A routine technical addition changes the fingerprint but does not make
+  // unrelated, still schema-valid approved definitions unsafe. Any missing
+  // table/column/path validation error still disables the approved overlay.
+  const semanticUsable = (status.validation_status !== "invalid" || fingerprintOnlyMismatch) && status.freshness_status !== "stale";
+  const enriched = Object.fromEntries(Object.entries(contexts || {}).map(([sourceId, context]) => {
+    const approved = semanticUsable ? (semanticCatalog.sources?.[sourceId]?.entities || {}) : {};
+    // Approved entries always win. Derived entries are intentionally scoped to
+    // tables missing an approved definition and can never provide identity or
+    // verified-path authority.
+    const entities = { ...deriveTechnicalEntities(context), ...approved };
+    return [sourceId, {
+      ...context,
+      semantic_catalog_status: status,
+      semantic_catalog: semanticUsable ? { entities, verified_paths: semanticCatalog.verified_paths || [] } : undefined
+    }];
+  }));
+  return { contexts: enriched, catalog: semanticUsable ? semanticCatalog : null, status };
 }
 
 export function findSemanticCandidates(question, contexts, authorizedSources = null) {
@@ -150,7 +191,12 @@ export function findSemanticCandidates(question, contexts, authorizedSources = n
       });
     }
   }
-  return candidates.sort((left, right) => right.score - left.score || left.source_id.localeCompare(right.source_id) || left.table.localeCompare(right.table));
+  // Established business semantics retain precedence. Technical candidates
+  // exist for newly discovered objects, not to silently change existing
+  // meeting/project/company routing behavior.
+  const approved = candidates.filter(candidate => !contexts?.[candidate.source_id]?.semantic_catalog?.entities?.[candidate.table]?.technical_entity);
+  return (approved.length > 0 ? approved : candidates)
+    .sort((left, right) => right.score - left.score || left.source_id.localeCompare(right.source_id) || left.table.localeCompare(right.table));
 }
 
 export function findVerifiedPaths(question, contexts, authorizedSources = null, options = {}) {
@@ -287,4 +333,4 @@ export function findVerifiedPaths(question, contexts, authorizedSources = null, 
   });
 }
 
-export default { SEMANTIC_CATALOG_FILE, CROSS_SOURCE_RELATIONSHIPS_FILE, catalogFingerprint, loadSemanticCatalog, validateSemanticCatalog, getSemanticCatalogStatus, attachSemanticCatalog, findSemanticCandidates, findVerifiedPaths };
+export default { SEMANTIC_CATALOG_FILE, CROSS_SOURCE_RELATIONSHIPS_FILE, catalogFingerprint, loadSemanticCatalog, validateSemanticCatalog, deriveTechnicalEntities, attachSemanticCatalog, findSemanticCandidates, findVerifiedPaths };

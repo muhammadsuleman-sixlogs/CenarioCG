@@ -1,261 +1,199 @@
-# CenarioCG — Context Layer & Multi-Source Intelligence Platform
+# CenarioCG
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Stack-Node.js%20(Express)%20%7C%20React%2019%20%7C%20PostgreSQL-0ea5e9?style=for-the-badge" alt="Stack" />
-  <img src="https://img.shields.io/badge/Security-Strict%20Read--Only%20Protected-10b981?style=for-the-badge" alt="Read-Only Safe" />
-  <img src="https://img.shields.io/badge/Graph-Cytoscape%20fCoSE%20%7C%20Context%20Graph-8b5cf6?style=for-the-badge" alt="Context Graph" />
-  <img src="https://img.shields.io/badge/LLM-Agentic%20RAG%20Planner-f59e0b?style=for-the-badge" alt="Agentic RAG" />
-</p>
+CenarioCG is a Node.js and React AI Data Intelligence platform for safe,
+source-qualified retrieval across PostgreSQL systems and the optional
+`security_logs` API. It turns natural-language questions into validated,
+bounded read-only retrieval plans, correlates grounded evidence, and returns
+an answer with provenance.
 
----
+## Architecture
 
-## 1. Executive Overview & Super Admin Purpose
-
-### Operational safety requirements
-
-- Connected PostgreSQL and security-log systems are authoritative and strictly read-only. CenarioCG must never run source writes, DDL, locking reads, migrations, or cross-database SQL joins.
-- `/api/chat` requires a signed authenticated principal, a server-side `WORKSPACE_AUTHORIZATION_JSON` allow-list, and a server-owned conversation ID. A browser cannot grant itself a workspace or source.
-- `WORKSPACE_AUTHORIZATION_JSON` is local configuration and must not be committed. Its structure is `{ "principal": { "workspace-id": { "postgresql_sources": ["db1"], "security_resources": [] } } }`. Use `DEFAULT_WORKSPACE_ID` only when that workspace is explicitly present in the principal mapping.
-- Context refresh is explicit (`refreshContextSnapshot`) and read-only. It atomically publishes only non-empty validated metadata snapshots; it does not claim automatic change detection without an external scheduler or source event feed.
-
-**CenarioCG** is an enterprise-grade, agentic Retrieval-Augmented Generation (RAG) and Security Intelligence platform designed specifically for **Super Administrators, Executive Stakeholders, and Security Auditors**.
-
-### The Problem It Solves
-Modern digital operations and enterprise software deployments suffer from extreme data fragmentation:
-- **Project Execution Data** (`db1`) lives in relational task management systems (tasks, sub-tasks, milestones, tickets, change orders, workspace bindings).
-- **Meeting & Conversational Intelligence** (`db2`) lives in meeting analytics systems (sessions, transcripts, summaries, epics, action items, LLM token metrics).
-- **Audit & Security Operations** (`security_logs`) live in external SIEM and CLI audit APIs.
-
-Before CenarioCG, Super Admins had to manually navigate disjoint databases, write ad-hoc SQL, correlate disparate IDs across silos, and piece together project context from scattered meeting notes.
-
-### The Super Admin Solution
-CenarioCG unifies these heterogeneous systems into a single intelligent conversational cockpit:
-1. **Natural-Language Cross-System Queries**: Ask questions that require multi-source synthesis, such as *"Show me recent projects and their latest meeting summaries"* or *"What action items were assigned to users on Project Test?"*.
-2. **Interactive Context Graph**: Explore an interactive, force-directed graph (Cytoscape.js) that visualizes tables, foreign keys, business relationships, and cross-source linkages in real time.
-3. **100% Visual SQL Provenance & Auditing**: Every answer includes interactive source badges (`DB1`, `DB2`, `Security Logs`). Clicking a badge opens an audit card displaying the exact parameterized SQL query, row counts, and matched data for complete institutional trust.
-4. **Conversational Entity Continuity**: Seamlessly ask follow-up questions referencing people, projects, or meeting action items (e.g., *"Is Rahim Zahid a user?"*, *"Who is he?"*) without losing session state or context.
-5. **Strict Zero-Risk Read-Only Guarantees**: Enterprise database safety enforced at the connection, syntax, and execution layers (`SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`). Super Admins can query operational data with zero risk of modification or corruption.
-6. **Pure Node.js Runtime Architecture**: The active production backend is 100% Node.js / JavaScript (ES Modules). The original Python implementation is archived under [`older files/`](older%20files/) at the repository root.
-
----
-
-## 2. High-Level System Architecture
-
-```mermaid
-flowchart TD
-    User([Super Admin / Web UI]) -->|Prompt + Bearer Token| API[Express Server backend/main.js /api/chat]
-    API --> Pipeline[RAG Orchestrator backend/pipeline/rag_pipeline.js]
-    
-    subgraph Context & Planning Subsystem
-        Pipeline --> Planner[QuestionPlanner backend/planning/question_planner.js]
-        Planner --> Validator[QuestionPlanValidator backend/planning/question_plan_validator.js]
-        Validator -- If Schema Invalid --> Repair[Plan Repair Engine backend/planning/question_plan_repair.js]
-        Repair --> Validator
-    end
-
-    subgraph Deterministic Execution Engine
-        Validator -- Valid Plan --> Decomposer[Complex Query Planner backend/planning/complex_query_planner.js]
-        Decomposer --> Executor[QueryPlanExecutor backend/retrieval/query_plan_executor.js]
-        Executor --> SQLGen[Safe SQL Generator backend/retrieval/sql_generator.js]
-        Executor --> SecClient[SIEM Security Log Client backend/security_logs/client.js]
-    end
-
-    subgraph Multi-Source Data Layer
-        SQLGen -->|Strict Read-Only Pool| DB1[(PostgreSQL: db1\nProject Management / Tasks)]
-        SQLGen -->|Strict Read-Only Pool| DB2[(PostgreSQL: db2\nMeeting Intelligence / Transcripts)]
-        SecClient -->|Audit Event Stream| SIEM[Security Logs API]
-    end
-
-    subgraph Synthesis & Provenance UI
-        DB1 & DB2 & SIEM --> Synthesizer[LLM Evidence Manager & Answer Generator backend/llm/]
-        Synthesizer --> UI[React 19 Dashboard + Visual SQL Provenance Modal]
-    end
+```text
+React/Vite UI -> Express API -> RAGPipeline
+  -> QuestionPlanner -> QuestionPlanValidator -> QueryPlanExecutor
+  -> safe parameterized PostgreSQL / read-only security-log retrieval
+  -> evidence manager and answer generator -> source-qualified provenance
 ```
 
----
+The Context Layer discovers PostgreSQL tables, columns, primary keys, and
+declared foreign keys with read-only catalog queries. `context_store.js`
+publishes validated application-owned metadata generations atomically;
+`context_graph.js`, the semantic catalog, planner, resolver, and SQL generator
+read the active generation. The graph is source-qualified, so sources are never
+joined in database SQL.
 
-## 3. Directory & Module Breakdown
+Important backend boundaries:
 
-| Module / Directory | Path | Core Responsibilities |
-|---|---|---|
-| **API Server** | [`backend/main.js`](backend/main.js), [`backend/api/chat.js`](backend/api/chat.js) | Express backend serving `/api/chat`, `/api/auth`, `/api/graph`, `/api/health`. Manages session auth, cross-origin security, request validation, and Graph data formatting. |
-| **RAG Pipeline** | [`backend/pipeline/rag_pipeline.js`](backend/pipeline/rag_pipeline.js) | Central orchestrator coordinating plan generation, plan validation, multi-source query execution, security logging, and answer generation. |
-| **Query Planning** | [`backend/planning/question_planner.js`](backend/planning/question_planner.js)<br>[`backend/planning/question_plan_validator.js`](backend/planning/question_plan_validator.js)<br>[`backend/planning/complex_query_planner.js`](backend/planning/complex_query_planner.js) | LLM-driven query planner producing formal semantic contracts. Validates plans against the Context Layer and normalizes entity references. |
-| **Safe SQL Engine** | [`backend/retrieval/sql_generator.js`](backend/retrieval/sql_generator.js)<br>[`backend/retrieval/query_plan_executor.js`](backend/retrieval/query_plan_executor.js) | Compiles plan contracts into parameterized SQL. Executes read-only queries with dynamic runtime parameter bindings across steps (`s1` $\rightarrow$ `s2`). |
-| **Context Layer** | [`backend/context/context_store.js`](backend/context/context_store.js)<br>[`backend/context/context_graph.js`](backend/context/context_graph.js) | Discovers schema metadata, primary/foreign keys, and business relationships. In-memory `MultiDiGraph` query graph. |
-| **Security Intelligence** | [`backend/security_logs/client.js`](backend/security_logs/client.js)<br>[`backend/security_logs/retriever.js`](backend/security_logs/retriever.js) | Read-only client for SIEM security logs, CLI audits, and workspace compliance summaries. |
-| **Entity Resolution** | [`backend/entity_resolution/`](backend/entity_resolution/) | Extracts and maps codes (`AVID-4207`), emails, and entities across schema boundaries. |
-| **Frontend Dashboard** | [`frontend/src/App.jsx`](frontend/src/App.jsx)<br>[`frontend/src/components/GraphView.jsx`](frontend/src/components/GraphView.jsx) | React 19 + Vite dashboard featuring Cytoscape force-directed graph view, conversational UI, and interactive SQL provenance modals. |
-| **Python Archive** | [`older files/`](older%20files/) | Complete original Python implementation preserved outside `backend/` and `frontend/`. |
+- `backend/config/settings.js` — environment loading and source registry.
+- `backend/database/connection.js` — registered PostgreSQL pools and read-only
+  session initialization.
+- `backend/context/` — discovery, metadata generations, semantic overlay,
+  graph, conversation context, and relationship evidence.
+- `backend/planning/` — natural-language planning, deterministic validation,
+  and multi-step dependency planning.
+- `backend/retrieval/` — SQL generation, read-only validation, execution, and
+  runtime bindings.
+- `backend/tracing/` and `backend/llm/` — provenance, evidence, and grounded
+  answer generation.
 
----
+The original Python implementation is preserved in `older files/`; the active
+application is Node.js ES modules.
 
-## 4. Available Data Sources & Schema Overview
+## Local development
 
-### 🗄️ `db1` — Project Management & Operational Database
-Houses project execution, task management, milestones, and workforce entities:
-- **Core Tables**: `project_details`, `project_tasks`, `project_sub_tasks`, `project_milestones`, `tickets`, `project_change_orders`, `cde_workspaces`, `cde_provider_tasks`, `chat_rooms`, `recent_activities`, `users`, `roles`, `companies`, `company_contacts`, `project_stake_holders`.
-- **Primary Keys**: `project_details.id` (UUID), `project_details.project_id_display` (e.g. `XAZM-9573`), `users.id`, `project_tasks.id`.
+Prerequisites: Node.js 18+ and npm.
 
-### 🧠 `db2` — Project Intelligence & Meeting Insights Database
-Houses meeting transcripts, AI summaries, decisions, and system usage:
-- **Core Tables**: `projects`, `meeting_summaries`, `action_items`, `sessions`, `transcripts`, `documents`, `epics`, `usage_llm_events`, `key_insights`, `users`.
-- **Primary Keys**: `projects.id` (UUID), `projects.project_id` / `projects.project_code` (e.g. `XAZM-9573`), `sessions.id`, `meeting_summaries.meeting_id`.
-
-### 🛡️ `security_logs` — SIEM & Security Audit API
-Houses security and audit event records:
-- **Resources**: `security_logs`, `cli_audit_logs`, `workspace_security_logs`, `workspace_siem_status`, `security_overview`.
-
----
-
-## 5. UI Design System & Styling Tokens
-
-The CenarioCG dashboard is engineered with a **bespoke, modern dark aesthetic** built on high-performance vanilla CSS, optimized for data density and executive decision-making.
-
-### Design Tokens (`frontend/src/App.css`)
-```css
-:root {
-  --bg: #0a0d12;              /* Deep obsidian dark background */
-  --card: #12151b;            /* Elevation card layer 1 */
-  --card-2: #171b22;          /* Elevation card layer 2 */
-
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
-
-  --text: #f1f5f9;            /* High-contrast primary typography */
-  --text-2: #cbd5e1;          /* Secondary typography */
-  --muted: #8b95a5;           /* Metadata / labels */
-
-  --cyan: #0ea5e9;            /* Primary brand accent / DB1 badge */
-  --green: #10b981;           /* Success / Verified SQL / Read-only */
-  --purple: #8b5cf6;          /* Context Graph edges / DB2 badge */
-  --amber: #f59e0b;           /* Warning / Security resource badge */
-  --red: #f43f5e;             /* Error / Alert indicators */
-
-  --radius: 18px;             /* Smooth card corners */
-  --radius-sm: 12px;
-}
-```
-
----
-
-## 6. Security Guarantees & Institutional Safety
-
-1. **Strict Read-Only Database Connections**:
-   All database sessions are initialized with explicit `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;` and `SET default_transaction_read_only = on;` parameter constraints.
-2. **Deterministic Syntax Verification**:
-   Before any query is dispatched to PostgreSQL, `validate_read_only_query()` inspects the statement to verify that no `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `MERGE`, `LOCK`, or schema changes are present.
-3. **Dual-Mode Session Authentication**:
-   The Express server supports both `Authorization: Bearer <token>` and secure HttpOnly cookies, ensuring persistent login sessions across cross-origin deployments without credential leakage.
-4. **Data Sanitization**:
-   All responses and evidence records pass through `sanitize_api_response()` to prevent internal credential exposure and unauthorized metadata disclosure.
-
----
-
-## 7. Installation & Quickstart
-
-### Prerequisites
-- Node.js 18+ and npm
-- PostgreSQL databases (`db1`, `db2`) with read credentials
-- OpenAI API Key
-
-### Step 1: Configure Environment
-Create or verify the `.env` file in the project root:
-```ini
-# PostgreSQL Data Source 1 (Project Management)
-POSTGRES_HOST=your-db1-host.com
-POSTGRES_PORT=5432
-POSTGRES_DATABASE=defaultdb
-POSTGRES_USER=your_user
-POSTGRES_PASSWORD=your_password
-
-# PostgreSQL Data Source 2 (Meeting Intelligence)
-DB_HOST=your-db2-host.com
-DB_PORT=5432
-DB_USER=your_user
-DB_PASSWORD=your_password
-DB_NAME=your_db2_name
-
-# LLM & Pipeline Configuration
-OPENAI_API_KEY=sk-proj-your-key
-OPENAI_MODEL=gpt-4o
-CONTEXT_MAX_TURNS=5
-CONTEXT_MAX_ITEMS=20
-ALLOW_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-
-# Security Logs SIEM API (Optional)
-SECURITY_API_BASE_URL=https://your-security-api.com
-SECURITY_API_PREFIX=api
-SECURITY_API_TOKEN=your-jwt-token
-```
-
-### Step 2: Install Node.js Backend & Start Server
 ```powershell
-# Navigate to backend directory
+# Backend
 cd backend
-
-# Install production Node.js dependencies
 npm install
+npm start       # node main.js
+# or: npm run dev
 
-# Start the Node.js backend server
-npm start
-# (Or in development mode with auto-reload: npm run dev)
-```
-Backend will be live at `http://127.0.0.1:8000`.
-
-### Step 3: Install Frontend Dependencies & Start Dashboard
-```powershell
+# Frontend (separate terminal)
 cd frontend
 npm install
 npm run dev
 ```
-Dashboard will be live at `http://127.0.0.1:5173`.
 
----
+The backend listens on port 8000 by default and Vite uses its configured local
+development port (normally 5173).
 
-## 8. API Reference
+## Environment configuration
 
-| Endpoint | Method | Description | Sample Request / Output |
-|---|---|---|---|
-| `/api/auth/login` | `POST` | Authenticate Super Admin session. Returns session token. | `{"username": "...", "password": "..."}` |
-| `/api/auth/me` | `GET` | Verify active session authentication status. | Returns `{"authenticated": true}` |
-| `/api/auth/logout` | `POST` | End session and invalidate auth cookie. | Returns `{"authenticated": false}` |
-| `/api/chat` | `POST` | Execute natural language query across multi-source RAG pipeline. | `{"question": "show me recent projects"}` |
-| `/api/graph` | `GET` | Retrieve unified Cytoscape Context Graph schema representation. | Returns nodes, edges, table columns, and relationships. |
-| `/api/health` | `GET` | Health check probe. | Returns `{"status": "healthy"}` |
+`backend/config/settings.js` explicitly loads `backend/.env` first. See
+[Environment-file behavior](#environment-file-behavior) before maintaining
+local configuration.
 
----
+### DB1 and DB2 compatibility
 
-## 9. Testing & Quality Verification
+Existing deployments remain supported through the legacy variables:
 
-Run the automated Node.js test suite across validation, SQL generation, security, and authentication:
+- DB1: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE`, `POSTGRES_USER`,
+  `POSTGRES_PASSWORD`
+- DB2: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+
+### Additional PostgreSQL sources
+
+Register future sources privately with `POSTGRES_SOURCES_JSON`, a JSON object
+whose keys are lowercase source IDs and whose values contain `host`, `port`,
+`database`, `user`, and `password`. `sslRejectUnauthorized` is optional.
+
+```ini
+POSTGRES_SOURCES_JSON={"db3":{"host":"...","port":5432,"database":"...","user":"...","password":"..."}}
+```
+
+Registration makes a source eligible for connection and metadata discovery; it
+does **not** authorize any user or workspace to query it. Source IDs are also
+validated before a pool is created. Do not commit any `.env` file or secrets.
+
+### Workspace authorization
+
+`WORKSPACE_AUTHORIZATION_JSON` is the server-owned allow-list for each
+principal/workspace. PostgreSQL source access and security-log resource access
+are both fail-closed. A browser request cannot grant itself source access, and
+adding credentials for a source does not add it to any workspace.
+
+## Automatic schema discovery and metadata safety
+
+The configured refresh controls are:
+
+- `CONTEXT_REFRESH_ENABLED` (default `true`)
+- `CONTEXT_REFRESH_ON_STARTUP` (default `true`)
+- `CONTEXT_REFRESH_INTERVAL_MS` (default `900000`)
+- `CONTEXT_SNAPSHOT_RETENTION` (default `5`)
+
+On startup and at the bounded interval, the scheduler discovers every
+registered PostgreSQL source through read-only catalog access. It publishes a
+new generation only after all requested contexts are non-empty and validated.
+Generations have deterministic fingerprints, timestamps, source lists, bounded
+retention, and rollback support. Requests keep using the last known-good active
+generation if discovery or publication fails; incomplete metadata is not made
+visible.
+
+New authorized tables, ordinary columns, primary keys, and declared same-source
+foreign keys become discovered technical entities without semantic-catalog
+edits. The planner receives a bounded, sensitive-field-filtered view of that
+metadata. A discovered technical entity is not automatically an approved
+business concept.
+
+## Relationships and identity
+
+Declared PostgreSQL foreign keys are available for same-source traversal.
+Cross-source inference produces candidates and collects read-only hashed-value
+evidence, including compatible UUID-to-varchar comparisons. Matching names or
+values alone never create an executable identity.
+
+Existing approved DB1/DB2 identities and verified paths are preserved,
+including the project UUID and project-code mappings. The dedicated automatic
+publication of approved cross-source business contracts remains DB1/DB2 scoped;
+new-source cross-source candidates require sufficient validation and business
+approval before becoming executable. CenarioCG never performs cross-database
+SQL joins.
+
+## Safety, conversation, and provenance
+
+Every PostgreSQL session is initialized read-only. SQL is parameterized and
+checked for mutating statements, locks, wildcard projections, and sensitive
+fields. Source isolation, workspace authorization, and row/result bounds remain
+in force after schema refreshes.
+
+Conversation state is server-owned, source-qualified, and bounded to five
+complete exchanges. Stored references are revalidated when metadata changes.
+Answers are grounded in independent retrieval results and retain source,
+query, table, row-count, and evidence provenance for the UI.
+
+## Verification
 
 ```powershell
-# From backend directory:
+# Backend regression suite
 cd backend
 npm test
 
-# (Or run Node.js built-in test runner directly):
-node --test tests/**/*.test.js
+# Frontend production build
+cd frontend
+npm run build
 ```
 
-The current offline backend regression suite covers authorization, semantic
-catalog routing, temporal language, categorical filters, conversation
-references, dependent cross-source plans, read-only SQL enforcement, and
-connection-failure handling. Live database verification is separate and must
-only be performed with explicit authorization; the authoritative sources remain
-read-only.
+The backend suite is offline/mocked where appropriate; it is not a substitute
+for approved live-source verification. Additional PostgreSQL onboarding has not
+yet been live-verified against a real DB3+ source. Real-provider follow-up
+reliability also remains under investigation.
 
-### Repository hygiene
+### Playwright / browser verification
 
-Do not commit credentials, local agent instructions, Playwright traces, or
-captured browser response bodies. These local-only artifacts are excluded by
-`.gitignore`. Commit application code, semantic metadata intentionally owned by
-the application, regression tests, and documentation required to reproduce the
-verified behavior.
+This repository currently has no tracked `playwright.config.*`, Playwright
+dependency, or npm script. Local `.playwright-mcp/` captures show that browser
+MCP tooling has been used, but it is not a reproducible repository test runner.
+For a safe manual UI check, start the backend and frontend locally, use an
+authorized test account only when explicitly approved, and do not exercise
+source-changing actions. Standard Playwright output directories and local MCP
+captures are ignored by Git; a future custom output path must also be ignored.
 
----
+## Environment-file behavior
 
-<p align="center">
-  <b>CenarioCG Context Layer</b> — Empowering Super Administrators with authoritative, safe, multi-source intelligence.
-</p>
+- `backend/.env` is the canonical backend environment file: it is loaded first
+  by `backend/config/settings.js` using an explicit path.
+- A second default `dotenv.config()` call can load `.env` from the process
+  working directory without overriding values already loaded from `backend/.env`.
+  Therefore root `.env` can supply missing values when the backend is launched
+  as `node backend/main.js` from the repository root.
+- `cd backend; npm start` loads `backend/.env` for both calls and does not use
+  the root file.
+- Vite runs with `frontend` as its project root and reads `frontend/.env` for
+  `VITE_*` values; it does not configure `envDir` to use the repository root.
+- `vercel.json` deploys `backend/main.js`; deployed environment variables are
+  supplied by the hosting environment, not by a committed `.env` file.
+
+Keep `backend/.env` as the canonical backend file. The root `.env` is a legacy
+fallback and creates drift risk because it overlaps backend settings. It may be
+retired only after the team stops invoking the backend from the repository root
+and verifies no external workflow depends on that fallback.
+
+## Repository hygiene
+
+Do not commit credentials, local environment files, browser captures, runtime
+logs, or generated test reports. The committed files in `backend/context/` are
+application-owned metadata fixtures and must not be indiscriminately ignored or
+regenerated. Review `git diff --cached`, run the backend suite, and build the
+frontend before release.

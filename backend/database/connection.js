@@ -2,10 +2,9 @@ import pkg from "pg";
 const { Pool } = pkg;
 import { settings } from "../config/settings.js";
 
-let poolDb1 = null;
-let poolDb2 = null;
+const pools = new Map();
 
-function createPoolConfig(host, port, database, user, password) {
+function createPoolConfig(host, port, database, user, password, sslRejectUnauthorized = false) {
   return {
     host,
     port,
@@ -18,53 +17,51 @@ function createPoolConfig(host, port, database, user, password) {
     connectionTimeoutMillis: 10000,
     statement_timeout: 30000,
     query_timeout: 30000,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: sslRejectUnauthorized }
   };
 }
 
-export function getDb1Pool() {
-  if (!poolDb1) {
-    poolDb1 = new Pool(
-      createPoolConfig(
-        settings.postgresHost,
-        settings.postgresPort,
-        settings.postgresDatabase,
-        settings.postgresUser,
-        settings.postgresPassword
-      )
-    );
+function normaliseSourceId(sourceId) {
+  const normalized = typeof sourceId === "string" ? sourceId.trim().toLowerCase() : "";
+  if (!normalized) throw new Error("PostgreSQL source_id must be a non-empty string.");
+  return normalized;
+}
 
-    poolDb1.on("error", (err) => {
-      console.warn("PostgreSQL DB1 pool client idle error:", err.message);
-    });
+export function getRegisteredPostgresqlSourceIds() {
+  return Object.keys(settings.postgresqlSources || {}).sort();
+}
+
+export function getPostgresqlSourceConfig(sourceId) {
+  const normalized = normaliseSourceId(sourceId);
+  const config = settings.postgresqlSources?.[normalized];
+  if (!config) throw new Error(`Unsupported PostgreSQL source: '${sourceId ?? ""}'.`);
+  if (!config.host || !Number.isInteger(config.port) || !config.database || !config.user) {
+    throw new Error(`PostgreSQL source '${normalized}' is incompletely configured.`);
   }
-  return poolDb1;
+  return config;
+}
+
+export function getPostgresqlPool(sourceId) {
+  const normalized = normaliseSourceId(sourceId);
+  if (!pools.has(normalized)) {
+    const config = getPostgresqlSourceConfig(normalized);
+    const pool = new Pool(createPoolConfig(config.host, config.port, config.database, config.user, config.password, config.sslRejectUnauthorized));
+    pool.on("error", err => console.warn(`PostgreSQL ${normalized} pool client idle error:`, err.message));
+    pools.set(normalized, pool);
+  }
+  return pools.get(normalized);
+}
+
+export function getDb1Pool() {
+  return getPostgresqlPool("db1");
 }
 
 export function getDb2Pool() {
-  if (!poolDb2) {
-    poolDb2 = new Pool(
-      createPoolConfig(
-        settings.dbHost,
-        settings.dbPort,
-        settings.dbName,
-        settings.dbUser,
-        settings.dbPassword
-      )
-    );
-
-    poolDb2.on("error", (err) => {
-      console.warn("PostgreSQL DB2 pool client idle error:", err.message);
-    });
-  }
-  return poolDb2;
+  return getPostgresqlPool("db2");
 }
 
 export function getPool(sourceId) {
-  const normalized = typeof sourceId === "string" ? sourceId.trim().toLowerCase() : "";
-  if (normalized === "db1") return getDb1Pool();
-  if (normalized === "db2") return getDb2Pool();
-  throw new Error(`Unsupported PostgreSQL source: '${sourceId ?? ""}'.`);
+  return getPostgresqlPool(sourceId);
 }
 
 /**
@@ -117,14 +114,8 @@ export async function getDb2Connection() {
  * Cleanly close all active PostgreSQL connection pools.
  */
 export async function closeAllPools() {
-  if (poolDb1) {
-    await poolDb1.end().catch(() => {});
-    poolDb1 = null;
-  }
-  if (poolDb2) {
-    await poolDb2.end().catch(() => {});
-    poolDb2 = null;
-  }
+  await Promise.all([...pools.values()].map(pool => pool.end().catch(() => {})));
+  pools.clear();
 }
 
 export const get_connection = getConnection;
@@ -135,6 +126,9 @@ export const checkout_readonly_client = checkoutReadOnlyClient;
 export default {
   getDb1Pool,
   getDb2Pool,
+  getRegisteredPostgresqlSourceIds,
+  getPostgresqlSourceConfig,
+  getPostgresqlPool,
   getPool,
   getConnection,
   getDb2Connection,

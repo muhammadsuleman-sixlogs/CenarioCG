@@ -1,4 +1,4 @@
-import { getConnection, getDb2Connection } from "./connection.js";
+import { getConnection } from "./connection.js";
 
 /**
  * Read PostgreSQL metadata without modifying the database.

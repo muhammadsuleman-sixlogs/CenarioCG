@@ -76,7 +76,9 @@ export function loadCrossSourceRelationships() {
     for (const item of candidates) {
       if (!item || typeof item !== "object") continue;
       const validity = item.validated ?? item.valid ?? item.accepted;
-      if (validity !== undefined && validity !== true) continue;
+      // Relationship artifacts are executable metadata. Missing validity is
+      // not approval; fail closed rather than accepting a malformed record.
+      if (validity !== true) continue;
 
       let sourceId =
         textValue(item.source_id) ||

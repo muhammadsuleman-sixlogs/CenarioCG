@@ -17,7 +17,7 @@ import { sanitizeApiResponse, sanitizeEvidence } from "../security/output_securi
 import { isSensitiveQuestionIntent } from "../security/sensitive_data_policy.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 import { validateSqlSyntax } from "../retrieval/sql_validator.js";
-import { getConnection, getDb2Connection } from "../database/connection.js";
+import { getConnection, getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { assertAuthorizedSecurityResource, assertAuthorizedSources } from "../auth/authorization.js";
 import { logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
@@ -160,6 +160,34 @@ export class RAGPipeline {
       active_context: typeof this.context_manager.getActiveContext === "function" ? this.context_manager.getActiveContext() : null,
       pending_reference: typeof this.context_manager.getPendingReference === "function" ? this.context_manager.getPendingReference() : null
     };
+  }
+
+  _revalidateConversationReferences(conversationContext) {
+    const contexts = this.plan_validator.contexts || {};
+    const validReference = reference => {
+      const sourceId = String(reference?.source_id || "").toLowerCase();
+      const table = String(reference?.table || reference?.entity_table || "");
+      const tableInfo = contexts?.[sourceId]?.tables?.[table];
+      if (!tableInfo) return false;
+      const columns = new Set((tableInfo.columns || []).map(column => String(column?.name || column)));
+      const keys = reference?.stable_keys && typeof reference.stable_keys === "object" ? Object.keys(reference.stable_keys) : [];
+      return keys.every(key => columns.has(key));
+    };
+    const active = conversationContext?.active_context;
+    if (active && !validReference(active)) {
+      if (typeof this.context_manager.clearActiveContext === "function") this.context_manager.clearActiveContext();
+      conversationContext.active_context = null;
+    }
+    const pending = conversationContext?.pending_reference;
+    if (pending && !validReference(pending)) {
+      if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
+      conversationContext.pending_reference = null;
+    }
+    conversationContext.entities = (conversationContext?.entities || []).filter(entity => {
+      if (!entity?.source_id || !entity?.entity_table) return true;
+      return validReference({ ...entity, table: entity.entity_table, stable_keys: entity.entity_column ? { [entity.entity_column]: entity.id } : {} });
+    });
+    return conversationContext;
   }
 
   _restrictToAuthorizedSources(authorization) {
@@ -429,7 +457,7 @@ export class RAGPipeline {
     try {
       availableSources = new Set(Object.keys(loadAllContexts()));
     } catch {
-      availableSources = new Set(["db1", "db2"]);
+      availableSources = new Set(getRegisteredPostgresqlSourceIds());
     }
 
     const invalidSources = sources.filter(s => !availableSources.has(s));
@@ -444,7 +472,8 @@ export class RAGPipeline {
   }
 
   _getSqlGenerator(sourceId) {
-    const normalized = String(sourceId || "db1").trim().toLowerCase();
+    const normalized = String(sourceId || "").trim().toLowerCase();
+    if (!normalized) throw new Error("A PostgreSQL source_id is required for SQL generation.");
     if (!this.sql_generators[normalized]) {
       let context = null;
       try {
@@ -688,7 +717,7 @@ export class RAGPipeline {
       validateReadOnlyQuery(query);
       validateSqlSyntax(query);
 
-      const client = sourceId === "db2" ? await getDb2Connection() : await getConnection("db1");
+      const client = await getConnection(sourceId);
       let queryError = null;
       try {
         const res = await client.query(query, parameters);
@@ -1213,6 +1242,7 @@ export class RAGPipeline {
 
     const authorizedPostgresqlSources = authorization?.postgresql_sources || null;
     this._restrictToAuthorizedSources(authorization);
+    this._revalidateConversationReferences(conversationContext);
     await this._resolveEntity(cleanQuestion, conversationContext, authorizedPostgresqlSources);
 
     const planningQuestion = this._rewriteFollowupQuestion(cleanQuestion, conversationContext);

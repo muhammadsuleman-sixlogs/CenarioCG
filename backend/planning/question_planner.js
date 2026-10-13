@@ -841,6 +841,8 @@ export class QuestionPlanner {
 
   _build_prompt(question, context, conversationContext, resolvedEntities) {
     const availableSources = this._get_available_postgresql_sources();
+    const exampleSource = availableSources[0] || "source_id";
+    const secondaryExampleSource = availableSources[1] || exampleSource;
 
     return `
 You are the SINGLE semantic planner for a production multi-source
@@ -927,21 +929,21 @@ For example:
 CORRECT:
 {
   "data_sources": ["postgresql"],
-  "postgresql_sources": ["db1"]
+  "postgresql_sources": ["${exampleSource}"]
 }
 
 INCORRECT:
 {
-  "data_sources": ["db1"]
+  "data_sources": ["${exampleSource}"]
 }
 
 Never place a PostgreSQL source ID directly into data_sources.
 
-When the question requires facts from DB1 and DB2, return:
+When the question requires facts from more than one PostgreSQL source, return:
 
 {
   "data_sources": ["postgresql"],
-  "postgresql_sources": ["db1", "db2"]
+  "postgresql_sources": ["source_a", "source_b"]
 }
 
 and also return an explicit execution_plan.
@@ -967,9 +969,9 @@ SEMANTIC RULES
 7. A PostgreSQL relationship is valid only when it exists in the discovered
    Context Layer.
 
-8. DB1 and DB2 are separate PostgreSQL sources.
+8. PostgreSQL source IDs identify separate, isolated PostgreSQL sources.
 
-9. Never represent DB1 -> DB2 as a SQL JOIN.
+9. Never represent one PostgreSQL source -> another as a SQL JOIN.
 
 10. When one source produces identifiers needed by another source, represent
     that dependency using execution-plan input_bindings.
@@ -1088,14 +1090,14 @@ When entities are identified, each entity object in "entities" MUST have:
 {
   "id": "identifier or name",
   "type": "user|project|meeting|entity",
-  "source_id": "db1"
+  "source_id": "${exampleSource}"
 }
 Never use arbitrary keys without setting "id" and "type".
 
 When the question is a conversational follow-up (e.g. asking about a person, user,
 or entity mentioned in prior turns or meeting summaries):
 - If asking whether someone is a user or asking about a user/person by name (e.g. "is Rahim Zahid a user?", "who is Rahim Zahid"):
-  Query db1.users and filter by name fields (e.g. users.first_name contains 'Rahim', users.last_name contains 'Zahid').
+  Query only a discovered user table in an authorized selected source and filter by discovered name fields when available.
   Do NOT produce filters with empty values (such as users.id in []). Always filter by the name components.
 
 ============================================================
@@ -1109,7 +1111,7 @@ Example shape:
 {
   "question": "...",
   "data_sources": ["postgresql"],
-  "postgresql_sources": ["db1"],
+  "postgresql_sources": ["${exampleSource}"],
   "required_tables": [],
   "required_columns": [],
   "relationships": [],
@@ -1158,11 +1160,11 @@ Example structure:
 {
   "id": "s1",
   "type": "source_query",
-  "source_id": "db1",
+  "source_id": "${exampleSource}",
   "contract": {
     "question": "...",
     "data_sources": ["postgresql"],
-    "postgresql_sources": ["db1"],
+    "postgresql_sources": ["${exampleSource}"],
     "required_tables": [],
     "required_columns": [],
     "relationships": [],
@@ -1187,7 +1189,7 @@ A dependent step may contain:
 {
   "id": "s2",
   "type": "final_query",
-  "source_id": "db2",
+  "source_id": "${secondaryExampleSource}",
   "contract": {
     "...": "..."
   },
@@ -1204,10 +1206,10 @@ A dependent step may contain:
   ],
   "key_columns": [],
   "output_columns": [],
-  "purpose": "Retrieve DB2 facts constrained by project keys from DB1."
+  "purpose": "Retrieve facts constrained by verified keys from the previous source."
 }
 
-The binding target table/column must exist in the supplied DB2 Context Layer.
+The binding target table/column must exist in the supplied target Context Layer.
 
 Use:
 
@@ -1359,7 +1361,7 @@ The final execution plan step objects must use:
 {
   "id": "s1",
   "type": "source_query" | "final_query" | "set_operation",
-  "source_id": "db1",
+  "source_id": "${exampleSource}",
   "contract": {},
   "depends_on": [],
   "inputs": [],
@@ -1468,6 +1470,8 @@ The final execution plan step objects must use:
           source_qualified_meaning: entity.source_qualified_meaning,
           ordering: entity.ordering,
           provenance: entity.provenance
+          ,trust_level: entity.trust_level || "approved_semantic"
+          ,technical_entity: Boolean(entity.technical_entity)
         }]))
       };
     }
@@ -1913,8 +1917,19 @@ The final execution plan step objects must use:
       /\b[A-Za-z0-9]+-[A-Za-z0-9-]+\b/.test(question);
     const planTargetsNewTable = activeReference && Array.isArray(normalized.required_tables) &&
       normalized.required_tables.some(table => String(table).toLowerCase() !== String(activeReference.table || "").toLowerCase());
+    const technicalSemanticTarget = [...(Array.isArray(normalized.semantic_candidates) ? normalized.semantic_candidates : []), ...findSemanticCandidates(question, this.contexts)].some(candidate => {
+      const sourceId = String(candidate?.source_id || "").toLowerCase();
+      const table = String(candidate?.table || "");
+      return Boolean(this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table]?.technical_entity);
+    });
+    const activeHasDeclaredTarget = technicalSemanticTarget && Boolean(activeReference && Array.isArray(normalized.required_tables) && normalized.required_tables.some(table =>
+      (this.contexts?.[activeReference.source_id]?.relationships || []).some(relationship =>
+        (String(relationship?.source_table || "").toLowerCase() === String(activeReference.table || "").toLowerCase() && String(relationship?.target_table || "").toLowerCase() === String(table).toLowerCase()) ||
+        (String(relationship?.target_table || "").toLowerCase() === String(activeReference.table || "").toLowerCase() && String(relationship?.source_table || "").toLowerCase() === String(table).toLowerCase())
+      )
+    ));
     const isExplicitEntityChange = activeReference && !hasDeicticReference && !hasExplicitIdentifier &&
-      (this._has_explicit_new_target(question, activeReference) || planTargetsNewTable);
+      !activeHasDeclaredTarget && (this._has_explicit_new_target(question, activeReference) || planTargetsNewTable);
     if (isExplicitEntityChange) {
       normalized.needs_conversation_context = false;
       const activeValues = new Set(Object.values(activeReference.stable_keys || {}).map(value => String(value)));
@@ -2245,7 +2260,8 @@ The final execution plan step objects must use:
     const sourceId = String(active.source_id || "").trim().toLowerCase();
     const activeTable = String(active.table || "").trim();
     const stableKeys = active.stable_keys && typeof active.stable_keys === "object" ? active.stable_keys : {};
-    const explicitMultiSource = /\b(?:both|combine|across|db1|db2|sources?)\b/i.test(question);
+    const sourceMentionPattern = Object.keys(this.contexts || {}).map(source => source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).filter(Boolean).join("|");
+    const explicitMultiSource = /\b(?:both|combine|across|sources?)\b/i.test(question) || (sourceMentionPattern ? new RegExp(`\\b(?:${sourceMentionPattern})\\b`, "i").test(question) : false);
     const hasDirectSameSourceTarget = findSemanticCandidates(question, this.contexts, [sourceId]).some(candidate =>
       candidate.table !== activeTable && (this.contexts?.[sourceId]?.relationships || []).some(rel =>
         (rel.source_table === activeTable && rel.target_table === candidate.table) ||
@@ -2312,7 +2328,7 @@ The final execution plan step objects must use:
     return {
       ...plan,
       data_sources: ["postgresql"],
-      postgresql_sources: ["db1", "db2"],
+      postgresql_sources: [...distinctSources].sort(),
       required_tables: [], required_columns: [], relationships: [], filters: [], operations: ["lookup"],
       execution_plan: { mode: "multi_step", steps, final_step: `s${steps.length}` },
       semantic_path: path.steps,
@@ -3109,7 +3125,7 @@ The final execution plan step objects must use:
         {
           id: "s1",
           type: "source_query",
-          source_id: "db1",
+          source_id: this._get_available_postgresql_sources()[0] || "",
           contract: {},
           depends_on: [],
           inputs: [],
@@ -3175,7 +3191,7 @@ The final execution plan step objects must use:
 
         if (Array.isArray(relationships)) {
           return relationships.filter(
-            item => item && typeof item === "object" && item.valid !== false
+            item => item && typeof item === "object" && item.valid === true
           );
         }
       }

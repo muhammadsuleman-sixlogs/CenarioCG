@@ -1,4 +1,4 @@
-import { getConnection, getDb2Connection } from "../database/connection.js";
+import { getConnection, getPostgresqlSourceConfig } from "../database/connection.js";
 import { discoverSchema } from "../database/schema_discovery.js";
 
 /**
@@ -12,21 +12,18 @@ import { discoverSchema } from "../database/schema_discovery.js";
  *     db2 -> second PostgreSQL database
  */
 export async function build_context(source_id = "db1") {
-  let schema;
-  if (source_id === "db1") {
-    schema = await discoverSchema(getConnection);
-  } else if (source_id === "db2") {
-    schema = await discoverSchema(getDb2Connection);
-  } else {
-    throw new Error(`Unknown source: ${source_id}`);
-  }
+  const sourceId = String(source_id || "").trim().toLowerCase();
+  // Validate registration before catalog access.  discoverSchema takes a
+  // zero-argument factory, so keep the selected source bound explicitly.
+  getPostgresqlSourceConfig(sourceId);
+  const schema = await discoverSchema(() => getConnection(sourceId));
 
   const columns = schema.columns || [];
   const primary_keys = schema.primary_keys || [];
   const foreign_keys = schema.foreign_keys || [];
 
   const context = {
-    source_id,
+    source_id: sourceId,
     tables: {},
     relationships: [],
   };

@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { settings } from "./config/settings.js";
+import { refreshContextGeneration, startContextRefreshScheduler } from "./context/context_refresh.js";
 import chatRouter from "./api/chat.js";
 import feedbackRouter from "./api/feedback.js";
 import {
@@ -128,6 +129,13 @@ const isDirectRun =
   resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 
 if (isDirectRun) {
+  if (settings.contextRefreshEnabled) {
+    const scheduler = startContextRefreshScheduler({
+      intervalMs: settings.contextRefreshIntervalMs,
+      refresh: () => refreshContextGeneration({ retention: settings.contextSnapshotRetention })
+    });
+    if (settings.contextRefreshOnStartup) scheduler.run();
+  }
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 CenarioCG Node.js backend listening on http://127.0.0.1:${PORT}`);
   });

@@ -50,3 +50,10 @@ AGENTS.md
 *-response.json
 *-fixed.json
 pending-*.json
+# Playwright's standard generated artifacts and ad-hoc browser captures.
+# Existing tracked metadata/test fixtures are intentionally not removed.
+playwright-*.json
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/

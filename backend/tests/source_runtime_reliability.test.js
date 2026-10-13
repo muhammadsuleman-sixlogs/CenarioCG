@@ -148,8 +148,7 @@ test("runtime diagnostics distinguish source, SQL, network, authentication, and 
   });
 });
 
-test("retrieval executor binds DB1 explicitly at the connection boundary", () => {
-  assert.match(RetrievalExecutor.CONNECTIONS.db1.toString(), /getConnection\("db1"\)/);
-  assert.match(RetrievalExecutor.CONNECTIONS.db2.toString(), /getDb2Connection/);
+test("retrieval executor routes registered PostgreSQL sources at the connection boundary", () => {
+  assert.match(RetrievalExecutor.CONNECTION_FACTORY.toString(), /getConnection\(sourceId\)/);
   assert.throws(() => new RetrievalExecutor()._validate_source(""), error => error.code === "MISSING_SOURCE_ID");
 });

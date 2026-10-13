@@ -1,6 +1,8 @@
 import crypto from "crypto";
 import { build_context } from "./context_builder.js";
-import { save_context } from "./context_store.js";
+import { publishContextGeneration, save_context } from "./context_store.js";
+import { saveValidatedCrossSourceRelationships, validateCrossSourceRelationships } from "./cross_source_business_logic.js";
+import { getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 
 /**
  * Explicit, local snapshot lifecycle. Callers must authorize the source before
@@ -28,4 +30,63 @@ export async function refreshContextSnapshot(sourceId, { buildContext = build_co
   return canonical;
 }
 
-export default { refreshContextSnapshot };
+/**
+ * Refresh both independent sources as one coherent application metadata
+ * generation. Discovery is read-only; only local snapshot files are written.
+ * A discovery failure prevents publication and leaves the active generation
+ * untouched.
+ */
+export async function refreshContextGeneration({ sourceIds = getRegisteredPostgresqlSourceIds(), buildContext = build_context, retention = 5, now = new Date(), validateRelationships = validateCrossSourceRelationships } = {}) {
+  const registered = new Set(getRegisteredPostgresqlSourceIds());
+  const requested = [...new Set((sourceIds || []).map(sourceId => String(sourceId || "").trim().toLowerCase()))].sort();
+  if (requested.length === 0 || requested.some(sourceId => !registered.has(sourceId))) throw new Error("Context refresh requires registered PostgreSQL sources.");
+  // Build before publication.  The existing scheduler prevents overlap, and a
+  // failure leaves the active generation untouched.
+  const contexts = Object.fromEntries(await Promise.all(requested.map(async sourceId => [sourceId, await buildContext(sourceId)])));
+  for (const [sourceId, context] of Object.entries(contexts)) {
+    if (!context?.tables || Object.keys(context.tables).length === 0) {
+      throw new Error(`${sourceId} discovery returned no tables; active metadata was retained.`);
+    }
+  }
+  const publication = publishContextGeneration(contexts, { retention, now, requiredSourceIds: requested });
+  if (!publication.published) return publication;
+  // A changed schema may invalidate old cross-source edges. Revalidate using
+  // independent, read-only evidence. Keep the prior artifact if collection
+  // fails, rather than publishing an incomplete relationship set.
+  // Existing business-approved DB1/DB2 contracts retain their dedicated
+  // validation path. Other sources contribute only declared, same-source FKs
+  // until independent cross-source evidence validates a relationship.
+  if (!requested.includes("db1") || !requested.includes("db2")) return publication;
+  try {
+    const relationships = await validateRelationships(contexts.db1, contexts.db2, { publish: false });
+    if (relationships?.error_count === 0) saveValidatedCrossSourceRelationships(relationships);
+    else publication.relationships_retained = true;
+  } catch (error) {
+    publication.relationships_retained = true;
+    publication.relationship_refresh_error = String(error?.message || error);
+  }
+  return publication;
+}
+
+/** Start one bounded, non-overlapping application-local refresh loop. */
+export function startContextRefreshScheduler({ intervalMs = 15 * 60 * 1000, refresh = refreshContextGeneration, onError = null, onResult = null } = {}) {
+  const boundedInterval = Math.max(60_000, Number.isFinite(Number(intervalMs)) ? Number(intervalMs) : 15 * 60 * 1000);
+  let running = false;
+  let stopped = false;
+  const run = async () => {
+    if (running || stopped) return;
+    running = true;
+    try {
+      const result = await refresh();
+      if (typeof onResult === "function") onResult(result);
+    } catch (error) {
+      if (typeof onError === "function") onError(error);
+      else console.warn("Context metadata refresh failed; retaining last known-good generation:", error.message);
+    } finally { running = false; }
+  };
+  const timer = setInterval(run, boundedInterval);
+  if (typeof timer.unref === "function") timer.unref();
+  return { run, stop() { stopped = true; clearInterval(timer); }, interval_ms: boundedInterval };
+}
+
+export default { refreshContextSnapshot, refreshContextGeneration, startContextRefreshScheduler };

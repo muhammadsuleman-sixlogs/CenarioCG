@@ -5,6 +5,7 @@
 export * from "./context_store.js";
 export * from "./semantic_catalog.js";
 export * from "./context_builder.js";
+export * from "./context_refresh.js";
 export * from "./context_manager.js";
 export * from "./context_graph.js";
 export * from "./business_logic_store.js";
@@ -17,6 +18,7 @@ export * from "./cross_source_business_logic.js";
 
 import contextStore from "./context_store.js";
 import contextBuilder from "./context_builder.js";
+import contextRefresh from "./context_refresh.js";
 import contextManager from "./context_manager.js";
 import contextGraph from "./context_graph.js";
 import businessLogicStore from "./business_logic_store.js";
@@ -30,6 +32,7 @@ import crossSourceBusinessLogic from "./cross_source_business_logic.js";
 export default {
   ...contextStore,
   ...contextBuilder,
+  ...contextRefresh,
   ...contextManager,
   ...contextGraph,
   ...businessLogicStore,

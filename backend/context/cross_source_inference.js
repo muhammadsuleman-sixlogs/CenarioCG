@@ -611,22 +611,25 @@ export function _is_child_of(tableName, fkColumnsSet, entityTable) {
 }
 
 /**
- * Generate dynamic DB1 -> DB2 relationship candidates.
+ * Generate dynamic relationship candidates for two source-qualified contexts.
  * Schema-driven and read-only. Nothing is hardcoded per database.
  */
-export function findCrossSourceCandidates(db1Context, db2Context) {
-  const db1Columns = _table_columns(db1Context);
-  const db2Columns = _table_columns(db2Context);
+export function findCrossSourceCandidates(sourceContext, targetContext) {
+  const sourceSystem = String(sourceContext?.source_id || "").trim().toLowerCase();
+  const targetSystem = String(targetContext?.source_id || "").trim().toLowerCase();
+  if (!sourceSystem || !targetSystem || sourceSystem === targetSystem) return [];
+  const sourceColumns = _table_columns(sourceContext);
+  const targetColumns = _table_columns(targetContext);
 
-  const db1Pks = _primary_keys(db1Context);
-  const db2Pks = _primary_keys(db2Context);
+  const sourcePks = _primary_keys(sourceContext);
+  const targetPks = _primary_keys(targetContext);
 
-  const db1Fks = _foreign_key_columns(db1Context);
-  const db2Fks = _foreign_key_columns(db2Context);
+  const sourceFks = _foreign_key_columns(sourceContext);
+  const targetFks = _foreign_key_columns(targetContext);
 
   let candidates = [];
 
-  for (const [sourceTable, sourceCols] of Object.entries(db1Columns)) {
+  for (const [sourceTable, sourceCols] of Object.entries(sourceColumns)) {
     for (const sourceInfo of sourceCols) {
       if (!sourceInfo || typeof sourceInfo !== "object") continue;
 
@@ -636,8 +639,8 @@ export function findCrossSourceCandidates(db1Context, db2Context) {
       const sourceColStr = String(sourceColumn);
       const sourceNorm = _normalize(sourceColStr);
 
-      const sourceIsPk = (db1Pks[sourceTable] || new Set()).has(sourceNorm);
-      const sourceIsFk = db1Fks.has(`${sourceTable}|${sourceNorm}`);
+      const sourceIsPk = (sourcePks[sourceTable] || new Set()).has(sourceNorm);
+      const sourceIsFk = sourceFks.has(`${sourceTable}|${sourceNorm}`);
       const sourceIsPkId = sourceIsPk && sourceNorm === "id";
       const sourceIsEntityKey = ENTITY_KEY_COLUMNS.has(sourceNorm);
 
@@ -654,9 +657,9 @@ export function findCrossSourceCandidates(db1Context, db2Context) {
         continue;
       }
 
-      const sourceType = _column_type(db1Columns, sourceTable, sourceColStr);
+      const sourceType = _column_type(sourceColumns, sourceTable, sourceColStr);
 
-      for (const [targetTable, targetCols] of Object.entries(db2Columns)) {
+      for (const [targetTable, targetCols] of Object.entries(targetColumns)) {
         const tableSimilarity = _semantic_similarity(sourceTable, targetTable);
         const sameSemanticTable = tableSimilarity >= 0.5;
 
@@ -669,8 +672,8 @@ export function findCrossSourceCandidates(db1Context, db2Context) {
           const targetColStr = String(targetColumn);
           const targetNorm = _normalize(targetColStr);
 
-          const targetIsPk = (db2Pks[targetTable] || new Set()).has(targetNorm);
-          const targetIsFk = db2Fks.has(`${targetTable}|${targetNorm}`);
+          const targetIsPk = (targetPks[targetTable] || new Set()).has(targetNorm);
+          const targetIsFk = targetFks.has(`${targetTable}|${targetNorm}`);
           const targetIsPkId = targetIsPk && targetNorm === "id";
           const targetIsEntityKey = ENTITY_KEY_COLUMNS.has(targetNorm);
 
@@ -710,7 +713,7 @@ export function findCrossSourceCandidates(db1Context, db2Context) {
             }
           }
 
-          const targetType = _column_type(db2Columns, targetTable, targetColStr);
+          const targetType = _column_type(targetColumns, targetTable, targetColStr);
 
           // Type compatibility
           if (!_types_compatible(sourceType, targetType)) {
@@ -728,7 +731,7 @@ export function findCrossSourceCandidates(db1Context, db2Context) {
           // Primary-key "id" on the source side
           if (sourceIsPkId && !entityKeyPair) {
             if (!sameSemanticTable) continue;
-            if (_is_child_of(sourceTable, db1Fks, targetTable)) continue;
+            if (_is_child_of(sourceTable, sourceFks, targetTable)) continue;
           }
 
           // Semantic gate
@@ -794,8 +797,8 @@ export function findCrossSourceCandidates(db1Context, db2Context) {
 
           candidates.push({
             relationship_type: "CROSS_SOURCE_SEMANTIC",
-            source_system: "db1",
-            target_system: "db2",
+            source_system: sourceSystem,
+            target_system: targetSystem,
             source_table: sourceTable,
             source_column: sourceColStr,
             target_table: targetTable,

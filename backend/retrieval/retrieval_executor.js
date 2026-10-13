@@ -1,4 +1,4 @@
-import { getConnection, getDb2Connection } from "../database/connection.js";
+import { getConnection, getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 import { validateSqlSyntax } from "./sql_validator.js";
 
@@ -21,12 +21,9 @@ import { validateSqlSyntax } from "./sql_validator.js";
  * PostgreSQL remains strictly READ-ONLY.
  */
 export class RetrievalExecutor {
-  static CONNECTIONS = {
-    // getConnection requires an explicit source. Keep the source binding at
-    // the final execution boundary so an empty identifier cannot reach getPool.
-    db1: () => getConnection("db1"),
-    db2: getDb2Connection,
-  };
+  // Keep source binding at the final execution boundary. The registry is
+  // configuration-owned; it does not convey workspace authorization.
+  static CONNECTION_FACTORY = sourceId => getConnection(sourceId);
 
   static MAX_ROWS_RETURNED = 50000;
   static FETCH_BATCH_SIZE = 1000;
@@ -41,8 +38,7 @@ export class RetrievalExecutor {
     const validQuery = this._validate_query(query);
     const normalized_parameters = this._normalize_parameters(parameters);
 
-    const connectionFactory = RetrievalExecutor.CONNECTIONS[source_id];
-    const connection = await connectionFactory();
+    const connection = await RetrievalExecutor.CONNECTION_FACTORY(source_id);
 
     try {
       // Convert %s placeholders to $1, $2, ... for node-postgres if needed
@@ -97,7 +93,7 @@ export class RetrievalExecutor {
       throw error;
     }
     const normalized = sourceId.trim().toLowerCase();
-    if (!Object.prototype.hasOwnProperty.call(RetrievalExecutor.CONNECTIONS, normalized)) {
+    if (!getRegisteredPostgresqlSourceIds().includes(normalized)) {
       const error = new Error(`Unsupported PostgreSQL source: ${normalized}`);
       error.code = "UNSUPPORTED_SOURCE_ID";
       throw error;
