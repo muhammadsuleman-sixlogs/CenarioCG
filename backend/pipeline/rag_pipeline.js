@@ -829,9 +829,12 @@ export class RAGPipeline {
     let evidenceSequence = 0;
     const appendLineage = (result) => {
       const rows = Array.isArray(result?.retrieval?.rows) ? result.retrieval.rows : [];
+      const maxRows = Number.isInteger(this.evidence_manager?.maxRows)
+        ? this.evidence_manager.maxRows
+        : 50;
       const sources = Array.isArray(result?.sources) ? result.sources : [];
       const table = sources[0]?.tables?.[0] || null;
-      for (const row of rows) {
+      for (const row of rows.slice(0, maxRows)) {
         evidence.items.push({
           evidence_id: `e${++evidenceSequence}`,
           source_id: result.source_id || null,
@@ -839,7 +842,7 @@ export class RAGPipeline {
           table,
           retrieval_status: result.retrieval_status || "unknown",
           retrieved_at: result.retrieved_at || null,
-          truncated: Boolean(result.retrieval?.truncated),
+          truncated: Boolean(result.retrieval?.truncated) || rows.length > maxRows,
           row
         });
       }

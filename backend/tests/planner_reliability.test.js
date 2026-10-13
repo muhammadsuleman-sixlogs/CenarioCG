@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert";
 import { QuestionPlanner } from "../planning/question_planner.js";
 import { RAGPipeline } from "../pipeline/rag_pipeline.js";
+import { loadAllContexts } from "../context/context_store.js";
 
 const contexts = {
   db1: { tables: { work_items: { primary_keys: ["id"], columns: [{ name: "id", type: "uuid" }, { name: "created_at", type: "timestamp" }] } } },
@@ -59,6 +60,111 @@ test("metadata fallback produces a safe count plan when the semantic planner is 
   assert.deepStrictEqual(plan.operations, ["count"]);
 });
 
+test("incomplete provider count plans use the bounded metadata fallback", async () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  planner.client = {
+    responses: {
+      async create() {
+        return { output_text: JSON.stringify({
+          data_sources: ["postgresql"],
+          postgresql_sources: ["db1"],
+          required_tables: [],
+          required_columns: [],
+          filters: [],
+          operations: ["count"]
+        }) };
+      }
+    }
+  };
+
+  const plan = await planner.plan("What is the total number of companies?");
+  assert.ok(plan.execution_plan.steps.every(step => step.contract.required_tables.includes("companies")));
+  assert.equal(plan.operations.includes("count"), true);
+});
+
+test("provider steps without an executable table use the bounded metadata fallback", async () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  planner.client = {
+    responses: {
+      async create() {
+        return { output_text: JSON.stringify({
+          data_sources: ["postgresql"],
+          postgresql_sources: ["db1"],
+          required_tables: [],
+          required_columns: [],
+          filters: [],
+          operations: ["lookup"],
+          execution_plan: {
+            mode: "single",
+            steps: [{ id: "s1", type: "source_query", source_id: "db1", contract: { required_tables: [] } }]
+          }
+        }) };
+      }
+    }
+  };
+  const plan = await planner.plan("List all projects.");
+  assert.ok(plan.execution_plan.steps.every(step => step.contract.required_tables.length > 0));
+});
+
+test("explicit multi-source status and recent intents stay on grounded metadata plans", async () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  planner.client = {
+    responses: {
+      async create() {
+        return { output_text: JSON.stringify({
+          data_sources: ["postgresql"],
+          postgresql_sources: ["db1", "db2"],
+          required_tables: [],
+          filters: [],
+          operations: [],
+          clarification_required: { type: "business_status_semantics" }
+        }) };
+      }
+    }
+  };
+
+  const active = await planner.plan("Show active projects.");
+  assert.equal(active.clarification_required, undefined);
+  assert.equal(active.execution_plan.steps.length, 2);
+  assert.ok(active.execution_plan.steps.every(step => step.contract.filters.length === 1));
+
+  const recent = await planner.plan("Show recent meetings.");
+  assert.deepStrictEqual(recent.required_tables, ["sessions"]);
+  assert.deepStrictEqual(recent.sorting, [{ field: "sessions.created_at", direction: "desc" }]);
+});
+
+test("explicit entity changes do not inherit prior stable identifiers", () => {
+  const planner = new QuestionPlanner({
+    db2: {
+      tables: {
+        sessions: { columns: [{ name: "id" }, { name: "session_id" }] },
+        meeting_summaries: { columns: [{ name: "id" }, { name: "session_id" }] },
+        users: { columns: [{ name: "id" }, { name: "email" }] }
+      },
+      relationships: [{ source_table: "meeting_summaries", source_column: "session_id", target_table: "sessions", target_column: "session_id" }]
+    }
+  });
+  const plan = planner._normalize_plan({
+    data_sources: ["postgresql"],
+    postgresql_sources: ["db2"],
+    required_tables: ["meeting_summaries"],
+    required_columns: ["meeting_summaries.id"],
+    filters: [{ table: "meeting_summaries", field: "session_id", operator: "=", value: "session-1" }],
+    relationships: [],
+    operations: ["lookup"],
+    needs_conversation_context: true
+  }, "List meeting summaries.", {
+    active_context: {
+      source_id: "db2",
+      table: "sessions",
+      stable_keys: { session_id: "session-1" }
+    }
+  });
+
+  assert.equal(plan.needs_conversation_context, false);
+  assert.equal(plan.filters.some(filter => filter.value === "session-1"), false);
+});
+
 test("approved status mappings resolve compact and punctuated natural-language variants", () => {
   const planner = new QuestionPlanner({
     db1: {
@@ -100,4 +206,83 @@ test("normalized plans expose one intent contract without changing legacy fields
   assert.deepStrictEqual(plan.intent.source_ids, ["db1"]);
   assert.equal(plan.intent.mandatory_filters[0].value, "u1");
   assert.deepStrictEqual(plan.required_tables, ["users"]);
+});
+
+test("reported basic and follow-up questions retain source-local intent and anchors", async () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  planner.client = null;
+
+  const recent = await planner.plan("Show me recent meetings");
+  assert.deepStrictEqual(recent.postgresql_sources, ["db2"]);
+  assert.deepStrictEqual(recent.required_tables, ["sessions"]);
+  assert.deepStrictEqual(recent.sorting, [{ field: "sessions.created_at", direction: "desc" }]);
+
+  const companies = await planner.plan("Show me total companies");
+  assert.deepStrictEqual(companies.postgresql_sources, ["db1", "db2"]);
+  assert.equal(companies.execution_plan.steps.length, 2);
+  assert.ok(companies.execution_plan.steps.every(step => step.depends_on.length === 0));
+
+  const sessionContext = {
+    active_context: {
+      source_id: "db2",
+      table: "sessions",
+      stable_keys: { session_id: "9bbd6019-0c45-4077-9040-cc02d6dca87b", project_id: "9bbd6019-0c45-4077-9040-cc02d6dca87b" }
+    }
+  };
+  const associated = planner._normalize_plan({
+    data_sources: ["postgresql"],
+    postgresql_sources: ["db2"],
+    required_tables: ["projects"],
+    required_columns: ["projects.project_id"],
+    filters: [{ table: "projects", field: "status", operator: "=", value: "associated" }],
+    relationships: [],
+    operations: ["lookup"],
+    clarification_required: { type: "business_status_semantics", message: "provider status clarification" }
+  }, "Which project is associated with it?", sessionContext);
+  assert.deepStrictEqual(associated.required_tables, ["projects"]);
+  assert.ok(associated.filters.some(filter => filter.field === "project_id" && filter.value === sessionContext.active_context.stable_keys.project_id));
+  assert.ok(!associated.filters.some(filter => String(filter.field).toLowerCase() === "status"));
+  assert.equal(associated.clarification_required, undefined);
+
+  const details = await planner.plan("Show me that project's details", {
+    active_context: { source_id: "db2", table: "projects", stable_keys: { project_id: "9bbd6019-0c45-4077-9040-cc02d6dca87b" } }
+  });
+  assert.equal(details.execution_plan.steps[0].source_id, "db2");
+  assert.equal(details.execution_plan.steps.at(-1).source_id, "db1");
+  assert.equal(details.execution_plan.steps.at(-1).contract.required_tables[0], "project_details");
+});
+
+test("ordinary table nouns remain selectable when semantic candidates are present", async () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  planner.client = null;
+
+  const invoices = await planner.plan("List recent invoices.");
+  assert.deepStrictEqual(invoices.postgresql_sources, ["db1"]);
+  assert.deepStrictEqual(invoices.required_tables, ["invoices"]);
+  assert.deepStrictEqual(invoices.sorting, [{ field: "invoices.created_at", direction: "desc" }]);
+
+  const actions = await planner.plan("Show action items for a project.");
+  assert.deepStrictEqual(actions.postgresql_sources, ["db2"]);
+  assert.deepStrictEqual(actions.required_tables, ["action_items"]);
+});
+
+test("aggregate amount wording is not converted into a status filter", async () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  planner.client = null;
+  const plan = await planner.plan("What is the total invoice amount?");
+  assert.deepStrictEqual(plan.postgresql_sources, ["db1"]);
+  assert.deepStrictEqual(plan.required_tables, ["invoices"]);
+  assert.deepStrictEqual(plan.operations, ["lookup", "sum"]);
+  assert.deepStrictEqual(plan.requested_metrics, [{ operation: "sum", table: "invoices", column: "total_amount", source_id: "db1", label: "total_amount", distinct: false }]);
+  assert.equal(plan.filters.some(filter => String(filter.field || filter.column).toLowerCase() === "status"), false);
+});
+
+test("status phrases use bounded runtime verification for list and count plans", async () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  planner.client = null;
+  for (const question of ["Show pending tickets.", "How many projects are currently in progress?"]) {
+    const plan = await planner.plan(question);
+    assert.ok(plan.filters.some(filter => filter.verification === "runtime_distinct_required"), JSON.stringify(plan));
+    assert.equal(plan.clarification_required, undefined, JSON.stringify(plan));
+  }
 });

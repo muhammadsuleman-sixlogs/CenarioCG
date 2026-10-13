@@ -281,3 +281,48 @@ test("categorical verification database failures do not run the aggregate", asyn
   assert.equal(calls.length, 1);
   assert.match(calls[0], /ILIKE \$1/i);
 });
+
+test("enum categorical filters cast to text before case-insensitive comparison", () => {
+  const generator = new SQLGenerator({
+    tables: {
+      project_details: {
+        columns: [
+          { name: "id", type: "uuid" },
+          { name: "status", type: "USER-DEFINED" }
+        ],
+        primary_keys: ["id"]
+      }
+    },
+    relationships: []
+  }, "db1");
+  const plan = {
+    data_sources: ["postgresql"],
+    postgresql_sources: ["db1"],
+    required_tables: ["project_details"],
+    required_columns: ["project_details.id"],
+    filters: [{ table: "project_details", field: "status", operator: "case_insensitive_equals", value: "active" }],
+    relationships: [],
+    operations: ["lookup"],
+    limit: 10
+  };
+  const sql = generator.generate(plan, "db1");
+  assert.match(sql, /CAST\("project_details"\."status" AS text\) ILIKE 'active'/i);
+  validateReadOnlyQuery(sql);
+});
+
+test("bounded categorical verification accepts verified separator variants", () => {
+  const generator = new SQLGenerator({
+    tables: { projects: { columns: [{ name: "status", type: "character varying" }] } },
+    relationships: []
+  }, "db2");
+  const verification = generator.generateCategoricalExistence("projects", "status", "in progress", "db2");
+  assert.match(verification.query, /regexp_replace\(lower\(CAST\("projects"\."status" AS text\)\)/i);
+  validateReadOnlyQuery(verification.query);
+  const sql = generator.generate({
+    data_sources: ["postgresql"], postgresql_sources: ["db2"], required_tables: ["projects"],
+    required_columns: ["projects.status"], filters: [{ table: "projects", field: "status", operator: "case_insensitive_equals", value: "in progress" }],
+    relationships: [], operations: ["lookup"]
+  }, "db2");
+  assert.match(sql, /regexp_replace\(lower\(CAST\("projects"\."status" AS text\)\)/i);
+  validateReadOnlyQuery(sql);
+});

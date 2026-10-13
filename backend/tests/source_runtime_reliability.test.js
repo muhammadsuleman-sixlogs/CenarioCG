@@ -79,6 +79,24 @@ test("simple DB1 and DB2 pipeline execution passes only explicit source IDs to r
   assert.deepEqual(calls.map(call => call.sourceId), ["db1", "db2"]);
 });
 
+test("bounded evidence lineage does not expand large read-only list results", () => {
+  const pipeline = new RAGPipeline(new ContextManager());
+  const rows = Array.from({ length: 75 }, (_, index) => ({ id: `row-${index}` }));
+  const evidence = pipeline._prepareEvidence([{
+    source_id: "db1",
+    retrieval_status: "success_with_data",
+    retrieval: { rows, columns: ["id"], row_count: rows.length },
+    sources: [{ source_id: "db1", tables: ["users"] }]
+  }]);
+
+  assert.equal(evidence.items.length, 50);
+  assert.equal(evidence.items.at(-1).row.id, "row-49");
+  assert.equal(evidence.items.every(item => item.truncated), true);
+  assert.equal(evidence.postgresql.rows.length, 50);
+  assert.equal(evidence.postgresql.total_retrieved, 75);
+  assert.equal(evidence.postgresql.truncated, true);
+});
+
 test("multi-step DB1 to DB2 execution preserves explicit source IDs through bindings", async () => {
   const calls = [];
   const pipeline = new RAGPipeline(new ContextManager());

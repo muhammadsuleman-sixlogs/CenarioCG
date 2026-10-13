@@ -5,7 +5,9 @@ export default function AgentFeedbackRow({
   precedingQuestion,
   apiBaseUrl,
   getAuthHeaders,
-  onFeedbackRecorded
+  onFeedbackRecorded,
+  onCopy,
+  copied = false
 }) {
   const [feedbackType, setFeedbackType] = useState(message.feedbackState || null);
   const [showWrongPrompt, setShowWrongPrompt] = useState(false);
@@ -110,6 +112,16 @@ export default function AgentFeedbackRow({
         <span className="feedback-hint">Rate this response:</span>
 
         <div className="feedback-buttons-group">
+          <button
+            type="button"
+            className="feedback-icon-btn copy-response-btn"
+            onClick={onCopy}
+            title="Copy response"
+            aria-label="Copy response"
+          >
+            <span className="btn-icon">{copied ? "✓" : "⧉"}</span>
+          </button>
+
           <button
             type="button"
             className={`feedback-icon-btn thumbs-up ${feedbackType === "positive" ? "active" : ""}`}

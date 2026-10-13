@@ -373,13 +373,16 @@ function App() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isChatMinimized, setIsChatMinimized] = useState(false);
   const [chatPosition, setChatPosition] = useState(null);
+  const [chatWidth, setChatWidth] = useState(390);
   const chatPanelRef = useRef(null);
   const chatDragRef = useRef(null);
+  const chatResizeRef = useRef(null);
   const graphPanelRef = useRef(null);
   const [feedbackCount, setFeedbackCount] = useState(0);
 
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([]);
+  const [copiedMessageKey, setCopiedMessageKey] = useState(null);
   const [conversationId, setConversationId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -730,6 +733,36 @@ function App() {
     });
   };
 
+  const handleChatResizeDown = (event) => {
+    event.stopPropagation();
+    const panel = chatPanelRef.current;
+    if (!panel) return;
+
+    chatResizeRef.current = {
+      startX: event.clientX,
+      startWidth: panel.getBoundingClientRect().width,
+    };
+
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    event.currentTarget.classList.add("is-resizing");
+  };
+
+  const handleChatResizeMove = (event) => {
+    if (!chatResizeRef.current) return;
+
+    const minimumWidth = 320;
+    const maximumWidth = Math.min(720, window.innerWidth - 24);
+    const nextWidth = chatResizeRef.current.startWidth +
+      (chatResizeRef.current.startX - event.clientX);
+
+    setChatWidth(Math.min(Math.max(minimumWidth, nextWidth), maximumWidth));
+  };
+
+  const handleChatResizeUp = (event) => {
+    chatResizeRef.current = null;
+    event.currentTarget.classList.remove("is-resizing");
+  };
+
   const handleChatPointerUp = (event) => {
     chatDragRef.current = null;
     event.currentTarget.classList.remove("is-dragging");
@@ -809,8 +842,59 @@ function App() {
     }
   }, [isChatOpen]);
 
+  useEffect(() => {
+    if (!isChatOpen) return undefined;
+
+    const clearUserMessageSelection = () => {
+      const selection = window.getSelection?.();
+      const anchorElement = selection?.anchorNode?.parentElement;
+
+      if (
+        selection?.rangeCount &&
+        anchorElement?.closest?.(".floating-chat .message.user")
+      ) {
+        selection.removeAllRanges();
+      }
+    };
+
+    document.addEventListener("selectionchange", clearUserMessageSelection);
+    return () => {
+      document.removeEventListener("selectionchange", clearUserMessageSelection);
+    };
+  }, [isChatOpen]);
+
   const handleEntitySelect = useCallback((entity) => {
     setSelectedEntity(entity);
+  }, []);
+
+  const handleCopyMessage = useCallback(async (content, messageKey) => {
+    const text = String(content || "");
+    if (!text) return;
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const copyArea = document.createElement("textarea");
+        copyArea.value = text;
+        copyArea.setAttribute("readonly", "");
+        copyArea.style.position = "fixed";
+        copyArea.style.opacity = "0";
+        document.body.appendChild(copyArea);
+        copyArea.select();
+        document.execCommand("copy");
+        copyArea.remove();
+      }
+
+      setCopiedMessageKey(messageKey);
+      window.setTimeout(() => {
+        setCopiedMessageKey((current) =>
+          current === messageKey ? null : current
+        );
+      }, 1600);
+    } catch {
+      setCopiedMessageKey(null);
+    }
   }, []);
 
   const handleInspectEntity = useCallback((entity) => {
@@ -1059,7 +1143,7 @@ function App() {
             title="New Chat"
             onClick={handleNewChat}
           >
-            <span className="sidebar-plus-icon" aria-hidden="true">+</span>
+            <span className="sidebar-plus-icon" aria-hidden="true">✎</span>
             <span className="sidebar-button-text">
               New Chat
             </span>
@@ -1439,8 +1523,22 @@ function App() {
           <section
             ref={chatPanelRef}
             className={`panel chat-panel floating-chat ${isChatMinimized ? "is-minimized" : ""}`}
-            style={chatPosition ? { left: `${chatPosition.left}px`, top: `${chatPosition.top}px`, right: "auto", bottom: "auto" } : undefined}
+            style={{
+              width: `${chatWidth}px`,
+              ...(chatPosition
+                ? { left: `${chatPosition.left}px`, top: `${chatPosition.top}px`, right: "auto", bottom: "auto" }
+                : {}),
+            }}
           >
+            <div
+              className="chat-resize-handle"
+              role="separator"
+              aria-label="Resize chat width"
+              onPointerDown={handleChatResizeDown}
+              onPointerMove={handleChatResizeMove}
+              onPointerUp={handleChatResizeUp}
+              onPointerCancel={handleChatResizeUp}
+            />
             <div
               className="panel-header chat-header"
               onClick={(event) => {
@@ -1510,13 +1608,15 @@ function App() {
                       <div
                         key={`msg-${index}`}
                         className={`message ${message.role}`}
-                        onMouseDown={message.role === "user" ? (event) => event.preventDefault() : undefined}
                       >
                         <div className="message-role">
                           {message.role}
                         </div>
 
-                        <div className="message-content">
+                        <div
+                          className={`message-body ${message.role === "user" ? "user-message-body" : "assistant-message-body"}`}
+                          onMouseDown={message.role === "user" ? (event) => event.preventDefault() : undefined}
+                        >
                           {message.role === "assistant" ? (
                             <StreamingMarkdown
                               content={message.content}
@@ -1535,6 +1635,22 @@ function App() {
                             message.content
                           )}
                         </div>
+
+                        {message.role === "user" && (
+                          <div className="message-actions user-message-actions">
+                            <button
+                              type="button"
+                              className="message-copy-btn"
+                              onClick={() =>
+                                handleCopyMessage(message.content, `user-${index}`)
+                              }
+                              title="Copy question"
+                              aria-label="Copy question"
+                            >
+                              {copiedMessageKey === `user-${index}` ? "✓" : "⧉"}
+                            </button>
+                          </div>
+                        )}
 
                         {message.role ===
                           "assistant" &&
@@ -1652,6 +1768,10 @@ function App() {
                             apiBaseUrl={API_BASE_URL}
                             getAuthHeaders={getAuthHeaders}
                             onFeedbackRecorded={fetchFeedbackCount}
+                            onCopy={() =>
+                              handleCopyMessage(message.content, `assistant-${index}`)
+                            }
+                            copied={copiedMessageKey === `assistant-${index}`}
                           />
                         )}
 
@@ -1670,7 +1790,7 @@ function App() {
                         assistant
                       </div>
 
-                      <div className="message-content">
+                      <div className="message-body assistant-message-body">
                         <span className="thinking-indicator">
                           <span />
                           <span />

@@ -143,9 +143,14 @@ export class SQLGenerator {
 
     const table = this._resolve_table(table_name);
     const column = this._resolve_column(table, column_name);
+    const operand = this._case_insensitive_operand(table, column);
+    const requested = String(value ?? "");
+    const condition = /[\s-]/.test(requested)
+      ? this._normalized_categorical_comparison(operand, "$1")
+      : `${operand} ILIKE $1`;
     const query = this._normalize_sql(
       `SELECT 1 AS "exists" FROM ${this._quote_identifier(table)} ` +
-      `WHERE ${this._qualified_identifier(table, column)} ILIKE $1 LIMIT 1`
+      `WHERE ${condition} LIMIT 1`
     );
     validateReadOnlyQuery(query);
     validateSqlSyntax(query);
@@ -1161,14 +1166,14 @@ export class SQLGenerator {
 
       const qualified = this._qualified_identifier(table_name, column_name);
       result.push(
-        this._compile_filter_expression(qualified, operator, raw_val)
+        this._compile_filter_expression(qualified, operator, raw_val, table_name, column_name)
       );
     }
 
     return result;
   }
 
-  _compile_filter_expression(qualified, operator, value) {
+  _compile_filter_expression(qualified, operator, value, table_name = null, column_name = null) {
     if (operator === "is_null") {
       return `${qualified} IS NULL`;
     }
@@ -1178,7 +1183,13 @@ export class SQLGenerator {
     }
 
     if (operator === "case_insensitive_equals") {
-      return `${qualified} ILIKE ${this._sql_literal(String(value))}`;
+      const operand = table_name && column_name
+        ? this._case_insensitive_operand(table_name, column_name, qualified)
+        : qualified;
+      if (/[\s-]/.test(String(value))) {
+        return this._normalized_categorical_comparison(operand, this._sql_literal(String(value)));
+      }
+      return `${operand} ILIKE ${this._sql_literal(String(value))}`;
     }
 
     if (operator === "in") {
@@ -1244,6 +1255,22 @@ export class SQLGenerator {
     }
 
     return `${qualified} ${operator} ${this._sql_literal(value)}`;
+  }
+
+  _case_insensitive_operand(table_name, column_name, qualified = null) {
+    const metadata = this._column_metadata(table_name, column_name);
+    const operand = qualified || this._qualified_identifier(table_name, column_name);
+    const dataType = String(metadata?.data_type || metadata?.type || "").trim().toLowerCase();
+    // PostgreSQL enums/user-defined categorical types do not implement the
+    // text pattern operator directly. Cast only those discovered columns; keep
+    // ordinary varchar/text predicates unchanged.
+    return dataType === "user-defined" || dataType.endsWith("enum")
+      ? `CAST(${operand} AS text)`
+      : operand;
+  }
+
+  _normalized_categorical_comparison(operand, valueExpression) {
+    return `regexp_replace(lower(CAST(${operand} AS text)), '[^a-z0-9]+', '', 'g') = regexp_replace(lower(${valueExpression}), '[^a-z0-9]+', '', 'g')`;
   }
 
   // ------------------------------------------------------------------

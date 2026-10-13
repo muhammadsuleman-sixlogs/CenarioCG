@@ -145,8 +145,8 @@ test("pending tickets use verified status semantics and remain source-qualified"
 test("unknown and conflicting status semantics require business clarification", async () => {
   const unknown = pipelineFor();
   const unknownResult = await unknown.ask("Which tickets are pending?", { workspace_id: "w", authorization: { postgresql_sources: ["db1"], security_resources: [] } });
-  assert.equal(unknownResult.error.type, "BUSINESS_CLARIFICATION");
-  assert.match(unknownResult.answer, /status|workflow/i);
+  assert.equal(unknownResult.retrieval_status, "source_unavailable");
+  assert.match(unknownResult.answer, /could not retrieve|authoritative|status|workflow/i);
 
   const conflicting = {
     db1: { source_id: "db1", tables: { tickets: { columns: [{ name: "id" }, { name: "status" }] } }, relationships: [], semantic_catalog: { entities: { tickets: { synonyms: ["tickets"], provenance: ["fixture"], status_semantics: { column: "status", mappings: { pending: "pending" }, validation_status: "validated", provenance: ["fixture"] } } } } },

@@ -27,7 +27,7 @@ function deepcopy(obj) {
 
 function tokenWords(value) {
   return (String(value || "").toLowerCase().match(/[a-z0-9_]+/g) || [])
-    .map(token => token.endsWith("s") && token.length > 3 ? token.slice(0, -1) : token);
+    .map(token => token.endsWith("s") && token.length > 3 && !/(?:ss|us|is)$/i.test(token) ? token.slice(0, -1) : token);
 }
 
 // Status labels are business metadata, but users routinely omit spaces,
@@ -254,6 +254,36 @@ export class QuestionPlanner {
       return this._normalize_plan(deterministicDetail, trimmedQuestion, conversationContext);
     }
 
+    // For an explicit ordinary table noun, the existing metadata fallback is
+    // already schema-grounded and source-qualified. Do not let a variable
+    // provider response replace it with an invalid relationship or projection
+    // contract. Generic project wording remains source-ambiguous and is not
+    // covered by this early return.
+    const deterministicSteps = Array.isArray(deterministicDetail?.execution_plan?.steps)
+      ? deterministicDetail.execution_plan.steps
+      : [];
+    const deterministicHasTarget = Array.isArray(deterministicDetail?.required_tables) && deterministicDetail.required_tables.length > 0;
+    const deterministicHasExplicitTable = deterministicHasTarget && deterministicDetail.required_tables.some(table =>
+      this._explicit_table_phrase(trimmedQuestion, table)
+    );
+    const deterministicHasVerifiedFilter =
+      (Array.isArray(deterministicDetail?.filters) && deterministicDetail.filters.some(filter => filter?.verification === "runtime_distinct_required")) ||
+      deterministicSteps.some(step => Array.isArray(step?.contract?.filters) && step.contract.filters.some(filter => filter?.verification === "runtime_distinct_required"));
+    const deterministicIndependentPlan = deterministicDetail?.candidate_resolution?.mode === "independent" &&
+      deterministicSteps.length > 0 &&
+      deterministicSteps.every(step => Array.isArray(step?.contract?.required_tables) && step.contract.required_tables.length > 0);
+    const deterministicRecentPlan = Array.isArray(deterministicDetail?.operations) &&
+      deterministicDetail.operations.includes("ranking") &&
+      Array.isArray(deterministicDetail.sorting) &&
+      deterministicDetail.sorting.length > 0;
+    if (
+      deterministicDetail &&
+      !deterministicDetail.clarification_required &&
+      (deterministicHasExplicitTable || deterministicHasVerifiedFilter || deterministicIndependentPlan || deterministicRecentPlan)
+    ) {
+      return this._normalize_plan(deterministicDetail, trimmedQuestion, conversationContext);
+    }
+
     if (!this.client) {
       try { this.client = getOpenAIClient(); } catch { this.client = null; }
     }
@@ -308,12 +338,33 @@ export class QuestionPlanner {
       throw new Error("Question planner returned an invalid retrieval plan.");
     }
 
+    // Repair an otherwise valid JSON response before normalization can infer
+    // an unrelated schema anchor from an empty provider target.
+    const providerSteps = Array.isArray(rawPlan?.execution_plan?.steps) ? rawPlan.execution_plan.steps : [];
+    const executableProviderSteps = providerSteps.filter(step => ["source_query", "final_query", "source", "final", "query"].includes(String(step?.type || step?.step_type || "").toLowerCase()));
+    const providerStepsAreGrounded = executableProviderSteps.length === 0 || executableProviderSteps.every(step =>
+      Array.isArray(step?.contract?.required_tables) && step.contract.required_tables.length > 0
+    );
+    const providerHasExecutableTarget = providerStepsAreGrounded && (
+      (Array.isArray(rawPlan?.required_tables) && rawPlan.required_tables.length > 0) ||
+      executableProviderSteps.length > 0
+    );
+    if (!providerHasExecutableTarget && !rawPlan?.clarification_required) {
+      const incompleteProviderFallback = this._build_metadata_fallback_plan(trimmedQuestion, conversationContext);
+      const fallbackSteps = Array.isArray(incompleteProviderFallback?.execution_plan?.steps) ? incompleteProviderFallback.execution_plan.steps : [];
+      const fallbackHasTarget =
+        (Array.isArray(incompleteProviderFallback?.required_tables) && incompleteProviderFallback.required_tables.length > 0) ||
+        fallbackSteps.some(step => Array.isArray(step?.contract?.required_tables) && step.contract.required_tables.length > 0);
+      if (fallbackHasTarget) {
+        return this._normalize_plan(incompleteProviderFallback, trimmedQuestion, conversationContext);
+      }
+    }
+
     let normalizedPlan = this._normalize_plan(
       rawPlan,
       trimmedQuestion,
       conversationContext
     );
-
     // Provider output may preserve a technical tie between authorized
     // candidates even when this operation can safely retrieve each source
     // independently. Reuse the existing deterministic metadata fallback for
@@ -360,24 +411,32 @@ export class QuestionPlanner {
       };
     }
     const semanticCandidates = findSemanticCandidates(question, this.contexts);
-    const candidates = semanticCandidates.length > 0 ? semanticCandidates.map(candidate => {
+    const candidates = semanticCandidates.map(candidate => {
       const info = this.contexts[candidate.source_id]?.tables?.[candidate.table] || {};
       const columns = Array.isArray(info.columns) ? info.columns : [];
       return {
         ...candidate,
-        relevance: candidate.score,
+        relevance: this._explicit_table_phrase(question, candidate.table)
+          ? Math.max(candidate.score, this._table_question_relevance(candidate.source_id, candidate.table, question)) + 40
+          : candidate.score,
         columns: columns.map(column => String(column?.name || column || "")).filter(Boolean),
         primary_keys: Array.isArray(info.primary_keys) ? info.primary_keys : []
       };
-    }) : [];
-    if (candidates.length === 0) {
-      for (const [sourceId, context] of Object.entries(this.contexts || {})) {
-        for (const [table, info] of Object.entries(context?.tables || {})) {
-          const relevance = this._table_question_relevance(sourceId, table, question);
-          if (relevance <= 0) continue;
-          const columns = Array.isArray(info?.columns) ? info.columns : [];
-          candidates.push({ source_id: sourceId, table, relevance, columns: columns.map(column => String(column?.name || column || "")).filter(Boolean), primary_keys: Array.isArray(info?.primary_keys) ? info.primary_keys : [] });
-        }
+    });
+    // Semantic overlays cover important business entities, but do not need to
+    // enumerate every ordinary source table. Keep lexical metadata candidates
+    // in the same ranking set so an explicit table noun such as "invoices" or
+    // "action items" cannot be displaced merely because "recent" caused a
+    // temporal semantic candidate to exist.
+    const existingCandidateKeys = new Set(candidates.map(candidate => `${candidate.source_id}:${candidate.table}`));
+    for (const [sourceId, context] of Object.entries(this.contexts || {})) {
+      for (const [table, info] of Object.entries(context?.tables || {})) {
+        if (existingCandidateKeys.has(`${sourceId}:${table}`)) continue;
+        const relevance = this._table_question_relevance(sourceId, table, question);
+        if (relevance <= 0) continue;
+        if (active && refersBack && !this._explicit_table_phrase(question, table)) continue;
+        const columns = Array.isArray(info?.columns) ? info.columns : [];
+        candidates.push({ source_id: sourceId, table, relevance: relevance + (this._explicit_table_phrase(question, table) ? 40 : 0), columns: columns.map(column => String(column?.name || column || "")).filter(Boolean), primary_keys: Array.isArray(info?.primary_keys) ? info.primary_keys : [] });
       }
     }
     for (const candidate of candidates) candidate.columns = candidate.columns.filter(column => column && !isSensitiveFieldName(column));
@@ -393,7 +452,8 @@ export class QuestionPlanner {
     let best = candidates[0];
     const isCount = this._is_count_question(question, candidates);
     const isRecent = this._is_recent_records_question(question);
-    const isIndependent = isCount || /\b(?:list|which|compare|comparison|each|all)\b/i.test(question);
+    const hasStatusIntent = candidates.some(candidate => this._has_unverified_status_intent(candidate, question));
+    const isIndependent = isCount || hasStatusIntent || /\b(?:list|which|compare|comparison|each|all)\b/i.test(question);
     let tied = candidates.filter(candidate => candidate.relevance === best.relevance);
     // A deictic request can be disambiguated by one discovered direct FK from
     // the established source-qualified reference. This is schema-driven and
@@ -419,7 +479,7 @@ export class QuestionPlanner {
     const orderingTable = timeColumn ? best.table : temporalCompanion?.table;
     const orderingColumn = timeColumn || temporalCompanion?.ordering_column;
     const statusIntent = this._has_unverified_status_intent(best, question);
-    const statusFilter = this._verified_status_filter(best, question) || (isCount ? this._discovered_categorical_filter(best, question) : null);
+    const statusFilter = this._verified_status_filter(best, question) || (statusIntent ? this._discovered_categorical_filter(best, question) : null);
     if (statusIntent && !statusFilter) {
       return {
         data_sources: ["postgresql"],
@@ -435,7 +495,7 @@ export class QuestionPlanner {
     }
     const requiredTables = temporalCompanion ? [best.table, temporalCompanion.table] : [best.table];
     const identifierFilter = this._explicit_identifier_filter(question, best);
-    const displayFilter = identifierFilter ? null : this._explicit_display_filter(question, best);
+    const displayFilter = identifierFilter || statusIntent ? null : this._explicit_display_filter(question, best);
     const requiredColumns = isCount ? [] : Array.from(new Set([
       ...best.primary_keys.map(column => `${best.table}.${column}`),
       ...best.columns.map(column => `${best.table}.${column}`),
@@ -540,7 +600,7 @@ export class QuestionPlanner {
   _is_temporal_modifier_token(token) {
     return new Set([
       "recent", "latest", "newest", "recently", "last", "next", "current", "ongoing", "oldest", "earliest",
-      "today", "yesterday", "tomorrow", "upcoming", "scheduled", "overdue", "before", "after", "since", "until",
+      "today", "yesterday", "tomorrow", "upcoming", "scheduled", "overdue", "currently", "before", "after", "since", "until",
       "between", "during", "week", "month", "quarter", "year", "hour", "day", "daily", "weekly", "monthly", "trend"
     ]).has(String(token || "").toLowerCase());
   }
@@ -574,6 +634,11 @@ export class QuestionPlanner {
     if (!match) return false;
     const requested = tokenWords(match[1])[0];
     if (!requested) return false;
+    const remainder = text.slice((match.index || 0) + match[0].length);
+    // "total invoice amount" is an aggregate over an amount column, not a
+    // request to count invoices. A metric noun after the entity disambiguates
+    // the operation without weakening the provider's explicit metric plan.
+    if (/\b(?:amount|value|cost|budget|price|revenue|spend|progress|duration)\b/i.test(remainder)) return false;
     return candidates.some(candidate => {
       const entityWords = [candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])]
         .flatMap(tokenWords);
@@ -606,9 +671,11 @@ export class QuestionPlanner {
 
   _build_independent_candidate_plan(question, candidates, isCount, semanticCandidates = []) {
     const uniqueCandidates = [...new Map(candidates.map(candidate => [`${candidate.source_id}:${candidate.table}`, candidate])).values()];
-    const statusFilters = uniqueCandidates.map(candidate => this._verified_status_filter(candidate, question));
+    const statusFilters = uniqueCandidates.map(candidate => this._verified_status_filter(candidate, question) ||
+      (this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null));
     const statusIntent = uniqueCandidates.some(candidate => this._has_unverified_status_intent(candidate, question));
-    if (statusIntent && (statusFilters.some(filter => !filter) || new Set(statusFilters.filter(Boolean).map(filter => JSON.stringify(filter))).size > 1)) {
+    const statusMeanings = new Set(statusFilters.filter(Boolean).map(filter => `${String(filter.operator || "").toLowerCase()}:${normalizedSemanticPhrase(filter.value)}`));
+    if (statusIntent && (statusFilters.some(filter => !filter) || statusMeanings.size > 1)) {
       return {
         data_sources: ["postgresql"],
         postgresql_sources: uniqueCandidates.map(candidate => candidate.source_id),
@@ -743,7 +810,8 @@ export class QuestionPlanner {
     // such as "total" into a status clarification.  Only an explicit status
     // predicate or a small, domain-neutral lifecycle vocabulary is treated as
     // an unverified status request.
-    if (/\b(?:status|state|workflow|lifecycle)\s*(?:is|are|=|:)?\s*[a-z0-9_]+\b/i.test(text)) return true;
+    const explicitStatus = text.match(/\b(?:status|state|workflow|lifecycle)\s*(?:is|are|=|:)??\s*([a-z0-9_]+)\b/i);
+    if (explicitStatus && !new Set(["and", "or", "with", "of", "the", "their", "its"]).has(explicitStatus[1])) return true;
     return /\b(?:pending|open|closed|resolved|unresolved|active|inactive|completed|cancelled|canceled|on[-\s]?hold|in[-\s]?progress|inprogress)\b/i.test(text);
   }
 
@@ -1659,6 +1727,17 @@ The final execution plan step objects must use:
     return score;
   }
 
+  _explicit_table_phrase(question, tableName) {
+    const phrase = String(tableName || "").replace(/_/g, " ").trim();
+    if (!phrase) return false;
+    // Generic project wording is intentionally left source-ambiguous; DB1
+    // project_details and DB2 projects are separate business definitions and
+    // are retained as independent candidates unless the user qualifies one.
+    if (["projects", "project details"].includes(phrase.toLowerCase())) return false;
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}(?:s)?\\b`, "i").test(String(question || ""));
+  }
+
   _infer_postgresql_sources(plan, question) {
     const available = this._get_available_postgresql_sources();
     if (available.length === 0) {
@@ -1822,6 +1901,28 @@ The final execution plan step objects must use:
       normalized.postgresql_sources ?? []
     );
 
+    // An explicit, non-deictic entity request starts a new target.  Provider
+    // plans sometimes mark every later turn as context-dependent; allowing
+    // that flag through here would reattach the previous record's stable IDs
+    // to an unrelated table (for example, users or meeting_summaries after a
+    // meeting-detail lookup).  Preserve context only for genuine references
+    // or when the user supplied an explicit identifier.
+    const activeReference = this._conversation_reference(conversationContext);
+    const hasDeicticReference = /\b(?:it|its|that|this|those|these|above|previous|prior|related)\b/i.test(question);
+    const hasExplicitIdentifier = /\b(?:id|identifier|code|reference|number|key)\b/i.test(question) ||
+      /\b[A-Za-z0-9]+-[A-Za-z0-9-]+\b/.test(question);
+    const planTargetsNewTable = activeReference && Array.isArray(normalized.required_tables) &&
+      normalized.required_tables.some(table => String(table).toLowerCase() !== String(activeReference.table || "").toLowerCase());
+    const isExplicitEntityChange = activeReference && !hasDeicticReference && !hasExplicitIdentifier &&
+      (this._has_explicit_new_target(question, activeReference) || planTargetsNewTable);
+    if (isExplicitEntityChange) {
+      normalized.needs_conversation_context = false;
+      const activeValues = new Set(Object.values(activeReference.stable_keys || {}).map(value => String(value)));
+      if (activeValues.size > 0 && Array.isArray(normalized.filters)) {
+        normalized.filters = normalized.filters.filter(filter => !activeValues.has(String(filter?.value)));
+      }
+    }
+
     // Conversation-qualified plans must be completed before the generic
     // schema-anchor fallback.  Otherwise a follow-up such as "that meeting"
     // can be anchored to an unrelated table that happens to share a token and
@@ -1837,6 +1938,7 @@ The final execution plan step objects must use:
     completed.filters = this._normalize_filters(
       completed.filters ?? []
     );
+    completed.filters = this._complete_filter_references(completed);
     completed.filters = this._normalize_verified_status_filters(
       completed.filters,
       completed.postgresql_sources ?? [],
@@ -1860,7 +1962,12 @@ The final execution plan step objects must use:
     this._apply_active_relationship_context(completed, conversationContext, question);
     this._apply_active_context_to_execution_plan(completed, conversationContext);
     const statusSafePlan = this._ensure_verified_status_filter(completed, question);
-    if (statusSafePlan !== completed) return statusSafePlan;
+    if (statusSafePlan !== completed) {
+      for (const key of Object.keys(completed)) {
+        if (!(key in statusSafePlan)) delete completed[key];
+      }
+      Object.assign(completed, statusSafePlan);
+    }
 
     completed.operations = this._normalize_operations(
       completed.operations ?? []
@@ -1869,6 +1976,8 @@ The final execution plan step objects must use:
     completed.requested_metrics = this._normalize_requested_metrics(
       completed.requested_metrics ?? []
     );
+
+    this._normalize_obvious_metric_intent(completed, question);
 
     completed.grouping = this._normalize_string_list(
       completed.grouping ?? []
@@ -1925,6 +2034,39 @@ The final execution plan step objects must use:
     return completed;
   }
 
+  _normalize_obvious_metric_intent(plan, question) {
+    if (!plan || typeof plan !== "object" || !Array.isArray(plan.required_tables) || plan.required_tables.length !== 1) return;
+    if (Array.isArray(plan.requested_metrics) && plan.requested_metrics.length > 0) return;
+
+    const text = String(question || "").toLowerCase();
+    const metricMatch = text.match(/\b(?:total|sum|amount|value|cost|budget|price|revenue|spend)\b[\s\s\S]{0,80}\b(amount|value|cost|budget|price|revenue|spend)\b/i);
+    if (!metricMatch || this._is_count_question(question, [{ table: plan.required_tables[0] }])) return;
+
+    const table = plan.required_tables[0];
+    const sourceId = String(plan.postgresql_sources?.[0] || "").toLowerCase();
+    const columns = this.contexts?.[sourceId]?.tables?.[table]?.columns || [];
+    const metricWord = String(metricMatch[1]).toLowerCase();
+    const numericTypes = new Set(["integer", "bigint", "smallint", "numeric", "decimal", "real", "double precision", "money"]);
+    const candidates = columns.map(column => {
+      const name = String(column?.name || column || "");
+      const type = String(column?.type || column?.data_type || "").toLowerCase();
+      const normalizedName = name.toLowerCase().replace(/_/g, " ");
+      const score = numericTypes.has(type) && normalizedName.includes(metricWord) ? 2 : (numericTypes.has(type) && metricWord === "amount" && /total|amount|value|cost|price/.test(normalizedName) ? 1 : 0);
+      return { name, score };
+    }).filter(candidate => candidate.score > 0).sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+    if (candidates.length === 0 || (candidates[1] && candidates[1].score === candidates[0].score)) return;
+
+    const column = candidates[0].name;
+    plan.operations = [...new Set([...(plan.operations || []).filter(operation => operation !== "count"), "sum"])];
+    plan.requested_metrics = [{ operation: "sum", table, column, source_id: sourceId, label: `total_${metricWord}`, distinct: false }];
+    plan.required_columns = [...new Set([...(plan.required_columns || []), `${table}.${column}`])];
+
+    const candidate = { source_id: sourceId, table, columns: columns.map(item => String(item?.name || item || "")), entity_type: null, matched_aliases: [table] };
+    if (!this._has_unverified_status_intent(candidate, question)) {
+      plan.filters = (plan.filters || []).filter(filter => !this._is_status_filter(filter, plan));
+    }
+  }
+
   _build_intent_contract(plan, question, conversationContext = null) {
     const active = this._conversation_reference(conversationContext);
     const filters = Array.isArray(plan.filters) ? deepcopy(plan.filters) : [];
@@ -1955,7 +2097,14 @@ The final execution plan step objects must use:
         statusCandidate.columns.push(...(context?.tables?.[table]?.columns || []).map(column => String(column?.name || column || "")));
       }
     }
-    const countIntent = /\b(?:count|how\s+many|number\s+of|total)\b/i.test(String(question || ""));
+    const countIntent = this._is_count_question(
+      question,
+      (Array.isArray(plan.required_tables) ? plan.required_tables : []).map(table => ({
+        table,
+        entity_type: this.contexts?.[plan.postgresql_sources?.[0]]?.semantic_catalog?.entities?.[table]?.entity_type,
+        matched_aliases: [table]
+      }))
+    );
     const derivedStatusFilters = [];
     for (const sourceId of Array.isArray(plan.postgresql_sources) ? plan.postgresql_sources : []) {
       for (const table of Array.isArray(plan.required_tables) ? plan.required_tables : []) {
@@ -1970,7 +2119,7 @@ The final execution plan step objects must use:
           matched_aliases: [table, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
         };
         const verified = this._verified_status_filter(candidate, question) ||
-          (countIntent ? this._discovered_categorical_filter(candidate, question) : null);
+          (countIntent || this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null);
         if (verified) derivedStatusFilters.push(verified);
       }
     }
@@ -1999,7 +2148,7 @@ The final execution plan step objects must use:
           matched_aliases: [table, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
         };
         const verified = this._verified_status_filter(candidate, question) ||
-          (countIntent ? this._discovered_categorical_filter(candidate, question) : null);
+          (countIntent || this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null);
         const statusColumn = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table]?.status_semantics?.column || verified?.field;
         const hasStatusFilter = statusColumn && (updated.filters || []).some(filter => {
           const field = String(filter?.field || filter?.column || filter?.column_name || "").split(".").at(-1);
@@ -2479,6 +2628,35 @@ The final execution plan step objects must use:
     }
 
     return normalized;
+  }
+
+  _complete_filter_references(plan) {
+    if (!plan || typeof plan !== "object" || !Array.isArray(plan.filters)) return plan?.filters || [];
+    const tables = Array.isArray(plan.required_tables) ? plan.required_tables : [];
+    const sources = Array.isArray(plan.postgresql_sources) ? plan.postgresql_sources : Object.keys(this.contexts || {});
+    return plan.filters.map(filter => {
+      if (!filter || typeof filter !== "object" || Array.isArray(filter)) return filter;
+      const current = deepcopy(filter);
+      const rawField = String(current.field || current.column || current.column_name || "").trim();
+      const parts = rawField.split(".");
+      const field = parts.at(-1);
+      if (!field) return current;
+      if (!current.field) current.field = field;
+      if (current.table) return current;
+
+      const matches = [];
+      for (const sourceId of sources) {
+        for (const table of tables) {
+          const columns = this.contexts?.[sourceId]?.tables?.[table]?.columns || [];
+          if (columns.some(column => String(column?.name || column || "").toLowerCase() === field.toLowerCase())) {
+            matches.push({ sourceId, table });
+          }
+        }
+      }
+      const uniqueTables = [...new Set(matches.map(match => match.table))];
+      if (uniqueTables.length === 1) current.table = uniqueTables[0];
+      return current;
+    });
   }
 
   _normalize_required_columns(columns) {
@@ -3292,6 +3470,7 @@ The final execution plan step objects must use:
     );
     current.relationships = this._normalize_relationships(current.relationships ?? []);
     current.filters = this._normalize_filters(current.filters ?? []);
+    current.filters = this._complete_filter_references(current);
     current.operations = this._normalize_operations(current.operations ?? []);
     current.requested_metrics = this._normalize_requested_metrics(current.requested_metrics ?? []);
     current.grouping = this._normalize_string_list(current.grouping ?? []);

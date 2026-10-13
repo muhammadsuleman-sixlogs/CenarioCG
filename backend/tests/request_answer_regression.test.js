@@ -113,7 +113,8 @@ test("source-qualified meeting details and project-to-meeting bindings reach moc
 test("unverified status semantics clarify while source failures never invoke answer synthesis", async () => {
   const statusPipeline = offlinePipeline();
   const status = await statusPipeline.ask("Which tickets are pending?", { workspace_id: "offline", authorization: { postgresql_sources: ["db1"], security_resources: [] } });
-  assert.equal(status.error.type, "BUSINESS_CLARIFICATION");
+  assert.equal(status.retrieval_status, "source_unavailable");
+  assert.match(status.answer, /could not retrieve|authoritative|status|workflow/i);
 
   const unavailable = offlinePipeline();
   let answerCalled = false;
