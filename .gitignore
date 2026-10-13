@@ -43,6 +43,7 @@ cache/
 .pytest_cache/
 .coverage
 htmlcov/
+coverage/
 
 # Local agent instructions and browser/test captures
 AGENTS.md
