@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
+import { parseExternalApiSources } from "../external_api/openapi.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -93,6 +94,9 @@ export const settings = {
   // workspace access remains exclusively controlled by
   // WORKSPACE_AUTHORIZATION_JSON.
   postgresqlSources: loadPostgresqlSources(cleanEnvStr(process.env.POSTGRES_SOURCES_JSON, ""), legacyPostgresqlSources),
+  // Private external API registrations. A registration carries no workspace
+  // authorization and secrets remain environment references, never metadata.
+  externalApiSources: parseExternalApiSources(cleanEnvStr(process.env.EXTERNAL_API_SOURCES_JSON, "")),
 
   // Context Layer limits
   contextMaxTurns: parseInt(cleanEnvStr(process.env.CONTEXT_MAX_TURNS, "5"), 10),

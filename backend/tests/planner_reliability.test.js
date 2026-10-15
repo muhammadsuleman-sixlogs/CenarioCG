@@ -277,6 +277,81 @@ test("aggregate amount wording is not converted into a status filter", async () 
   assert.equal(plan.filters.some(filter => String(filter.field || filter.column).toLowerCase() === "status"), false);
 });
 
+test("record-ranking wording converts invoice maximum/minimum metrics into bounded row lookups", () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  const base = {
+    data_sources: ["postgresql"],
+    postgresql_sources: ["db1"],
+    required_tables: ["invoices"],
+    required_columns: ["invoices.id", "invoices.invoice_number", "invoices.total_amount"],
+    relationships: [],
+    filters: [],
+    operations: ["maximum"],
+    requested_metrics: [{ operation: "maximum", table: "invoices", column: "total_amount", source_id: "db1" }],
+    sorting: [{ field: "invoices.total_amount", direction: "desc" }],
+    limit: 1
+  };
+
+  const highest = planner._normalize_plan(base, "Which one is the highest paid invoice?");
+  assert.deepEqual(highest.operations, ["ranking"]);
+  assert.deepEqual(highest.requested_metrics, []);
+  assert.deepEqual(highest.sorting, [{ field: "invoices.total_amount", direction: "desc" }]);
+  assert.equal(highest.limit, 1);
+
+  const lowest = planner._normalize_plan({
+    ...base,
+    operations: ["minimum"],
+    requested_metrics: [{ operation: "minimum", table: "invoices", column: "total_amount", source_id: "db1" }],
+    sorting: [{ field: "invoices.total_amount", direction: "asc" }]
+  }, "Which one is the lowest invoice?");
+  assert.deepEqual(lowest.operations, ["ranking"]);
+  assert.deepEqual(lowest.requested_metrics, []);
+  assert.deepEqual(lowest.sorting, [{ field: "invoices.total_amount", direction: "asc" }]);
+  assert.equal(lowest.limit, 1);
+});
+
+test("record-ranking normalization preserves an explicitly verified paid filter", () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  const plan = planner._normalize_plan({
+    data_sources: ["postgresql"],
+    postgresql_sources: ["db1"],
+    required_tables: ["invoices"],
+    required_columns: ["invoices.id", "invoices.total_amount"],
+    relationships: [],
+    filters: [{ table: "invoices", field: "payment_status", operator: "=", value: "paid", verification: "runtime_distinct_required" }],
+    operations: ["maximum"],
+    requested_metrics: [{ operation: "maximum", table: "invoices", column: "total_amount", source_id: "db1" }],
+    sorting: [{ field: "invoices.total_amount", direction: "desc" }],
+    limit: 1
+  }, "Which one is the highest paid invoice?");
+
+  assert.deepEqual(plan.filters, [{
+    table: "invoices", field: "payment_status", operator: "=", value: "paid", verification: "runtime_distinct_required"
+  }]);
+  assert.deepEqual(plan.operations, ["ranking"]);
+});
+
+test("scalar maximum and minimum questions remain aggregate metrics", () => {
+  const planner = new QuestionPlanner(loadAllContexts());
+  for (const [question, operation] of [
+    ["What is the maximum invoice amount?", "maximum"],
+    ["What is the minimum invoice amount?", "minimum"]
+  ]) {
+    const plan = planner._normalize_plan({
+      data_sources: ["postgresql"],
+      postgresql_sources: ["db1"],
+      required_tables: ["invoices"],
+      required_columns: ["invoices.total_amount"],
+      relationships: [], filters: [], operations: [operation],
+      requested_metrics: [{ operation, table: "invoices", column: "total_amount", source_id: "db1" }],
+      sorting: [], limit: null
+    }, question);
+    assert.deepEqual(plan.operations, [operation]);
+    assert.equal(plan.requested_metrics.length, 1);
+    assert.deepEqual(plan.sorting, []);
+  }
+});
+
 test("status phrases use bounded runtime verification for list and count plans", async () => {
   const planner = new QuestionPlanner(loadAllContexts());
   planner.client = null;

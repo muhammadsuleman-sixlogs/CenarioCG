@@ -89,6 +89,20 @@ test("Regression Test 1: 'show details of meta briefing meeting' -> 'does it hav
   assert.ok(sql.includes(`"session_id" = '${metaBriefingSessionId}'`), "Must filter WHERE session_id = <meta briefing session>");
 });
 
+test("a bounded recent-first invoice keeps its source-qualified company binding", () => {
+  const pipeline = new RAGPipeline();
+  pipeline._updateActiveEntityFromExecution(
+    "show me recent first invoice",
+    { required_tables: ["invoices"], limit: 10 },
+    [{ source_id: "db1", retrieval: { rows: [{ id: "invoice-1", company_id: "company-1", invoice_number: "INV-1" }] } }]
+  );
+
+  assert.deepEqual(pipeline.context_manager.getActiveContext().stable_keys, {
+    id: "invoice-1",
+    company_id: "company-1"
+  });
+});
+
 test("complex follow-up preserves the established parent identity in the first execution step", () => {
   const planner = new QuestionPlanner({ db2: loadContext("db2") });
   const active = {

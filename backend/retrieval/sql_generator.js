@@ -484,6 +484,10 @@ export class SQLGenerator {
       (Array.isArray(requested_metrics) && requested_metrics.length > 0) ||
       operations.some((op) => SQLGenerator.AGGREGATE_OPERATIONS.has(op));
 
+    if (has_metrics) {
+      this._validate_aggregate_sorting(sorting, grouping);
+    }
+
     let select_sql = "";
     let aggregate_query = false;
 
@@ -938,6 +942,20 @@ export class SQLGenerator {
     }
 
     return [expressions.join(", "), true];
+  }
+
+  _validate_aggregate_sorting(sorting, grouping) {
+    const grouped = new Set((grouping || []).map(value => String(value).trim().toLowerCase()));
+
+    for (const item of sorting || []) {
+      const expression = String(item).replace(/\s+(?:ASC|DESC)$/i, "").trim();
+      if (grouped.has(expression.toLowerCase())) continue;
+      if (/^(?:COUNT|SUM|AVG|MIN|MAX)\s*\(/i.test(expression)) continue;
+
+      throw new Error(
+        `Aggregate query cannot order by non-grouped raw column '${expression}'.`
+      );
+    }
   }
 
   _compile_metric(metric, selected_tables) {

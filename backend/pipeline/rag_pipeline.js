@@ -11,6 +11,8 @@ import { RetrievalExecutor } from "../retrieval/retrieval_executor.js";
 import { SQLGenerator } from "../retrieval/sql_generator.js";
 import { SourceTracker } from "../tracing/source_tracker.js";
 import { SecurityLogRetriever } from "../security_logs/retriever.js";
+import { ExternalApiClient } from "../external_api/client.js";
+import { settings } from "../config/settings.js";
 import { EvidenceManager } from "../llm/evidence_manager.js";
 import { AnswerGenerator } from "../llm/answer_generator.js";
 import { sanitizeApiResponse, sanitizeEvidence } from "../security/output_security_policy.js";
@@ -19,7 +21,7 @@ import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 import { validateSqlSyntax } from "../retrieval/sql_validator.js";
 import { getConnection, getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { SourceRouter } from "../planning/source_router.js";
-import { assertAuthorizedSecurityResource, assertAuthorizedSources } from "../auth/authorization.js";
+import { assertAuthorizedSecurityResource, assertAuthorizedSources, assertAuthorizedExternalApiOperation } from "../auth/authorization.js";
 import { logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
 
 // Optional dynamic loaders for planning/retrieval components that may be migrated later
@@ -75,7 +77,7 @@ function isSqlRepairableError(err) {
 }
 
 export class RAGPipeline {
-  static ALLOWED_DATA_SOURCES = new Set(["postgresql", "security_logs"]);
+  static ALLOWED_DATA_SOURCES = new Set(["postgresql", "security_logs", "external_api"]);
 
   static ALLOWED_SECURITY_RESOURCES = new Set([
     "security_logs",
@@ -192,8 +194,15 @@ export class RAGPipeline {
 
   _restrictToAuthorizedSources(authorization) {
     if (!authorization) return;
-    const allowed = new Set((authorization.postgresql_sources || []).map(source => String(source).toLowerCase()));
-    const filter = contexts => Object.fromEntries(Object.entries(contexts || {}).filter(([sourceId]) => allowed.has(String(sourceId).toLowerCase())));
+    const allowedPostgresql = new Set((authorization.postgresql_sources || []).map(source => String(source).toLowerCase()));
+    const allowedApiSources = new Set((authorization.external_api_sources || []).map(source => String(source).toLowerCase()));
+    const filter = contexts => Object.fromEntries(Object.entries(contexts || {}).filter(([sourceId, context]) => {
+      const source = String(sourceId).toLowerCase();
+      if (context?.source_type === "external_api") {
+        return allowedApiSources.has(source) && (authorization.external_api_operations?.[source] || []).length > 0;
+      }
+      return allowedPostgresql.has(source);
+    }));
     // A pipeline can be reused by a conversation or test harness.  Always
     // filter the original local metadata snapshot for this request, never the
     // subset left by a prior DB1-only/DB2-only request.
@@ -202,7 +211,7 @@ export class RAGPipeline {
     }
     const contexts = filter(this._unrestricted_contexts);
     if (Object.keys(contexts).length === 0) {
-      const error = new Error("No authorized PostgreSQL Context Layer sources are available.");
+      const error = new Error("No authorized Context Layer sources are available.");
       error.code = "SOURCE_NOT_AUTHORIZED";
       throw error;
     }
@@ -225,10 +234,27 @@ export class RAGPipeline {
     const deicticFollowup = /\b(?:it|its|that|this|those|these|above|previous|prior|related)\b|\ball\s+\d+\b/i.test(question);
     const namedDetailRequest = /\b(?:details?|about|information)\b/i.test(question);
     if (!active || (namedDetailRequest && !deicticFollowup) || /\b(?:[A-Za-z0-9]+-[A-Za-z0-9]+|[\w.+-]+@[\w.-]+)\b/.test(question)) return question;
-    const stable = Object.entries(active).find(([key, value]) =>
+    const stableEntries = active.stable_keys && typeof active.stable_keys === "object"
+      ? Object.entries(active.stable_keys)
+      : Object.entries(active);
+    const escapePattern = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const requestedStable = stableEntries.find(([key, value]) => {
+      if (key === "source_id" || key === "workspace_id" || value === null || value === undefined || /^(?:id|key)$/i.test(key)) return false;
+      const stem = String(key).replace(/(?:_id|_key)$/i, "").replace(/_/g, " ").trim();
+      return stem && new RegExp(`\\b${stem.split(/\s+/).map(escapePattern).join("\\s+")}s?\\b`, "i").test(question);
+    });
+    const activeEntityToken = String(active.table || "").split("_")[0].replace(/s$/i, "").toLowerCase();
+    const requestedEntityToken = requestedStable
+      ? String(requestedStable[0]).replace(/(?:_id|_key)$/i, "").split("_")[0].replace(/s$/i, "").toLowerCase()
+      : "";
+    // A relationship key is already represented in source-qualified context.
+    // Appending its UUID to the question can make semantic candidate ranking
+    // select an unrelated table; keep the natural wording for that case.
+    if (requestedStable && requestedEntityToken && requestedEntityToken !== activeEntityToken) return question;
+    const stable = requestedStable || stableEntries.find(([key, value]) =>
       key !== "source_id" && key !== "workspace_id" && /(?:^|_)id$/.test(key) && value !== null && value !== undefined
     );
-    return stable ? `${question} [resolved ${stable[0]}: ${stable[1]}]` : question;
+    return stable ? `${question} [context ${stable[0]}: ${stable[1]}]` : question;
   }
 
   _updateActiveEntityFromExecution(question, plan, results) {
@@ -245,6 +271,10 @@ export class RAGPipeline {
       : allRows;
     const table = plan?.entity_target?.table || plan?.required_tables?.[0];
     const sourceIds = [...new Set(rows.map(item => String(item.source_id || "").toLowerCase()).filter(Boolean))];
+    const isBoundedSingleRecord = rows.length === 1 && (
+      Number(plan?.limit) === 1 ||
+      /\b(?:first|latest|newest|most recent|single|one)\b/i.test(question)
+    );
     const isPluralReference = /\b(?:recent|latest|newest|most recent|all|list|which)\b/i.test(question);
     if (rows.length > 1 && isPluralReference && sourceIds.length === 1 && table) {
       const candidateKeys = Object.keys(rows[0].row).filter(key => /(?:^|_)id$/i.test(key) && rows.every(item => Object.prototype.hasOwnProperty.call(item.row, key) && item.row[key] !== null && item.row[key] !== undefined));
@@ -269,7 +299,9 @@ export class RAGPipeline {
     // entity-reference question can safely establish a follow-up anchor.
     const hasBoundReference = Boolean(plan?.needs_conversation_context) || (plan?.filters || []).some(filter => ["=", "contains"].includes(String(filter?.operator || "").toLowerCase()) && filter?.value !== undefined && filter?.value !== null);
     const ungroundedCatalogFallback = Array.isArray(plan?.semantic_candidates) && plan.semantic_candidates.length > 0 && !hasBoundReference;
-    if (ungroundedCatalogFallback || !rows.length || !/\b(?:details?|about|show|meeting|project|company|ticket|document|transcript)\b/i.test(question) || /\b(recent|all|list)\b/i.test(question)) return;
+    const isBroadRetrieval = /\b(?:all|list)\b/i.test(question) ||
+      (/\b(?:recent)\b/i.test(question) && !isBoundedSingleRecord);
+    if ((ungroundedCatalogFallback && !isBoundedSingleRecord) || !rows.length || !/\b(?:details?|about|show|meeting|project|company|ticket|document|transcript|invoice)\b/i.test(question) || isBroadRetrieval) return;
     const { row, source_id, result } = rows[0];
     const sharedIdentifiers = Object.entries(row).filter(([key, value]) => {
       if (!/(?:^|_)id$/.test(key) || value === null || value === undefined) return false;
@@ -388,6 +420,16 @@ export class RAGPipeline {
     }
 
     return resource;
+  }
+
+  _getExternalApiSource(plan, dataSources, authorization) {
+    if (!dataSources.includes("external_api")) return null;
+    const sources = Array.isArray(plan.api_sources) ? plan.api_sources : [];
+    if (sources.length !== 1 || typeof plan.api_operation !== "string") throw new Error("External API plans require one source and one approved operation.");
+    const sourceId = String(sources[0]).trim().toLowerCase();
+    if (!settings.externalApiSources?.[sourceId]) throw new Error("External API source is not registered.");
+    if (authorization) assertAuthorizedExternalApiOperation(authorization, sourceId, plan.api_operation);
+    return sourceId;
   }
 
   _getPostgresqlSources(plan, conversationContext = null, authorization = null) {
@@ -853,6 +895,20 @@ export class RAGPipeline {
     }
   }
 
+  async _retrieveExternalApi(plan, sourceId) {
+    const context = this.plan_validator.contexts?.[sourceId];
+    const config = settings.externalApiSources?.[sourceId];
+    if (!context || context.source_type !== "external_api" || !config) throw new Error("External API metadata is unavailable.");
+    const client = new ExternalApiClient(config, context);
+    try {
+      const retrieval = await client.retrieve(plan.api_operation);
+      const source = { source_type: "external_api", source_id: sourceId, source: sourceId, resource: plan.api_operation, entities: [plan.api_operation], tables: [plan.api_operation], columns: retrieval.columns || [] };
+      return { source_type: "external_api", source_id: sourceId, retrieval_status: retrieval.row_count ? "success_with_data" : "success_empty", retrieval: { ...retrieval, source_type: "external_api", resource: plan.api_operation }, sources: [source] };
+    } catch (error) {
+      return { source_type: "external_api", source_id: sourceId, retrieval_status: "retrieval_failed", retrieval: { rows: [], row_count: 0, columns: [], source_type: "external_api", resource: plan.api_operation }, sources: [], error: { type: error.name || "Error", message: String(error.message || error) } };
+    }
+  }
+
   _prepareEvidence(postgresResults, securityResult, complexExecution = null) {
     const evidence = { sources: [], items: [] };
     let evidenceSequence = 0;
@@ -1057,7 +1113,7 @@ export class RAGPipeline {
       const rows = Array.isArray(retrieval.rows) ? retrieval.rows : [];
 
       sourceStatus[sourceId] = {
-        source_type: "postgresql",
+        source_type: postgresResult.source_type || "postgresql",
         source_id: sourceId,
         metadata_available: true,
         retrieval_status: postgresResult.retrieval_status || "retrieval_failed",
@@ -1333,6 +1389,9 @@ export class RAGPipeline {
     const securityResource = this._getSecurityResource(validatedPlan, dataSources);
     if (authorization) assertAuthorizedSecurityResource(authorization, securityResource);
     validatedPlan.security_resource = securityResource;
+    let externalApiSource;
+    try { externalApiSource = this._getExternalApiSource(validatedPlan, dataSources, authorization); }
+    catch { return this._planningFailure(cleanQuestion, "SOURCE_NOT_AUTHORIZED", "The required authorized external API operation is unavailable for this question."); }
 
     let postgresqlSources;
     try {
@@ -1430,9 +1489,12 @@ export class RAGPipeline {
     if (dataSources.includes("security_logs")) {
       securityResult = await this._retrieveSecurityLogs(validatedPlan, workspaceId);
     }
+    if (externalApiSource) {
+      postgresResults.push(await this._retrieveExternalApi(validatedPlan, externalApiSource));
+    }
 
     const sourceStatus = this._buildSourceStatus(postgresResults, securityResult);
-    this._updateActiveEntityFromExecution(cleanQuestion, validatedPlan, postgresResults);
+    this._updateActiveEntityFromExecution(cleanQuestion, validatedPlan, postgresResults.filter(result => result.source_type === "postgresql"));
     const retrievalStates = Object.values(sourceStatus).map(item => item.retrieval_status);
 
     const successfulSources = retrievalStates.filter(state =>
@@ -1607,6 +1669,7 @@ export class RAGPipeline {
         if (value !== undefined && value !== null && String(value).trim()) identityValues.push(String(value).trim().toLowerCase());
       }
     }
+
     output.combined_total = new Set(identityValues).size;
     return output;
   }

@@ -11,7 +11,7 @@ an answer with provenance.
 ```text
 React/Vite UI -> Express API -> RAGPipeline
   -> QuestionPlanner -> QuestionPlanValidator -> QueryPlanExecutor
-  -> safe parameterized PostgreSQL / read-only security-log retrieval
+  -> safe parameterized PostgreSQL / read-only security-log / approved OpenAPI retrieval
   -> evidence manager and answer generator -> source-qualified provenance
 ```
 
@@ -94,6 +94,33 @@ principal/workspace. PostgreSQL source access and security-log resource access
 are both fail-closed. A browser request cannot grant itself source access, and
 adding credentials for a source does not add it to any workspace.
 
+### Future OpenAPI REST sources
+
+`EXTERNAL_API_SOURCES_JSON` optionally registers a future REST source. Only
+OpenAPI 3.x or Swagger 2.0 JSON specifications are supported. Each registration
+uses a lowercase source ID, an HTTPS origin-only `baseUrl`, a trusted HTTPS
+`specUrl`, an authentication *environment-variable name* (or `none`), and an
+explicit list of approved operation IDs. Registration is private configuration,
+not user authorization.
+
+```ini
+EXTERNAL_API_SOURCES_JSON={"inventory_api":{"type":"openapi","baseUrl":"https://api.example.invalid","specUrl":"https://api.example.invalid/openapi.json","auth":{"type":"bearer_env","secretEnv":"INVENTORY_API_TOKEN"},"allowedOperations":["listInventory"],"timeoutMs":10000,"maxResults":100,"maxPages":1,"maxRetries":1}}
+```
+
+The current contract admits only explicitly allow-listed, non-deprecated GET
+operations with an inline JSON object response schema and safe optional query
+parameters. It rejects write methods, request bodies, path parameters,
+redirects, unsafe fields and parameters, unsupported authentication, ambiguous
+schemas, untrusted origins, and arbitrary endpoint construction. `maxPages` is
+currently limited to `1`; pagination is deliberately not inferred. Credentials
+remain only in private environment variables and are never written to metadata
+or prompts.
+
+Grant access separately in `WORKSPACE_AUTHORIZATION_JSON` with both
+`external_api_sources` and an `external_api_operations` allow-list keyed by
+source ID. Without both, an API source is absent from planner context and
+cannot be retrieved.
+
 ## Automatic schema discovery and metadata safety
 
 The configured refresh controls are:
@@ -104,8 +131,9 @@ The configured refresh controls are:
 - `CONTEXT_SNAPSHOT_RETENTION` (default `5`)
 
 On startup and at the bounded interval, the scheduler discovers every
-registered PostgreSQL source through read-only catalog access. It publishes a
-new generation only after all requested contexts are non-empty and validated.
+registered PostgreSQL source through read-only catalog access and each
+registered supported API through its trusted specification. It publishes a new
+generation only after all requested contexts are non-empty and validated.
 Generations have deterministic fingerprints, timestamps, source lists, bounded
 retention, and rollback support. Requests keep using the last known-good active
 generation if discovery or publication fails; incomplete metadata is not made
@@ -156,9 +184,9 @@ npm run build
 ```
 
 The backend suite is offline/mocked where appropriate; it is not a substitute
-for approved live-source verification. Additional PostgreSQL onboarding has not
-yet been live-verified against a real DB3+ source. Real-provider follow-up
-reliability also remains under investigation.
+for approved live-source verification. Additional PostgreSQL onboarding and
+OpenAPI onboarding have not yet been live-verified against a real approved
+provider. Real-provider follow-up reliability also remains under investigation.
 
 ### Playwright / browser verification
 

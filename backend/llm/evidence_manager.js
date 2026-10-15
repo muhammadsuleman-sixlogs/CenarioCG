@@ -201,6 +201,10 @@ export class EvidenceManager {
       throw new Error(`Unsupported security resource: '${resource}'`);
     }
 
+    if (sourceType === "external_api") {
+      return { ...this._preparePostgresqlEvidence(retrieval, sources), source_type: "external_api", resource: retrieval.resource || null };
+    }
+
     return this._preparePostgresqlEvidence(retrieval, sources);
   }
 

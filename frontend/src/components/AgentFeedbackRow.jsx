@@ -148,7 +148,7 @@ export default function AgentFeedbackRow({
             )}
           </button>
 
-          {!feedbackType && (
+            {!feedbackType && (
             <button
               type="button"
               className="feedback-icon-btn skip-btn"
@@ -157,6 +157,7 @@ export default function AgentFeedbackRow({
               title="Skip giving feedback"
               aria-label="Skip feedback"
             >
+              <span className="btn-icon">↗</span>
               <span className="btn-text">Skip</span>
             </button>
           )}

@@ -45,8 +45,7 @@ cache/
 htmlcov/
 coverage/
 
-# Local agent instructions and browser/test captures
-AGENTS.md
+# Browser/test captures
 .playwright-mcp/
 *-response.json
 *-fixed.json
@@ -58,3 +57,9 @@ test-results/
 playwright-report/
 blob-report/
 playwright/.cache/
+
+
+# Automatically generated context metadata
+# Keep runtime generations local and out of Git
+/backend/context/active_generation.json
+/backend/context/generations/

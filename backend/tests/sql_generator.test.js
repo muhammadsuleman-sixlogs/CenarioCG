@@ -53,6 +53,50 @@ test("SQLGenerator compiles aggregate COUNT queries", () => {
   assert.ok(/COUNT\(\*\)\s+AS\s+["']?count["']?/i.test(sql), "Query must include COUNT aggregate");
 });
 
+test("SQLGenerator compiles highest and lowest invoice records as ranked rows", () => {
+  const context = loadContext("db1");
+  const generator = new SQLGenerator(context, "db1");
+  const base = {
+    required_tables: ["invoices"],
+    required_columns: ["invoices.id", "invoices.invoice_number", "invoices.total_amount"],
+    relationships: [], filters: [], operations: ["ranking"], grouping: [], limit: 1
+  };
+
+  const highest = generator.generate({ ...base, sorting: [{ field: "invoices.total_amount", direction: "desc" }] }, "db1");
+  assert.doesNotMatch(highest, /MAX\s*\(/i);
+  assert.match(highest, /ORDER BY "invoices"\."total_amount" DESC/i);
+  assert.match(highest, /LIMIT 1/i);
+
+  const lowest = generator.generate({ ...base, sorting: [{ field: "invoices.total_amount", direction: "asc" }] }, "db1");
+  assert.doesNotMatch(lowest, /MIN\s*\(/i);
+  assert.match(lowest, /ORDER BY "invoices"\."total_amount" ASC/i);
+  assert.match(lowest, /LIMIT 1/i);
+});
+
+test("SQLGenerator preserves legitimate scalar invoice maximum/minimum metrics", () => {
+  const generator = new SQLGenerator(loadContext("db1"), "db1");
+  for (const operation of ["maximum", "minimum"]) {
+    const sql = generator.generate({
+      required_tables: ["invoices"],
+      required_columns: ["invoices.total_amount"],
+      relationships: [], filters: [], operations: [operation], grouping: [], sorting: [], limit: null,
+      requested_metrics: [{ operation, table: "invoices", column: "total_amount" }]
+    }, "db1");
+    assert.match(sql, new RegExp(`${operation === "maximum" ? "MAX" : "MIN"}\\("invoices"\\."total_amount"\\)`, "i"));
+  }
+});
+
+test("SQLGenerator rejects aggregate ordering by a non-grouped raw column", () => {
+  const generator = new SQLGenerator(loadContext("db1"), "db1");
+  assert.throws(() => generator.generate({
+    required_tables: ["invoices"],
+    required_columns: ["invoices.total_amount"],
+    relationships: [], filters: [], operations: ["maximum"], grouping: [],
+    requested_metrics: [{ operation: "maximum", table: "invoices", column: "total_amount" }],
+    sorting: [{ field: "invoices.total_amount", direction: "desc" }], limit: 1
+  }, "db1"), /Aggregate query cannot order by non-grouped raw column/);
+});
+
 test("SQLGenerator omits protected projection columns but keeps permitted user fields", () => {
   const context = loadContext("db1");
   const generator = new SQLGenerator(context, "db1");

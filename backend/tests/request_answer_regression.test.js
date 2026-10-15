@@ -73,6 +73,52 @@ test("recent meeting and latest transcript plans reach ordered read-only SQL and
   }
 });
 
+test("recent-first invoice follow-up retrieves the related company by the verified company_id", async () => {
+  const manager = new ContextManager();
+  const pipeline = offlinePipeline(manager);
+  const calls = [];
+  const answerEvidence = [];
+  pipeline.executor = {
+    async execute(sql, sourceId) {
+      validateReadOnlyQuery(sql);
+      calls.push({ sql, sourceId });
+      if (calls.length === 1) {
+        return {
+          rows: [{ id: "invoice-1", company_id: "company-1", invoice_number: "INV-1", created_at: "2026-10-14T01:47:17Z" }],
+          row_count: 1,
+          columns: ["id", "company_id", "invoice_number", "created_at"]
+        };
+      }
+      return {
+        rows: [{ id: "company-1", name: "Example Company" }],
+        row_count: 1,
+        columns: ["id", "name"]
+      };
+    }
+  };
+  pipeline.answer_generator = {
+    async generate(_question, evidence) {
+      answerEvidence.push(evidence);
+      return "Example Company is associated with the invoice.";
+    }
+  };
+  const auth = { workspace_id: "offline", authorization: { postgresql_sources: ["db1"], security_resources: [] } };
+
+  const invoice = await pipeline.ask("show me recent first invoice", auth);
+  const company = await pipeline.ask("what is the company name of that invoice", auth);
+
+  assert.equal(invoice.retrieval_status, "success_with_data");
+  assert.equal(company.retrieval_status, "success_with_data");
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].sql, /FROM "invoices"/i);
+  assert.match(calls[1].sql, /FROM "companies"/i);
+  assert.match(calls[1].sql, /"companies"\."id"\s*=\s*'company-1'/i);
+  assert.doesNotMatch(calls[1].sql, /invoice-1/i);
+  assert.equal(company.answer, "Example Company is associated with the invoice.");
+  assert.ok(answerEvidence[1].items.some(item => item.row?.name === "Example Company"));
+  assert.deepEqual(manager.getActiveContext().stable_keys, { id: "company-1" });
+});
+
 test("source-qualified meeting details and project-to-meeting bindings reach mocked execution", async () => {
   const manager = new ContextManager();
   const pipeline = offlinePipeline(manager);
@@ -170,7 +216,7 @@ test("meeting-to-project and explicit DB1/DB2 combination use only direct or app
   });
   assert.equal(new QuestionPlanValidator(contexts).validate(combined).valid, true);
   assert.deepEqual(combined.execution_plan.steps.map(step => step.source_id), ["db2", "db1"]);
-  assert.deepEqual(combined.execution_plan.steps[1].input_bindings, [{ from_step: "s1", from_column: "project_code", to_table: "project_details", to_column: "project_id_display", operator: "in" }]);
+  assert.deepEqual(combined.execution_plan.steps[1].input_bindings, [{ from_step: "s1", from_column: "project_id", to_table: "project_details", to_column: "id", operator: "in" }]);
 });
 
 test("recent-list to explicit ID/title detail lookup bypasses malformed provider relationships and reaches answer synthesis", async () => {

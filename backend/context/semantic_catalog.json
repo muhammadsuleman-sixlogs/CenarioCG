@@ -57,6 +57,22 @@
   },
   "verified_paths": [
     {
+      "id": "db1-project-uuid-to-db2-project-uuid-to-db2-session-project",
+      "purpose": "project_to_meetings_preferred_uuid_identity",
+      "steps": [
+        {"source_id": "db1", "table": "project_details", "column": "id"},
+        {"source_id": "db2", "table": "projects", "column": "project_id"},
+        {"source_id": "db2", "table": "sessions", "column": "project_id"}
+      ],
+      "evidence_relationships": [
+        "db1.project_details.id -> db2.projects.project_id",
+        "db2.sessions.project_id -> db2.projects.project_id"
+      ],
+      "identity_kind": "same_entity",
+      "validation_status": "validated",
+      "provenance": ["cross_source_relationships.json", "context_db2.json"]
+    },
+    {
       "id": "db1-project-display-to-db2-project-code-to-db2-session-project",
       "purpose": "project_to_meetings",
       "steps": [
@@ -70,6 +86,36 @@
       ],
       "validation_status": "validated",
       "provenance": ["cross_source_relationships.json", "context_db2.json"]
+    },
+    {
+      "id": "db2-project-uuid-to-db1-project-to-db1-company",
+      "purpose": "project_to_company",
+      "steps": [
+        {"source_id": "db2", "table": "projects", "column": "project_id"},
+        {"source_id": "db1", "table": "project_details", "column": "id"},
+        {"source_id": "db1", "table": "companies", "column": "id"}
+      ],
+      "evidence_relationships": [
+        "db1.project_details.id -> db2.projects.project_id",
+        "db1.project_details.company_id -> db1.companies.id"
+      ],
+      "identity_kind": "same_entity_bridge",
+      "validation_status": "validated",
+      "provenance": ["cross_source_relationships.json", "context_db2.json"]
+    },
+    {
+      "id": "db1-project-to-db1-company",
+      "purpose": "project_to_company",
+      "steps": [
+        {"source_id": "db1", "table": "project_details", "column": "id"},
+        {"source_id": "db1", "table": "companies", "column": "id"}
+      ],
+      "evidence_relationships": [
+        "db1.project_details.company_id -> db1.companies.id"
+      ],
+      "identity_kind": "reference",
+      "validation_status": "validated",
+      "provenance": ["cross_source_relationships.json"]
     }
   ]
 }

@@ -2,8 +2,9 @@ import fs from "fs";
 import crypto from "crypto";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
-import { attachSemanticCatalog, loadSemanticCatalog } from "./semantic_catalog.js";
+import { attachSemanticCatalog, catalogFingerprint, loadSemanticCatalog, reconcileSemanticCatalog } from "./semantic_catalog.js";
 import { getRegisteredPostgresqlSourceIds } from "../database/connection.js";
+import { settings } from "../config/settings.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -16,6 +17,7 @@ export const DB2_CONTEXT_FILE = resolve(CONTEXT_DIR, "context_db2.json");
 export const LEGACY_CONTEXT_FILE = resolve(CONTEXT_DIR, "context.json");
 export const CONTEXT_GENERATIONS_DIR = resolve(CONTEXT_DIR, "generations");
 export const ACTIVE_GENERATION_FILE = resolve(CONTEXT_DIR, "active_generation.json");
+export const SEMANTIC_CATALOG_SNAPSHOT_FILE = "semantic_catalog.json";
 
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -27,7 +29,7 @@ function stableJson(value) {
 
 export function contextFingerprint(context) {
   return crypto.createHash("sha256")
-    .update(stableJson({ tables: context?.tables || {}, relationships: context?.relationships || [] }))
+    .update(stableJson({ source_type: context?.source_type || "postgresql", tables: context?.tables || {}, relationships: context?.relationships || [], api_operations: context?.api_operations || {} }))
     .digest("hex");
 }
 
@@ -57,6 +59,17 @@ function storagePaths(directory = CONTEXT_DIR) {
   };
 }
 
+function generationFingerprint(contexts, sourceIds = Object.keys(contexts || {}).sort()) {
+  const technical = Object.fromEntries(sourceIds.map(sourceId => [sourceId, {
+    fingerprint: contextFingerprint(contexts[sourceId]),
+    source_type: contexts[sourceId]?.source_type || "postgresql",
+    tables: contexts[sourceId]?.tables || {},
+    relationships: contexts[sourceId]?.relationships || [],
+    api_operations: contexts[sourceId]?.api_operations || {}
+  }]));
+  return crypto.createHash("sha256").update(stableJson(technical)).digest("hex");
+}
+
 function readActiveGeneration(activeGenerationFile = ACTIVE_GENERATION_FILE) {
   try {
     const manifest = JSON.parse(fs.readFileSync(activeGenerationFile, "utf8"));
@@ -72,6 +85,13 @@ function generationContextFile(sourceId) {
   const file = resolve(CONTEXT_GENERATIONS_DIR, active.generation, `${sourceId}.json`);
   const expectedRoot = resolve(CONTEXT_GENERATIONS_DIR, active.generation);
   return file.startsWith(`${expectedRoot}\\`) || file.startsWith(`${expectedRoot}/`) ? file : null;
+}
+
+export function getActiveSemanticCatalogFile() {
+  const active = readActiveGeneration();
+  if (!active) return null;
+  const file = resolve(CONTEXT_GENERATIONS_DIR, active.generation, SEMANTIC_CATALOG_SNAPSHOT_FILE);
+  return fs.existsSync(file) ? file : null;
 }
 
 export function _get_context_file(source_id) {
@@ -137,21 +157,33 @@ export const loadContext = load_context;
  * generation. Readers follow the manifest pointer, so they see either the
  * old generation or the complete new one, never a half-written pair.
  */
-export function publishContextGeneration(contexts, { now = new Date(), retention = 5, directory = CONTEXT_DIR, requiredSourceIds = null } = {}) {
+export function publishContextGeneration(contexts, { now = new Date(), retention = 5, directory = CONTEXT_DIR, requiredSourceIds = null, semanticCatalog = null } = {}) {
   if (!contexts || typeof contexts !== "object" || Array.isArray(contexts)) throw new Error("Contexts must be a dictionary.");
   const sourceIds = Object.keys(contexts).sort();
   if (sourceIds.length === 0 || sourceIds.some(sourceId => !/^[a-z][a-z0-9_-]{0,63}$/.test(sourceId))) throw new Error("A coherent generation requires valid source IDs.");
   const required = [...new Set((requiredSourceIds || sourceIds).map(sourceId => String(sourceId || "").trim().toLowerCase()))].sort();
   if (required.length === 0 || required.some(sourceId => !sourceIds.includes(sourceId)) || required.length !== sourceIds.length) throw new Error("A coherent generation must include exactly all required source contexts.");
   const generatedAt = now.toISOString();
-  const technical = Object.fromEntries(sourceIds.map(sourceId => [sourceId, {
-    fingerprint: contextFingerprint(contexts[sourceId]), tables: contexts[sourceId]?.tables || {}, relationships: contexts[sourceId]?.relationships || []
-  }]));
-  const fingerprint = crypto.createHash("sha256").update(stableJson(technical)).digest("hex");
+  const fingerprint = generationFingerprint(contexts, sourceIds);
+  const generation = `${generatedAt.replace(/[^0-9]/g, "").slice(0, 14)}-${fingerprint.slice(0, 12)}`;
+  const semanticSnapshot = semanticCatalog
+    ? reconcileSemanticCatalog(contexts, semanticCatalog, { generation, validatedAt: now })
+    : null;
   const { generationsDir, activeGenerationFile } = storagePaths(directory);
   const active = readActiveGeneration(activeGenerationFile);
-  if (active?.fingerprint === fingerprint) return { published: false, generation: active.generation, fingerprint, reason: "unchanged" };
-  const generation = `${generatedAt.replace(/[^0-9]/g, "").slice(0, 14)}-${fingerprint.slice(0, 12)}`;
+  const activeSemanticFile = active?.generation
+    ? resolve(generationsDir, active.generation, SEMANTIC_CATALOG_SNAPSHOT_FILE)
+    : null;
+  const activeSemanticMatches = Boolean(
+    semanticSnapshot &&
+    active?.semantic_catalog?.technical_fingerprint === semanticSnapshot.technical_fingerprint &&
+    active?.semantic_catalog?.schema_generation === active.generation &&
+    activeSemanticFile &&
+    fs.existsSync(activeSemanticFile)
+  );
+  if (active?.fingerprint === fingerprint && (!semanticCatalog || activeSemanticMatches)) {
+    return { published: false, generation: active.generation, fingerprint, reason: "unchanged" };
+  }
   const staging = resolve(generationsDir, `.staging-${generation}`);
   const target = resolve(generationsDir, generation);
   fs.mkdirSync(generationsDir, { recursive: true });
@@ -162,9 +194,25 @@ export function publishContextGeneration(contexts, { now = new Date(), retention
       const snapshot = prepareSnapshot(contexts[sourceId], sourceId, generatedAt, generation);
       fs.writeFileSync(resolve(staging, `${sourceId}.json`), JSON.stringify(snapshot, null, 2), "utf8");
     }
-    fs.writeFileSync(resolve(staging, "manifest.json"), JSON.stringify({ version: 1, generation, fingerprint, generated_at: generatedAt, sources: sourceIds, validation_status: "validated" }, null, 2), "utf8");
+    const manifest = {
+      version: 1,
+      generation,
+      fingerprint,
+      generated_at: generatedAt,
+      sources: sourceIds,
+      validation_status: "validated",
+      ...(semanticSnapshot ? {
+        semantic_catalog: {
+          file: SEMANTIC_CATALOG_SNAPSHOT_FILE,
+          schema_generation: generation,
+          technical_fingerprint: semanticSnapshot.technical_fingerprint,
+          validation_status: semanticSnapshot.validation_status
+        }
+      } : {})
+    };
+    if (semanticSnapshot) fs.writeFileSync(resolve(staging, SEMANTIC_CATALOG_SNAPSHOT_FILE), JSON.stringify(semanticSnapshot, null, 2), "utf8");
+    fs.writeFileSync(resolve(staging, "manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
     fs.renameSync(staging, target);
-    const manifest = { version: 1, generation, fingerprint, generated_at: generatedAt, sources: sourceIds, validation_status: "validated" };
     const temporaryManifest = `${activeGenerationFile}.tmp`;
     fs.writeFileSync(temporaryManifest, JSON.stringify(manifest, null, 2), "utf8");
     fs.renameSync(temporaryManifest, activeGenerationFile);
@@ -187,19 +235,36 @@ export function rollbackContextGeneration(generation, { directory = CONTEXT_DIR 
   const { generationsDir, activeGenerationFile } = storagePaths(directory);
   const generationDirectory = resolve(generationsDir, generation);
   const generationManifestFile = resolve(generationDirectory, "manifest.json");
-  let sourceIds;
-  try { sourceIds = JSON.parse(fs.readFileSync(generationManifestFile, "utf8")).sources; } catch {
+  let generationManifest;
+  try { generationManifest = JSON.parse(fs.readFileSync(generationManifestFile, "utf8")); } catch {
     // Backward-compatible generations published before per-generation manifests.
-    sourceIds = ["db1", "db2"];
+    generationManifest = { sources: ["db1", "db2"] };
   }
+  const sourceIds = generationManifest.sources;
   if (!Array.isArray(sourceIds) || sourceIds.length === 0 || sourceIds.some(sourceId => !/^[a-z][a-z0-9_-]{0,63}$/.test(String(sourceId)))) throw new Error("Requested context generation is incomplete.");
   const contexts = Object.fromEntries(sourceIds.map(sourceId => {
     const file = resolve(generationDirectory, `${sourceId}.json`);
     if (!fs.existsSync(file)) throw new Error("Requested context generation is incomplete.");
     return [sourceId, JSON.parse(fs.readFileSync(file, "utf8"))];
   }));
-  const fingerprint = crypto.createHash("sha256").update(stableJson(Object.fromEntries(Object.entries(contexts).map(([sourceId, context]) => [sourceId, { fingerprint: contextFingerprint(context), tables: context.tables, relationships: context.relationships || [] }])))).digest("hex");
-  const manifest = { version: 1, generation, fingerprint, generated_at: new Date().toISOString(), sources: sourceIds.sort(), validation_status: "rolled_back" };
+  if (generationManifest.semantic_catalog) {
+    const semanticFile = resolve(generationDirectory, generationManifest.semantic_catalog.file || SEMANTIC_CATALOG_SNAPSHOT_FILE);
+    if (!fs.existsSync(semanticFile)) throw new Error("Requested context generation has no matching semantic catalog snapshot.");
+    const semanticCatalog = loadSemanticCatalog(semanticFile);
+    if (semanticCatalog.technical_fingerprint !== catalogFingerprint(contexts) || semanticCatalog.provenance?.reconciliation?.schema_generation !== generation) {
+      throw new Error("Requested context generation has an incompatible semantic catalog snapshot.");
+    }
+  }
+  const fingerprint = generationFingerprint(contexts, sourceIds.sort());
+  const manifest = {
+    version: 1,
+    generation,
+    fingerprint,
+    generated_at: new Date().toISOString(),
+    sources: sourceIds.sort(),
+    validation_status: "rolled_back",
+    ...(generationManifest.semantic_catalog ? { semantic_catalog: generationManifest.semantic_catalog } : {})
+  };
   const temporaryManifest = `${activeGenerationFile}.tmp`;
   fs.writeFileSync(temporaryManifest, JSON.stringify(manifest, null, 2), "utf8");
   fs.renameSync(temporaryManifest, activeGenerationFile);
@@ -230,7 +295,7 @@ export function load_all_contexts() {
   const active = readActiveGeneration();
   const sourceIds = Array.isArray(active?.sources) && active.sources.length > 0
     ? active.sources
-    : getRegisteredPostgresqlSourceIds();
+    : [...getRegisteredPostgresqlSourceIds(), ...Object.keys(settings.externalApiSources || {})];
   for (const source_id of [...new Set(sourceIds)]) {
     try {
       contexts[source_id] = load_context(source_id);
@@ -246,7 +311,8 @@ export function load_all_contexts() {
   // The semantic overlay is application-owned metadata. A malformed overlay
   // must never replace or mutate the technical schema snapshots.
   try {
-    return attachSemanticCatalog(contexts, loadSemanticCatalog()).contexts;
+    const catalogFile = getActiveSemanticCatalogFile();
+    return attachSemanticCatalog(contexts, loadSemanticCatalog(catalogFile || undefined)).contexts;
   } catch {
     return contexts;
   }
@@ -259,8 +325,10 @@ export default {
   DB1_CONTEXT_FILE,
   DB2_CONTEXT_FILE,
   LEGACY_CONTEXT_FILE,
+  SEMANTIC_CATALOG_SNAPSHOT_FILE,
   _get_context_file,
   getContextFile,
+  getActiveSemanticCatalogFile,
   save_context,
   saveContext,
   load_context,

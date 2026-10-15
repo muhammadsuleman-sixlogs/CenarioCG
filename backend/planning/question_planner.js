@@ -116,6 +116,7 @@ export class QuestionPlanner {
   static ALLOWED_DATA_SOURCES = new Set([
     "postgresql",
     "security_logs",
+    "external_api",
   ]);
 
   static SECURITY_RESOURCES = new Set([
@@ -389,6 +390,7 @@ export class QuestionPlanner {
   }
 
   _build_metadata_fallback_plan(question, conversationContext = null) {
+    question = String(question).replace(/\s+\[context\s+[^\]]+\]\s*$/i, "").trim();
     const active = this._conversation_reference(conversationContext);
     const refersBack = /\b(?:it|its|that|this|those|these|details?)\b/i.test(question);
     const recordSet = active?.record_set;
@@ -919,6 +921,7 @@ Logical data_sources may contain only:
 
 - "postgresql"
 - "security_logs"
+- "external_api"
 
 Physical PostgreSQL source IDs belong ONLY in:
 
@@ -938,6 +941,10 @@ INCORRECT:
 }
 
 Never place a PostgreSQL source ID directly into data_sources.
+
+For an external API, use data_sources: ["external_api"], exactly one
+registered api_sources entry, and the exact discovered api_operation.
+Never invent API paths, methods, headers, parameters, or request bodies.
 
 When the question requires facts from more than one PostgreSQL source, return:
 
@@ -1456,6 +1463,12 @@ The final execution plan step objects must use:
       const boundedBusinessRelationships = businessRelationships
         .slice(0, this.MAX_CONTEXT_RELATIONSHIPS)
         .filter(rel => rel && typeof rel === "object" && !Array.isArray(rel));
+      const apiOperations = context.api_operations && typeof context.api_operations === "object" && !Array.isArray(context.api_operations)
+        ? Object.fromEntries(Object.entries(context.api_operations).slice(0, this.MAX_CONTEXT_TABLES_PER_SOURCE).map(([operationId, operation]) => [operationId, {
+          operation_id: operation?.operation_id,
+          response_fields: Array.isArray(operation?.response_fields) ? operation.response_fields.slice(0, this.MAX_CONTEXT_COLUMNS_PER_TABLE) : []
+        }]))
+        : {};
 
       sources[String(sourceId).trim().toLowerCase()] = {
         source_type: context.source_type || "postgresql",
@@ -1463,6 +1476,7 @@ The final execution plan step objects must use:
         tables: boundedTables,
         relationships: boundedRelationships,
         business_relationships: boundedBusinessRelationships,
+        api_operations: apiOperations,
         semantic_entities: Object.fromEntries(Object.entries(context.semantic_catalog?.entities || {}).slice(0, this.MAX_CONTEXT_TABLES_PER_SOURCE).map(([table, entity]) => [table, {
           entity_type: entity.entity_type,
           description: entity.description,
@@ -1827,8 +1841,12 @@ The final execution plan step objects must use:
 
   _get_available_postgresql_sources() {
     return Object.keys(this.contexts)
-      .filter(sourceId => typeof sourceId === "string" && sourceId.trim())
+      .filter(sourceId => typeof sourceId === "string" && sourceId.trim() && (this.contexts[sourceId]?.source_type || "postgresql") === "postgresql")
       .map(sourceId => sourceId.trim().toLowerCase());
+  }
+
+  _get_available_external_api_sources() {
+    return Object.keys(this.contexts).filter(sourceId => this.contexts[sourceId]?.source_type === "external_api").map(sourceId => sourceId.trim().toLowerCase());
   }
 
   _parse_json_response(content) {
@@ -1864,11 +1882,19 @@ The final execution plan step objects must use:
       throw new Error("Question plan must be a dictionary.");
     }
 
+    // RAGPipeline may append a bounded source-qualified context anchor for
+    // provider interpretation. It is not user intent and must not participate
+    // in entity/status lexical checks (for example, a UUID must not turn a
+    // detail follow-up into an explicit status or new-entity request).
+    question = String(question).replace(/\s+\[context\s+[^\]]+\]\s*$/i, "").trim();
+
     const normalized = deepcopy(plan);
 
     normalized.question = question;
     normalized.data_sources = this._normalize_data_sources(normalized);
     normalized.postgresql_sources = this._normalize_postgresql_sources(normalized);
+    normalized.api_sources = this._normalize_string_list(normalized.api_sources ?? []).map(source => source.toLowerCase());
+    normalized.api_operation = normalized.api_operation === null || normalized.api_operation === undefined ? null : String(normalized.api_operation).trim();
 
     // An unresolved business/source ambiguity is a terminal planning state.
     // Do not let the generic schema-anchor fallback attach an unrelated table
@@ -1937,6 +1963,10 @@ The final execution plan step objects must use:
         normalized.filters = normalized.filters.filter(filter => !activeValues.has(String(filter?.value)));
       }
     }
+    if (normalized.data_sources.includes("external_api")) {
+      const available = new Set(this._get_available_external_api_sources());
+      if (normalized.api_sources.length === 1 && !available.has(normalized.api_sources[0])) throw new Error("Question planner selected unavailable external API source.");
+    }
 
     // Conversation-qualified plans must be completed before the generic
     // schema-anchor fallback.  Otherwise a follow-up such as "that meeting"
@@ -1970,6 +2000,7 @@ The final execution plan step objects must use:
           const applies = completed.required_tables.some(table => (sourceContext.tables?.[table]?.columns || []).some(col => String(col?.name || col).toLowerCase() === column.toLowerCase()));
         if (applies && !completed.filters.some(filter => String(filter.field || filter.column || "").toLowerCase() === column.toLowerCase())) {
           const table = completed.required_tables.find(candidate => (sourceContext.tables?.[candidate]?.columns || []).some(col => String(col?.name || col).toLowerCase() === column.toLowerCase()));
+          if (String(table || "").toLowerCase() !== String(active.table || "").toLowerCase() && String(column).toLowerCase() === "id") continue;
           completed.filters.push({ table, column, operator: "=", value });
         }
       }
@@ -2001,6 +2032,14 @@ The final execution plan step objects must use:
     completed.sorting = this._normalize_sorting(
       completed.sorting ?? []
     );
+
+    completed.sorting = this._resolve_sorting_fields(
+      completed.sorting,
+      completed.required_tables ?? [],
+      completed.postgresql_sources ?? []
+    );
+
+    this._normalize_record_ranking_intent(completed, question);
 
     completed.sorting = this._resolve_sorting_fields(
       completed.sorting,
@@ -2080,6 +2119,59 @@ The final execution plan step objects must use:
     if (!this._has_unverified_status_intent(candidate, question)) {
       plan.filters = (plan.filters || []).filter(filter => !this._is_status_filter(filter, plan));
     }
+  }
+
+  _normalize_record_ranking_intent(plan, question) {
+    if (!plan || typeof plan !== "object") return;
+
+    const text = String(question || "").toLowerCase();
+    const direction = /\b(?:lowest|smallest|cheapest|least)\b/i.test(text)
+      ? "asc"
+      : /\b(?:highest|largest|most expensive|greatest)\b/i.test(text)
+      ? "desc"
+      : null;
+    if (!direction || !Array.isArray(plan.required_tables) || plan.required_tables.length !== 1) return;
+
+    // A scalar metric question must remain an aggregate.  Record wording such
+    // as "which one" or a detail/list request means the user wants the row.
+    const scalarAggregate = /\b(?:what|tell|give)\b[\s\S]{0,40}\b(?:maximum|max|minimum|min|highest|lowest|largest|smallest|cheapest|most expensive)\b[\s\S]{0,60}\b(?:amount|value|total|cost|price|revenue|spend)\b/i.test(text);
+    const recordRequest = /\bwhich\s+(?:one|invoice|record|item)\b/i.test(text) ||
+      /\b(?:show|list|display|details?|information)\b/i.test(text) ||
+      /\b(?:invoice|record|item)\b/i.test(text);
+    if (scalarAggregate || !recordRequest) return;
+
+    const table = String(plan.required_tables[0] || "").trim();
+    const metrics = Array.isArray(plan.requested_metrics) ? plan.requested_metrics : [];
+    const rankingMetric = metrics.find(metric => {
+      const operation = String(metric?.operation || "").trim().toLowerCase();
+      return ["maximum", "max", "minimum", "min"].includes(operation) &&
+        typeof metric?.column === "string" && metric.column.trim();
+    });
+
+    let field = rankingMetric
+      ? `${rankingMetric.table || table}.${rankingMetric.column}`
+      : null;
+
+    if (!field && Array.isArray(plan.sorting) && plan.sorting.length > 0) {
+      const first = plan.sorting[0];
+      field = typeof first === "string" ? first.replace(/\s+(?:asc|desc)$/i, "").trim() : first?.field || first?.column;
+    }
+
+    if (!field) {
+      const candidates = (plan.required_columns || [])
+        .filter(value => typeof value === "string" && value.includes("."))
+        .filter(value => value.split(".")[0].trim().toLowerCase() === table.toLowerCase())
+        .filter(value => /(?:total|amount|value|cost|price|revenue|spend)/i.test(value.split(".").slice(1).join(".")));
+      if (candidates.length === 1) field = candidates[0];
+    }
+
+    if (!field) return;
+
+    plan.operations = ["ranking"];
+    plan.requested_metrics = [];
+    plan.grouping = [];
+    plan.sorting = [{ field: String(field).trim(), direction }];
+    plan.limit = 1;
   }
 
   _build_intent_contract(plan, question, conversationContext = null) {
@@ -2245,7 +2337,9 @@ The final execution plan step objects must use:
     const table = String(active.table || "").trim();
     const tableInfo = this.contexts?.[sourceId]?.tables?.[table];
     if (!sourceId || !table || !tableInfo) return plan;
-    const stableKeys = active.stable_keys && typeof active.stable_keys === "object" ? active.stable_keys : {};
+    const stableKeys = active.stable_keys && typeof active.stable_keys === "object"
+      ? active.stable_keys
+      : Object.fromEntries(Object.entries(active).filter(([column, value]) => /(?:^|_)id$/.test(column) && value !== null && value !== undefined));
     if (!Object.keys(stableKeys).length) return plan;
     const safeColumns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(column => column && !isSensitiveFieldName(column)).slice(0, 20);
     if (!safeColumns.length) return plan;
@@ -2259,7 +2353,9 @@ The final execution plan step objects must use:
 
     const sourceId = String(active.source_id || "").trim().toLowerCase();
     const activeTable = String(active.table || "").trim();
-    const stableKeys = active.stable_keys && typeof active.stable_keys === "object" ? active.stable_keys : {};
+    const stableKeys = active.stable_keys && typeof active.stable_keys === "object"
+      ? active.stable_keys
+      : Object.fromEntries(Object.entries(active).filter(([column, value]) => /(?:^|_)id$/.test(column) && value !== null && value !== undefined));
     const sourceMentionPattern = Object.keys(this.contexts || {}).map(source => source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).filter(Boolean).join("|");
     const explicitMultiSource = /\b(?:both|combine|across|sources?)\b/i.test(question) || (sourceMentionPattern ? new RegExp(`\\b(?:${sourceMentionPattern})\\b`, "i").test(question) : false);
     const hasDirectSameSourceTarget = findSemanticCandidates(question, this.contexts, [sourceId]).some(candidate =>
@@ -2268,10 +2364,61 @@ The final execution plan step objects must use:
         (rel.target_table === activeTable && rel.source_table === candidate.table)
       )
     );
+    const sourceCandidates = findSemanticCandidates(question, this.contexts, [sourceId]);
+    const strongestRequestedCandidate = sourceCandidates
+      .filter(candidate => Array.isArray(candidate.matched_aliases) && candidate.matched_aliases.length > 0)
+      .sort((left, right) => right.score - left.score)[0];
     // Prefer the shortest verified same-source relationship unless the user
-    // explicitly asks to combine sources. This avoids expanding a simple
-    // meeting-to-project question into an unnecessary DB1 dependency chain.
-    if (!explicitMultiSource && hasDirectSameSourceTarget) return plan;
+    // explicitly asks to combine sources. If provider/fallback candidate
+    // selection chose another entity, repair only the target table and bind
+    // it to the active record's verified relationship key. This preserves the
+    // user's relationship request without broadening retrieval.
+    if (!explicitMultiSource && hasDirectSameSourceTarget) {
+      const directTarget = findSemanticCandidates(question, this.contexts, [sourceId])
+        .filter(candidate => candidate.table !== activeTable && (this.contexts?.[sourceId]?.relationships || []).some(rel =>
+          (rel.source_table === activeTable && rel.target_table === candidate.table) ||
+          (rel.target_table === activeTable && rel.source_table === candidate.table)
+        ))
+        .sort((left, right) => right.score - left.score)[0];
+      const directTargetWasRequested = directTarget && strongestRequestedCandidate &&
+        String(strongestRequestedCandidate.table).toLowerCase() === String(directTarget.table).toLowerCase();
+      const directTargetIsDefaultProjectTarget = !strongestRequestedCandidate || strongestRequestedCandidate.entity_type === "project";
+      if (!directTargetWasRequested && !directTargetIsDefaultProjectTarget) {
+        // A different explicit target (for example company) must continue
+        // through its approved relationship path rather than stopping at the
+        // nearest same-source project table.
+      } else if (directTarget) {
+      const alreadyTargetsDirectEntity = (plan.required_tables || []).length === 1 &&
+        String(plan.required_tables[0]).toLowerCase() === String(directTarget.table).toLowerCase() &&
+        (plan.postgresql_sources || []).length === 1 && String(plan.postgresql_sources[0]).toLowerCase() === sourceId;
+      if (alreadyTargetsDirectEntity) return plan;
+        const relationship = (this.contexts?.[sourceId]?.relationships || []).find(rel =>
+          (rel.source_table === activeTable && rel.target_table === directTarget.table) ||
+          (rel.target_table === activeTable && rel.source_table === directTarget.table)
+        );
+        const sourceColumn = relationship?.source_table === activeTable ? relationship.source_column : relationship?.target_column;
+        const targetColumn = relationship?.source_table === activeTable ? relationship.target_column : relationship?.source_column;
+        const boundValue = sourceColumn ? stableKeys[sourceColumn] : undefined;
+        if (relationship && boundValue !== undefined && boundValue !== null) {
+          const targetInfo = this.contexts[sourceId]?.tables?.[directTarget.table] || {};
+          const safeColumns = (targetInfo.columns || []).map(column => String(column?.name || column || ""))
+            .filter(column => column && !isSensitiveFieldName(column)).slice(0, 20);
+          const { execution_plan: _executionPlan, clarification_required: _clarification, ...basePlan } = plan;
+          return {
+            ...basePlan,
+            data_sources: ["postgresql"],
+            postgresql_sources: [sourceId],
+            required_tables: [directTarget.table],
+            required_columns: safeColumns.map(column => `${directTarget.table}.${column}`),
+            relationships: [relationship],
+            filters: [{ table: directTarget.table, field: targetColumn, operator: "=", value: boundValue }],
+            operations: ["lookup"],
+            needs_conversation_context: true,
+            ambiguous_context_candidates: []
+          };
+        }
+      }
+    }
     const paths = findVerifiedPaths(question, this.contexts, null, { active });
     const path = paths.find(candidate => candidate.steps[0]?.source_id === sourceId && candidate.steps[0]?.table === activeTable);
     if (!path || !Object.keys(stableKeys).length) return plan;
@@ -2385,17 +2532,55 @@ The final execution plan step objects must use:
     const context = this.contexts[sourceId];
     const relationships = Array.isArray(context.relationships) ? context.relationships : [];
     const targetTables = plan.required_tables.filter(table => String(table).toLowerCase() !== activeTable.toLowerCase());
-    const stableKeys = active.stable_keys && typeof active.stable_keys === "object" ? active.stable_keys : {};
-    // If the target carries the same discovered key, bind that key directly.
-    // Returning unchanged here used to drop the meeting constraint entirely
-    // for transcript follow-ups.
-    const directTarget = targetTables.find(table => Object.keys(stableKeys).some(column => (context.tables?.[table]?.columns || []).some(col => String(col?.name || col).toLowerCase() === String(column).toLowerCase())));
-    if (directTarget) {
+    const stableKeys = active.stable_keys && typeof active.stable_keys === "object"
+      ? active.stable_keys
+      : Object.fromEntries(Object.entries(active).filter(([column, value]) => /(?:^|_)id$/.test(column) && value !== null && value !== undefined));
+    const directKeyBindings = [];
+    for (const target of targetTables) {
+      const targetColumns = new Set((context.tables?.[target]?.columns || []).map(column => String(column?.name || column).toLowerCase()));
       for (const [column, value] of Object.entries(stableKeys)) {
-        const exists = (context.tables?.[directTarget]?.columns || []).some(col => String(col?.name || col).toLowerCase() === String(column).toLowerCase());
-        if (exists && !(plan.filters || []).some(filter => String(filter.table || "").toLowerCase() === String(directTarget).toLowerCase() && String(filter.field || filter.column || "").toLowerCase() === String(column).toLowerCase())) {
-          plan.filters.push({ table: directTarget, field: column, operator: "=", value });
+        if (String(column).toLowerCase() === "id" || value === null || value === undefined) continue;
+        if (targetColumns.has(String(column).toLowerCase())) directKeyBindings.push({ target, column, value });
+      }
+    }
+    if (directKeyBindings.length === 1) {
+      const { target, column, value } = directKeyBindings[0];
+      if (!(plan.filters || []).some(filter => String(filter.table || "").toLowerCase() === String(target).toLowerCase() && String(filter.field || filter.column || "").toLowerCase() === String(column).toLowerCase())) {
+        plan.filters.push({ table: target, field: column, operator: "=", value });
+      }
+      plan.needs_conversation_context = true;
+      return plan;
+    }
+    // Bind the target through the discovered relationship edge. Matching a
+    // column name alone is unsafe when both records expose a generic `id`
+    // (for example invoices.id and companies.id).
+    const directBindings = [];
+    for (const target of targetTables) {
+      for (const relationship of relationships) {
+        const leftTable = String(relationship?.source_table || "").toLowerCase();
+        const rightTable = String(relationship?.target_table || "").toLowerCase();
+        const activeName = activeTable.toLowerCase();
+        const targetName = String(target).toLowerCase();
+        let sourceColumn;
+        let targetColumn;
+        if (leftTable === activeName && rightTable === targetName) {
+          sourceColumn = relationship.source_column;
+          targetColumn = relationship.target_column;
+        } else if (rightTable === activeName && leftTable === targetName) {
+          sourceColumn = relationship.target_column;
+          targetColumn = relationship.source_column;
+        } else {
+          continue;
         }
+        if (sourceColumn && targetColumn && stableKeys[sourceColumn] !== undefined && stableKeys[sourceColumn] !== null) {
+          directBindings.push({ target, sourceColumn, targetColumn, value: stableKeys[sourceColumn] });
+        }
+      }
+    }
+    if (directBindings.length === 1 && (plan.needs_conversation_context !== true || directBindings[0].sourceColumn === directBindings[0].targetColumn)) {
+      const { target, targetColumn, value } = directBindings[0];
+      if (!(plan.filters || []).some(filter => String(filter.table || "").toLowerCase() === String(target).toLowerCase() && String(filter.field || filter.column || "").toLowerCase() === String(targetColumn).toLowerCase())) {
+        plan.filters.push({ table: target, field: targetColumn, operator: "=", value });
       }
       plan.needs_conversation_context = true;
       return plan;
@@ -2406,6 +2591,13 @@ The final execution plan step objects must use:
       return targetTables.some(target => (left === activeTable.toLowerCase() && right === String(target).toLowerCase()) || (right === activeTable.toLowerCase() && left === String(target).toLowerCase()));
     });
     if (!supported.length) return plan;
+    if (!Object.keys(stableKeys).length && !Array.isArray(active.record_set?.values)) {
+      plan.clarification_required = {
+        type: "missing_context_binding",
+        message: "I could not verify the referenced record identifier, so I did not run an unfiltered related-entity retrieval."
+      };
+      return plan;
+    }
     // A validated direct edge is sufficient to anchor a same-source follow-up;
     // multi-hop and cross-source paths remain the dependency planner's job.
     plan.postgresql_sources = [sourceId];

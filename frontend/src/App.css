@@ -3820,11 +3820,30 @@ input:focus-visible {
   margin-top: 4px;
 }
 .user-message-actions .message-copy-btn {
-  width: 24px;
-  height: 22px;
+  width: 32px;
+  height: 32px;
   padding: 0;
-  border-radius: 7px;
+  border-radius: 9px;
+  background: rgba(18, 29, 41, 0.9);
+  border-color: rgba(148, 163, 184, 0.18);
   font-size: 13px;
+}
+.user-message-actions .message-copy-btn:hover {
+  background: rgba(14, 165, 233, 0.14);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: var(--cyan);
+}
+.floating-chat .feedback-icon-btn.skip-btn {
+  width: auto;
+  min-width: 54px;
+  padding: 0 10px;
+}
+.floating-chat .feedback-icon-btn.skip-btn .btn-icon {
+  display: none;
+}
+.floating-chat .feedback-icon-btn.skip-btn .btn-text {
+  display: inline;
+  font-size: 11px;
 }
 .floating-chat .message-source-row { margin-top: 7px; }
 .floating-chat .message-source-pill { border: 0; padding: 0; background: transparent; color: #41cdf4; text-decoration: none; }
@@ -4982,6 +5001,49 @@ input:focus-visible {
   gap: 8px;
   padding-top: 8px;
   margin-top: 8px;
+}
+
+/* Compact response action row: retain themed icon boxes while removing the
+   oversized text treatment from the chat footer. */
+.floating-chat .agent-feedback-container {
+  margin-top: 12px;
+  padding-top: 10px;
+}
+.floating-chat .feedback-hint {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.floating-chat .agent-feedback-bar {
+  gap: 7px;
+}
+.floating-chat .feedback-buttons-group {
+  gap: 6px;
+}
+.floating-chat .feedback-icon-btn {
+  width: 32px;
+  height: 32px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 9px;
+  background: rgba(18, 29, 41, 0.9);
+  border-color: rgba(148, 163, 184, 0.18);
+}
+.floating-chat .feedback-icon-btn .btn-text {
+  display: none;
+}
+.floating-chat .feedback-icon-btn .btn-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.floating-chat .feedback-icon-btn:hover:not(:disabled) {
+  background: rgba(14, 165, 233, 0.14);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: var(--cyan);
+  transform: none;
 }
 
 .feedback-skipped-text {

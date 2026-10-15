@@ -65,15 +65,27 @@ export function loadSemanticCatalog(file = SEMANTIC_CATALOG_FILE) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-export function validateSemanticCatalog(contexts, catalog) {
-  const errors = [];
-  let evidenceRelationships = new Set();
+function cloneCatalog(catalog) {
+  return JSON.parse(JSON.stringify(catalog));
+}
+
+function catalogRelationshipEvidence() {
   try {
     const report = JSON.parse(fs.readFileSync(CROSS_SOURCE_RELATIONSHIPS_FILE, "utf8"));
-    evidenceRelationships = new Set((report.validated_relationships || []).filter(item => item?.valid && item.relationship).map(item => item.relationship));
+    return new Set((report.validated_relationships || [])
+      .filter(item => item?.valid && item.relationship)
+      .map(item => item.relationship));
   } catch {
-    errors.push("validated cross-source relationship evidence is unavailable");
+    return null;
   }
+}
+
+export function validateSemanticCatalog(contexts, catalog, relationshipEvidence = null) {
+  const errors = [];
+  const evidenceRelationships = relationshipEvidence instanceof Set
+    ? relationshipEvidence
+    : catalogRelationshipEvidence();
+  if (!(evidenceRelationships instanceof Set)) errors.push("validated cross-source relationship evidence is unavailable");
   if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) return ["semantic catalog must be an object"];
   for (const [sourceId, source] of Object.entries(catalog.sources || {})) {
     if (!contexts?.[sourceId]) { errors.push(`semantic source is unavailable: ${sourceId}`); continue; }
@@ -83,6 +95,12 @@ export function validateSemanticCatalog(contexts, catalog) {
       if (!Array.isArray(entity.synonyms) || entity.synonyms.length === 0) errors.push(`${sourceId}.${table} requires synonyms`);
       const orderColumn = entity.ordering?.column;
       if (orderColumn && !tableColumns(contexts[sourceId], table).has(orderColumn)) errors.push(`${sourceId}.${table}.${orderColumn} is not a discovered column`);
+      const statusColumn = entity.status_semantics?.column;
+      if (statusColumn && !tableColumns(contexts[sourceId], table).has(statusColumn)) errors.push(`${sourceId}.${table}.${statusColumn} status semantics column is not a discovered column`);
+      if (entity.status_semantics && (entity.status_semantics.validation_status !== "validated" || !Array.isArray(entity.status_semantics.provenance) || entity.status_semantics.provenance.length === 0)) errors.push(`${sourceId}.${table} status semantics requires validated provenance`);
+      for (const column of [...(entity.identifier_columns || []), ...(entity.primary_keys || [])]) {
+        if (!tableColumns(contexts[sourceId], table).has(String(column))) errors.push(`${sourceId}.${table}.${column} is not a discovered identifier column`);
+      }
       if (entity.identity) {
         if (!entity.identity.column || !tableColumns(contexts[sourceId], table).has(entity.identity.column)) errors.push(`${sourceId}.${table} identity column is not a discovered column`);
         if (!entity.identity.group || !entity.identity.mapping_id || entity.identity.validation_status !== "validated" || !Array.isArray(entity.identity.provenance) || entity.identity.provenance.length === 0) errors.push(`${sourceId}.${table} identity mapping requires validated provenance`);
@@ -92,6 +110,7 @@ export function validateSemanticCatalog(contexts, catalog) {
   for (const path of catalog.verified_paths || []) {
     if (path.validation_status !== "validated") { errors.push(`path ${path.id} is not validated`); continue; }
     if (!Array.isArray(path.provenance) || path.provenance.length === 0) errors.push(`path ${path.id} requires provenance`);
+    if (!Array.isArray(path.steps) || path.steps.length < 2) { errors.push(`path ${path.id} requires at least two validated steps`); continue; }
     for (const step of path.steps || []) {
       if (!contexts?.[step.source_id]?.tables?.[step.table]) errors.push(`path ${path.id} references an unavailable table`);
       else if (!tableColumns(contexts[step.source_id], step.table).has(step.column)) errors.push(`path ${path.id} references an unavailable column`);
@@ -101,10 +120,133 @@ export function validateSemanticCatalog(contexts, catalog) {
       const [leftSource, leftTable] = String(left || "").split(".");
       const [rightSource, rightTable] = String(right || "").split(".");
       const sameSource = leftSource && leftSource === rightSource && (contexts?.[leftSource]?.relationships || []).some(item => item.source_table === leftTable && item.target_table === rightTable);
-      if (!sameSource && !evidenceRelationships.has(relationship)) errors.push(`path ${path.id} lacks validated relationship evidence: ${relationship}`);
+      if (!sameSource && !(evidenceRelationships instanceof Set && evidenceRelationships.has(relationship))) errors.push(`path ${path.id} lacks validated relationship evidence: ${relationship}`);
     }
   }
   return errors;
+}
+
+/**
+ * Carry approved semantic definitions across a newly validated technical
+ * generation without inventing or changing business meaning. References that
+ * no longer resolve are removed from the executable overlay and recorded as
+ * invalidated, so unrelated approved definitions remain usable.
+ */
+export function reconcileSemanticCatalog(contexts, catalog, { generation = null, validatedAt = new Date(), relationshipEvidence = null } = {}) {
+  if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) {
+    throw new Error("Semantic catalog must be an object.");
+  }
+  if (!catalog.provenance || catalog.provenance.kind !== "application_owned_semantic_overlay" || catalog.provenance.business_approval_required_for_new_mappings !== true) {
+    throw new Error("Approved semantic catalog provenance is incomplete.");
+  }
+
+  const reconciled = cloneCatalog(catalog);
+  const invalidated = [];
+  const availableSources = new Set(Object.keys(contexts || {}));
+
+  for (const sourceId of Object.keys(reconciled.sources || {})) {
+    if (!availableSources.has(sourceId)) {
+      delete reconciled.sources[sourceId];
+      continue;
+    }
+
+    const entities = reconciled.sources[sourceId]?.entities || {};
+    for (const table of Object.keys(entities)) {
+      const entity = entities[table];
+      const tableInfo = contexts[sourceId]?.tables?.[table];
+      if (!tableInfo) {
+        delete entities[table];
+        invalidated.push({ kind: "entity", source_id: sourceId, table, reason: "table_unavailable" });
+        continue;
+      }
+
+      const columns = tableColumns(contexts[sourceId], table);
+      if (entity.ordering?.column && !columns.has(entity.ordering.column)) {
+        const column = entity.ordering.column;
+        delete entity.ordering;
+        invalidated.push({ kind: "ordering", source_id: sourceId, table, column, reason: "column_unavailable" });
+      }
+      if (entity.status_semantics?.column && !columns.has(entity.status_semantics.column)) {
+        const column = entity.status_semantics.column;
+        delete entity.status_semantics;
+        invalidated.push({ kind: "status_semantics", source_id: sourceId, table, column, reason: "column_unavailable" });
+      }
+      if (entity.identity?.column && !columns.has(entity.identity.column)) {
+        const column = entity.identity.column;
+        delete entity.identity;
+        invalidated.push({ kind: "identity", source_id: sourceId, table, column, reason: "column_unavailable" });
+      }
+      for (const field of ["identifier_columns", "primary_keys"]) {
+        if (!Array.isArray(entity[field])) continue;
+        const unavailable = entity[field].filter(column => !columns.has(String(column)));
+        if (unavailable.length > 0) {
+          entity[field] = entity[field].filter(column => columns.has(String(column)));
+          invalidated.push({ kind: field, source_id: sourceId, table, columns: unavailable, reason: "column_unavailable" });
+        }
+      }
+    }
+  }
+
+  const paths = Array.isArray(reconciled.verified_paths) ? reconciled.verified_paths : [];
+  const evidenceRelationships = relationshipEvidence instanceof Set ? relationshipEvidence : catalogRelationshipEvidence();
+  const pathIds = new Map();
+  for (const path of paths) {
+    const id = String(path?.id || "");
+    if (!id) continue;
+    const existing = pathIds.get(id);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(path)) {
+      pathIds.set(id, null);
+      invalidated.push({ kind: "relationship_path", path_id: id, reason: "ambiguous_duplicate_definition" });
+    } else if (!pathIds.has(id)) {
+      pathIds.set(id, path);
+    }
+  }
+  reconciled.verified_paths = paths.filter(path => {
+    const id = String(path?.id || "");
+    if (!id || pathIds.get(id) === null) return false;
+    if (path.validation_status !== "validated" || !Array.isArray(path.provenance) || path.provenance.length === 0 || !Array.isArray(path.steps) || path.steps.length < 2) {
+      invalidated.push({ kind: "relationship_path", path_id: id, reason: "invalid_definition" });
+      return false;
+    }
+    const invalidStep = (path.steps || []).find(step => !contexts?.[step.source_id]?.tables?.[step.table] || !tableColumns(contexts[step.source_id], step.table).has(step.column));
+    if (invalidStep) {
+      invalidated.push({ kind: "relationship_path", path_id: id, reason: "step_unavailable", step: invalidStep });
+      return false;
+    }
+    const invalidRelationship = (path.evidence_relationships || []).find(relationship => {
+      const [left, right] = String(relationship).split(" -> ");
+      const [leftSource, leftTable] = String(left || "").split(".");
+      const [rightSource, rightTable] = String(right || "").split(".");
+      const sameSource = leftSource && leftSource === rightSource && (contexts?.[leftSource]?.relationships || []).some(item => item.source_table === leftTable && item.target_table === rightTable);
+      return !sameSource && !(evidenceRelationships instanceof Set && evidenceRelationships.has(relationship));
+    });
+    if (invalidRelationship) {
+      invalidated.push({ kind: "relationship_path", path_id: id, reason: "relationship_evidence_unavailable", relationship: invalidRelationship });
+      return false;
+    }
+    return true;
+  });
+
+  const errors = validateSemanticCatalog(contexts, reconciled, relationshipEvidence);
+  if (errors.length > 0) {
+    throw new Error(`Approved semantic catalog is incompatible with the candidate schema generation: ${errors.join("; ")}`);
+  }
+
+  const timestamp = new Date(validatedAt).toISOString();
+  reconciled.technical_fingerprint = catalogFingerprint(contexts);
+  reconciled.generated_at = timestamp;
+  reconciled.validation_status = "validated";
+  reconciled.provenance = {
+    ...(reconciled.provenance || {}),
+    reconciliation: {
+      kind: "automatic_schema_generation_reconciliation",
+      validated_at: timestamp,
+      schema_generation: generation,
+      previous_technical_fingerprint: catalog.technical_fingerprint || null,
+      invalidated_references: invalidated
+    }
+  };
+  return reconciled;
 }
 
 export function getSemanticCatalogStatus(contexts, catalog, now = Date.now(), maxAgeMs = 24 * 60 * 60 * 1000) {
@@ -242,9 +384,38 @@ export function findVerifiedPaths(question, contexts, authorizedSources = null, 
           return left && right ? `${right} -> ${left}` : item;
         }) }
         : path;
-      return oriented.steps.slice(1).some(step => candidateNodes.has(`${step.source_id}:${step.table}`)) ? [oriented] : [];
+      const activeStableKeys = options.active?.stable_keys && typeof options.active.stable_keys === "object"
+        ? Object.keys(options.active.stable_keys)
+        : [];
+      const startsWithAvailableKey = !activeStableKeys.length || activeStableKeys.includes(String(oriented.steps[0]?.column || ""));
+      return startsWithAvailableKey && oriented.steps.slice(1).some(step => candidateNodes.has(`${step.source_id}:${step.table}`)) ? [oriented] : [];
     });
-  if (declaredPaths.length > 0) return declaredPaths;
+  if (declaredPaths.length > 0) {
+    const explicitCodeIntent = /\b(?:project\s*code|project_code|display(?:\s+id)?|business\s+key|reference\s+code)\b/i.test(question);
+    const normalizedQuestion = String(question || "").toLowerCase();
+    const requestedEntityType = candidates
+      .filter(candidate => Array.isArray(candidate.matched_aliases) && candidate.matched_aliases.length > 0)
+      .sort((left, right) => {
+        const lastMention = candidate => Math.max(...candidate.matched_aliases.map(alias => normalizedQuestion.lastIndexOf(String(alias).toLowerCase())));
+        return lastMention(right) - lastMention(left) || right.score - left.score;
+      })[0]?.entity_type || null;
+    const endpointEntityScore = path => {
+      const endpoint = path.steps.at(-1);
+      const endpointType = contexts?.[endpoint?.source_id]?.semantic_catalog?.entities?.[endpoint?.table]?.entity_type;
+      return requestedEntityType && endpointType === requestedEntityType ? 1 : 0;
+    };
+    const endpointMentionScore = path => {
+      const endpoint = path.steps.at(-1);
+      return Math.max(...words(endpoint?.table).map(token => normalizedQuestion.lastIndexOf(token)), -1);
+    };
+    const pathIdentityScore = path => {
+      const columns = path.steps.map(step => String(step?.column || "").toLowerCase());
+      const isDisplayPath = columns.some(column => column === "project_id_display" || column === "project_code");
+      const isUuidPath = columns.some(column => column === "id") && columns.some(column => column === "project_id");
+      return explicitCodeIntent ? (isDisplayPath ? 1 : 0) : (isUuidPath ? 1 : 0);
+    };
+    return declaredPaths.sort((left, right) => endpointMentionScore(right) - endpointMentionScore(left) || endpointEntityScore(right) - endpointEntityScore(left) || pathIdentityScore(right) - pathIdentityScore(left));
+  }
   const graph = new Map();
   const edgeEvidence = new Map();
   const addEdge = (left, right, evidence) => {
@@ -333,4 +504,4 @@ export function findVerifiedPaths(question, contexts, authorizedSources = null, 
   });
 }
 
-export default { SEMANTIC_CATALOG_FILE, CROSS_SOURCE_RELATIONSHIPS_FILE, catalogFingerprint, loadSemanticCatalog, validateSemanticCatalog, deriveTechnicalEntities, attachSemanticCatalog, findSemanticCandidates, findVerifiedPaths };
+export default { SEMANTIC_CATALOG_FILE, CROSS_SOURCE_RELATIONSHIPS_FILE, catalogFingerprint, loadSemanticCatalog, validateSemanticCatalog, reconcileSemanticCatalog, deriveTechnicalEntities, attachSemanticCatalog, findSemanticCandidates, findVerifiedPaths };

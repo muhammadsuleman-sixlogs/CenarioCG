@@ -8,12 +8,12 @@ function forbidden(detail = "Workspace authorization required.") {
   return error;
 }
 
-function normaliseStringList(value, label) {
+function normaliseStringList(value, label, { lowercase = true } = {}) {
   if (!Array.isArray(value)) throw new Error(`${label} must be a list.`);
   const values = [];
   for (const item of value) {
     if (typeof item !== "string" || !item.trim()) throw new Error(`${label} must contain non-empty strings.`);
-    const normalised = item.trim().toLowerCase();
+    const normalised = lowercase ? item.trim().toLowerCase() : item.trim();
     if (!values.includes(normalised)) values.push(normalised);
   }
   return values;
@@ -40,7 +40,11 @@ export function loadWorkspaceAuthorization(raw = settings.workspaceAuthorization
       if (!workspaceId || !permissions || typeof permissions !== "object" || Array.isArray(permissions)) throw new Error("Invalid workspace permission entry.");
       output[principal][workspaceId] = {
         postgresql_sources: normaliseStringList(permissions.postgresql_sources || [], "postgresql_sources"),
-        security_resources: normaliseStringList(permissions.security_resources || [], "security_resources")
+        security_resources: normaliseStringList(permissions.security_resources || [], "security_resources"),
+        external_api_sources: normaliseStringList(permissions.external_api_sources || [], "external_api_sources"),
+        external_api_operations: permissions.external_api_operations && typeof permissions.external_api_operations === "object" && !Array.isArray(permissions.external_api_operations)
+          ? Object.fromEntries(Object.entries(permissions.external_api_operations).map(([sourceId, operations]) => [String(sourceId).trim().toLowerCase(), normaliseStringList(operations, "external_api_operations", { lowercase: false })]))
+          : {}
       };
     }
   }
@@ -80,4 +84,12 @@ export function assertAuthorizedSecurityResource(authorization, resource) {
   }
 }
 
-export default { loadWorkspaceAuthorization, resolveAuthorizedWorkspace, assertAuthorizedSources, assertAuthorizedSecurityResource };
+export function assertAuthorizedExternalApiOperation(authorization, sourceId, operationId) {
+  const source = String(sourceId || "").trim().toLowerCase();
+  const operation = String(operationId || "").trim();
+  const allowedSources = new Set(authorization?.external_api_sources || []);
+  const allowedOperations = authorization?.external_api_operations?.[source] || [];
+  if (!source || !operation || !allowedSources.has(source) || !allowedOperations.includes(operation)) throw forbidden("Requested external API operation is not authorized.");
+}
+
+export default { loadWorkspaceAuthorization, resolveAuthorizedWorkspace, assertAuthorizedSources, assertAuthorizedSecurityResource, assertAuthorizedExternalApiOperation };
