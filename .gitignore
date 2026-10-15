@@ -58,8 +58,10 @@ playwright-report/
 blob-report/
 playwright/.cache/
 
-
 # Automatically generated context metadata
 # Keep runtime generations local and out of Git
 /backend/context/active_generation.json
 /backend/context/generations/
+
+# Local Codex / AI agent instructions
+AGENTS.md
