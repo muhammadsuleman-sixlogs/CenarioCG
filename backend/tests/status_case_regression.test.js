@@ -7,6 +7,7 @@ import { RAGPipeline } from "../pipeline/rag_pipeline.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { SQLGenerator } from "../retrieval/sql_generator.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
+import { OFFLINE_PROVIDER } from "./test_context.js";
 
 function fixture() {
   return {
@@ -46,7 +47,7 @@ function pipelineFor(contexts) {
   pipeline.planValidator = validator;
   pipeline.source_router = new SourceRouter(contexts);
   pipeline.planner = new QuestionPlanner(contexts);
-  pipeline.planner.client = null;
+  pipeline.planner.client = OFFLINE_PROVIDER;
   pipeline.sql_generators = { db1: new SQLGenerator(contexts.db1, "db1") };
   return pipeline;
 }
@@ -86,7 +87,7 @@ function ticketFixtureWithoutSemanticMapping() {
 test("verified categorical statuses are case-insensitive without changing identifier equality", async () => {
   const contexts = fixture();
   const planner = new QuestionPlanner(contexts);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const validator = new QuestionPlanValidator(contexts);
   const generator = new SQLGenerator(contexts.db1, "db1");
 
@@ -99,11 +100,13 @@ test("verified categorical statuses are case-insensitive without changing identi
     const validation = validator.validate(plan);
     assert.equal(validation.valid, true, validation.errors?.join("; "));
     assert.equal(plan.filters[0].operator, "case_insensitive_equals");
-    generated.push(generator.generate(plan, "db1"));
+    const prepared = generator.generatePrepared(plan, "db1");
+    assert.deepEqual(prepared.parameters, ["awaiting_review"]);
+    generated.push(prepared.query);
   }
 
   assert.deepEqual(generated[0], generated[1]);
-  assert.match(generated[0], /"workflow_state"\s+ILIKE\s+'awaiting_review'/i);
+  assert.match(generated[0], /"workflow_state"\s+ILIKE\s+%s/i);
 
   const identifierPlan = planner._normalize_plan({
     data_sources: ["postgresql"],
@@ -124,9 +127,9 @@ test("status capitalization variants reach mocked execution and one grounded ans
     const calls = [];
     let answerCalls = 0;
     pipeline.executor = {
-      async execute(sql, sourceId) {
+      async execute(sql, sourceId, parameters = []) {
         validateReadOnlyQuery(sql);
-        calls.push({ sql, sourceId });
+        calls.push({ sql, sourceId, parameters });
         return { rows: [{ id: "T-Case-17", status: "PENDING" }], row_count: 1, columns: ["id", "status"] };
       }
     };
@@ -144,7 +147,8 @@ test("status capitalization variants reach mocked execution and one grounded ans
 
     assert.equal(result.retrieval_status, "success_with_data", JSON.stringify(result.error || result.source_status));
     assert.equal(calls.length, 1);
-    assert.match(calls[0].sql, /"status"\s+ILIKE\s+'pending'/i);
+    assert.match(calls[0].sql, /"status"\s+ILIKE\s+%s/i);
+    assert.deepEqual(calls[0].parameters, ["pending"]);
     assert.equal(answerCalls, 1);
     assert.equal(result.answer, "One pending ticket.");
   }
@@ -181,9 +185,9 @@ test("count requests never execute without the mandatory verified status filter"
       }
     };
     pipeline.executor = {
-      async execute(sql, sourceId) {
+      async execute(sql, sourceId, parameters = []) {
         validateReadOnlyQuery(sql);
-        observedSql.push({ sql, sourceId });
+        observedSql.push({ sql, sourceId, parameters });
         return { rows: [{ count: "96" }], row_count: 1, columns: ["count"] };
       }
     };
@@ -199,7 +203,8 @@ test("count requests never execute without the mandatory verified status filter"
 
   assert.equal(observedSql.length, 4);
   assert.ok(observedSql.every(({ sql }) => /COUNT\(\*\)/i.test(sql)));
-  assert.ok(observedSql.every(({ sql }) => /"status"\s+ILIKE\s+'pending'/i.test(sql)), observedSql.map(item => item.sql).join("\n"));
+  assert.ok(observedSql.every(({ sql }) => /"status"\s+ILIKE\s+%s/i.test(sql)), observedSql.map(item => item.sql).join("\n"));
+  assert.ok(observedSql.every(({ parameters }) => parameters.length === 1 && parameters[0] === "pending"));
 });
 
 test("discovered categorical columns require read-only value verification before counting", async () => {
@@ -226,7 +231,8 @@ test("discovered categorical columns require read-only value verification before
   assert.match(calls[0].sql, /"tickets"\."status"\s+ILIKE\s+\$1/i);
   assert.deepEqual(calls[0].parameters, ["pending"]);
   assert.match(calls[1].sql, /COUNT\(\*\)/i);
-  assert.match(calls[1].sql, /"status"\s+ILIKE\s+'pending'/i);
+  assert.match(calls[1].sql, /"status"\s+ILIKE\s+%s/i);
+  assert.deepEqual(calls[1].parameters, ["pending"]);
 });
 
 test("unsupported categorical values fail closed before an aggregate query", async () => {
@@ -305,8 +311,10 @@ test("enum categorical filters cast to text before case-insensitive comparison",
     operations: ["lookup"],
     limit: 10
   };
-  const sql = generator.generate(plan, "db1");
-  assert.match(sql, /CAST\("project_details"\."status" AS text\) ILIKE 'active'/i);
+  const prepared = generator.generatePrepared(plan, "db1");
+  const sql = prepared.query;
+  assert.match(sql, /CAST\("project_details"\."status" AS text\) ILIKE %s/i);
+  assert.deepEqual(prepared.parameters, ["active"]);
   validateReadOnlyQuery(sql);
 });
 
@@ -318,11 +326,13 @@ test("bounded categorical verification accepts verified separator variants", () 
   const verification = generator.generateCategoricalExistence("projects", "status", "in progress", "db2");
   assert.match(verification.query, /regexp_replace\(lower\(CAST\("projects"\."status" AS text\)\)/i);
   validateReadOnlyQuery(verification.query);
-  const sql = generator.generate({
+  const prepared = generator.generatePrepared({
     data_sources: ["postgresql"], postgresql_sources: ["db2"], required_tables: ["projects"],
     required_columns: ["projects.status"], filters: [{ table: "projects", field: "status", operator: "case_insensitive_equals", value: "in progress" }],
     relationships: [], operations: ["lookup"]
   }, "db2");
+  const sql = prepared.query;
+  assert.deepEqual(prepared.parameters, ["in progress"]);
   assert.match(sql, /regexp_replace\(lower\(CAST\("projects"\."status" AS text\)\)/i);
   validateReadOnlyQuery(sql);
 });

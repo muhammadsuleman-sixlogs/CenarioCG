@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ContextManager } from "../context/context_manager.js";
-import { loadAllContexts } from "../context/context_store.js";
+import { loadTestContexts, OFFLINE_PROVIDER } from "./test_context.js";
 import { QuestionPlanner } from "../planning/question_planner.js";
 import { QuestionPlanValidator } from "../planning/question_plan_validator.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { RAGPipeline } from "../pipeline/rag_pipeline.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 
-const contexts = loadAllContexts();
+const contexts = loadTestContexts();
 
 function pipelineFor(contextSet = contexts) {
   const pipeline = new RAGPipeline(new ContextManager());
@@ -17,7 +17,7 @@ function pipelineFor(contextSet = contexts) {
   pipeline.planValidator = validator;
   pipeline.source_router = new SourceRouter(contextSet);
   pipeline.planner = new QuestionPlanner(contextSet);
-  pipeline.planner.client = null;
+  pipeline.planner.client = OFFLINE_PROVIDER;
   pipeline.entity_resolver = { async resolve() { return []; } };
   return pipeline;
 }
@@ -134,11 +134,13 @@ test("pending tickets use verified status semantics and remain source-qualified"
   };
   const pipeline = pipelineFor(fixture);
   let sql;
-  pipeline.executor = { async execute(query, sourceId) { sql = query; validateReadOnlyQuery(query); return { rows: [{ id: "t1", status: "pending", subject: "Open item" }], row_count: 1, columns: ["id", "status", "subject"] }; } };
+  let parameters;
+  pipeline.executor = { async execute(query, sourceId, values = []) { sql = query; parameters = values; validateReadOnlyQuery(query); return { rows: [{ id: "t1", status: "pending", subject: "Open item" }], row_count: 1, columns: ["id", "status", "subject"] }; } };
   pipeline.answer_generator = { async generate() { return "One pending ticket"; } };
   const result = await pipeline.ask("Which tickets are pending?", { workspace_id: "w", authorization: { postgresql_sources: ["db1"], security_resources: [] } });
   assert.equal(result.retrieval_status, "success_with_data");
-  assert.match(sql, /"status"\s+ILIKE\s+'pending'/i);
+  assert.match(sql, /"status"\s+ILIKE\s+%s/i);
+  assert.deepEqual(parameters, ["pending"]);
   assert.equal(result.sources[0].source_id, "db1");
 });
 

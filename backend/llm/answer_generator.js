@@ -239,9 +239,55 @@ Return ONLY the final answer to the user.
 
     return answer;
   }
+
+  /**
+   * Produce a bounded answer directly from already-sanitized evidence when
+   * the external answer provider is temporarily unavailable. This is not a
+   * second planner or retrieval path: it never queries a source and only
+   * renders fields that were already returned by the authorized retrieval.
+   */
+  buildFallbackAnswer(question, evidence) {
+    const rows = Array.isArray(evidence?.rows)
+      ? evidence.rows
+      : (Array.isArray(evidence?.postgresql?.rows) ? evidence.postgresql.rows : []);
+
+    if (!rows.length) {
+      return "I could not verify a matching record in the retrieved data.";
+    }
+
+    const blocked = /password|passwd|secret|token|api[_-]?key|credential/i;
+    const preferred = [
+      "ticket_number", "ticket_id", "invoice_number", "meeting_title", "project_name",
+      "name", "title", "subject", "status", "priority", "created_at", "updated_at", "id"
+    ];
+    const valueText = value => {
+      if (value === null || value === undefined) return "";
+      if (typeof value === "object") {
+        try { return JSON.stringify(value); } catch { return String(value); }
+      }
+      return String(value);
+    };
+    const formatRow = row => {
+      const keys = Object.keys(row || {}).filter(key => !blocked.test(key));
+      const selected = [
+        ...preferred.filter(key => keys.includes(key)),
+        ...keys.filter(key => !preferred.includes(key))
+      ].slice(0, 8);
+      return selected
+        .map(key => `${key}: ${valueText(row[key])}`)
+        .filter(item => item.split(": ").slice(1).join(": ").length > 0)
+        .join("; ");
+    };
+
+    const boundedRows = rows.slice(0, 10).map(formatRow).filter(Boolean);
+    const suffix = rows.length > boundedRows.length ? ` Showing ${boundedRows.length} of ${rows.length} retrieved records.` : "";
+    if (boundedRows.length === 1) return `I found one matching record: ${boundedRows[0]}.${suffix}`;
+    return `I found ${rows.length} matching records in the retrieved data:${suffix}\n${boundedRows.map(item => `- ${item}`).join("\n")}`;
+  }
 }
 
 AnswerGenerator.prototype.build_prompt = AnswerGenerator.prototype.buildPrompt;
+AnswerGenerator.prototype.build_fallback_answer = AnswerGenerator.prototype.buildFallbackAnswer;
 
 export default {
   AnswerGenerator

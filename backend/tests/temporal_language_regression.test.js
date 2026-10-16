@@ -2,13 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { QuestionPlanner } from "../planning/question_planner.js";
 import { QuestionPlanValidator } from "../planning/question_plan_validator.js";
-import { loadAllContexts } from "../context/context_store.js";
+import { loadTestContexts, OFFLINE_PROVIDER } from "./test_context.js";
 import { RAGPipeline } from "../pipeline/rag_pipeline.js";
 import { ContextManager } from "../context/context_manager.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 
-const contexts = loadAllContexts();
+const contexts = loadTestContexts();
 
 test("recent temporal intent never becomes a meeting title filter, including a malformed provider plan", async () => {
   const planner = new QuestionPlanner(contexts);
@@ -39,7 +39,7 @@ test("recent temporal intent never becomes a meeting title filter, including a m
 
 test("quoted temporal-looking text remains an intentional literal search", async () => {
   const planner = new QuestionPlanner(contexts);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const plan = await planner.plan('Show me "recent" meeting details');
   assert.deepEqual(plan.filters, [{ table: "sessions", field: "meeting_title", operator: "contains", value: "recent" }]);
   assert.equal(plan.sorting.length, 0);
@@ -55,7 +55,7 @@ test("unfamiliar temporal entity uses discovered metadata rather than title text
     }
   };
   const planner = new QuestionPlanner(unfamiliar);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const plan = await planner.plan("Show newest signal packets");
   assert.deepEqual(plan.filters, []);
   assert.deepEqual(plan.sorting, [{ field: "signal_packets.observed_at", direction: "desc" }]);

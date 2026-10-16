@@ -7,6 +7,7 @@ import { attachSemanticCatalog, catalogFingerprint, deriveTechnicalEntities, fin
 import { contextFingerprint, publishContextGeneration, rollbackContextGeneration } from "../context/context_store.js";
 import { findCrossSourceCandidates } from "../context/cross_source_inference.js";
 import { QuestionPlanner } from "../planning/question_planner.js";
+import { OFFLINE_PROVIDER } from "./test_context.js";
 
 function context(source_id, tables, relationships = []) {
   return { source_id, tables, relationships };
@@ -51,7 +52,7 @@ test("new technical tables are planner-visible without an approved semantic mapp
   assert.equal(candidates[0].table, "risk_signals");
   assert.equal(contexts.db2.semantic_catalog.entities.risk_signals.technical_entity, true);
   const planner = new QuestionPlanner(contexts);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const plan = await planner.plan("show risk signals");
   assert.deepEqual(plan.postgresql_sources, ["db2"]);
   assert.deepEqual(plan.required_tables, ["risk_signals"]);

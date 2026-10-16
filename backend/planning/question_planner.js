@@ -790,7 +790,7 @@ export class QuestionPlanner {
     const preferred = ranked[0];
     const questionTokens = tokenWords(question);
     const entityTokens = [candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])].flatMap(tokenWords);
-    const ignored = new Set(["show", "me", "the", "a", "an", "all", "total", "count", "number", "of", "how", "many", "which", "what", "are", "is", "with", "where", "status", "state", "workflow", "lifecycle", "records"]);
+    const ignored = new Set(["show", "me", "the", "a", "an", "all", "only", "total", "count", "number", "of", "how", "many", "which", "ones", "what", "are", "is", "with", "where", "status", "state", "workflow", "lifecycle", "records", "this", "that", "these", "those", "them", "it", "its", "their", "they", "above", "previous", "prior", "related"]);
     const valueTokens = questionTokens.filter(token => !entityTokens.includes(token) && !ignored.has(token) && !this._is_temporal_modifier_token(token));
     if (!valueTokens.length || valueTokens.length > 4) return null;
     return {
@@ -1974,7 +1974,8 @@ The final execution plan step objects must use:
     // never receives the established source-qualified entity filter.
     const crossSourceCompleted = this._complete_verified_cross_source_followup(normalized, question, conversationContext);
     const activeCompleted = this._complete_active_context_plan(crossSourceCompleted, question, conversationContext);
-    const completed = this._complete_schema_anchor_plan(activeCompleted, question);
+    const recordSetCompleted = this._apply_active_record_set_context(activeCompleted, question, conversationContext);
+    const completed = this._complete_schema_anchor_plan(recordSetCompleted, question);
 
     completed.relationships = this._normalize_relationships(
       completed.relationships ?? []
@@ -2344,6 +2345,83 @@ The final execution plan step objects must use:
     const safeColumns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(column => column && !isSensitiveFieldName(column)).slice(0, 20);
     if (!safeColumns.length) return plan;
     return { ...plan, data_sources: ["postgresql"], postgresql_sources: [sourceId], required_tables: [table], required_columns: safeColumns.map(column => `${table}.${column}`), filters: Object.entries(stableKeys).map(([column, value]) => ({ table, field: column, operator: "=", value })), operations: ["lookup"], needs_conversation_context: true, confidence: Math.max(Number(plan.confidence || 0), 0.8), reasoning: "A uniquely established conversation entity was used for a bounded, source-qualified detail lookup." };
+  }
+
+  _apply_active_record_set_context(plan, question, conversationContext) {
+    const active = this._conversation_reference(conversationContext);
+    const recordSet = active?.record_set;
+    if (!active || !recordSet || !this._is_record_set_reference(question)) return plan;
+
+    const sourceId = String(active.source_id || "").trim().toLowerCase();
+    const table = String(active.table || "").trim();
+    const keyColumn = String(recordSet.key_column || "").trim();
+    const values = Array.isArray(recordSet.values)
+      ? [...new Set(recordSet.values.filter(value => value !== null && value !== undefined).map(String))]
+      : [];
+    const tableInfo = this.contexts?.[sourceId]?.tables?.[table];
+    const discoveredColumns = new Set((tableInfo?.columns || []).map(column => String(column?.name || column).toLowerCase()));
+    const questionText = String(question || "");
+    const mentionsEntityPhrase = phrase => {
+      const words = String(phrase || "").replace(/_/g, " ").trim().split(/\s+/).filter(Boolean);
+      return words.length > 0 && words.every(word => new RegExp(`\\b${word.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}(?:s)?\\b`, "i").test(questionText));
+    };
+    const hasExplicitTarget = findSemanticCandidates(question, this.contexts, [sourceId]).some(candidate => {
+      if (String(candidate?.table || "").toLowerCase() === table.toLowerCase()) return false;
+      const aliases = [candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])];
+      return aliases.some(mentionsEntityPhrase);
+    });
+    const asksAcrossSources = /\b(?:both|combine|across|sources?)\b/i.test(questionText);
+    if (hasExplicitTarget || asksAcrossSources) return plan;
+
+    // A plural conversational reference is executable only when its
+    // source-qualified key and bounded values still match the active schema.
+    // Otherwise fail closed rather than allowing the provider's broad plan to
+    // become an unfiltered retrieval.
+    if (!sourceId || !table || !keyColumn || !values.length || !tableInfo || !discoveredColumns.has(keyColumn.toLowerCase())) {
+      return {
+        ...plan,
+        clarification_required: {
+          type: "missing_context_binding",
+          message: "I could not verify the referenced records, so I did not run an unfiltered retrieval."
+        }
+      };
+    }
+
+    const executionPlan = plan.execution_plan;
+    if (executionPlan) {
+      plan.needs_conversation_context = true;
+      return plan;
+    }
+
+    const requiredTables = Array.isArray(plan.required_tables) ? [...plan.required_tables] : [];
+    const targetsActiveTable = requiredTables.some(candidate => String(candidate).toLowerCase() === table.toLowerCase());
+    if (!targetsActiveTable) return plan;
+
+    plan.filters = Array.isArray(plan.filters) ? plan.filters : [];
+    const existing = plan.filters.find(filter =>
+      String(filter?.table || "").toLowerCase() === table.toLowerCase() &&
+      String(filter?.field || filter?.column || "").split(".").at(-1).toLowerCase() === keyColumn.toLowerCase()
+    );
+    const sameValues = existing && Array.isArray(existing.value)
+      ? existing.value.map(String).sort().join("\u0000") === values.slice().sort().join("\u0000")
+      : false;
+
+    if (existing && !sameValues) {
+      plan.clarification_required = {
+        type: "conflicting_context_binding",
+        message: "I found a conflicting record reference in the conversation, so I did not broaden the retrieval."
+      };
+      return plan;
+    }
+
+    if (!existing) {
+      plan.filters.push({ table, field: keyColumn, operator: "in", value: values });
+    }
+    plan.data_sources = ["postgresql"];
+    plan.postgresql_sources = [sourceId];
+    plan.needs_conversation_context = true;
+    plan.entity_target = { ...(plan.entity_target || {}), source_id: sourceId, table };
+    return plan;
   }
 
   _complete_verified_cross_source_followup(plan, question, conversationContext) {

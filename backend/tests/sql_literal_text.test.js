@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 import { validate_sql_syntax } from "../retrieval/sql_validator.js";
+import { RetrievalExecutor } from "../retrieval/retrieval_executor.js";
 import { maskSql, mapSqlCode } from "../database/sql_lexer.js";
 
 function passesBoth(sql) {
@@ -110,6 +111,24 @@ test("%s placeholders are rewritten only outside string literals", () => {
   assert.equal(
     out,
     "SELECT id FROM t WHERE a ILIKE '%sprint review%' AND CAST(b AS text) = ANY($1) AND c = ANY($2)"
+  );
+});
+
+test("RetrievalExecutor preserves literal/comment %s text and validates executable bindings", () => {
+  const executor = new RetrievalExecutor();
+  const normalized = executor.normalizePlaceholders(
+    "SELECT id FROM t WHERE title ILIKE '%sprint review%' /* %s */ AND value = %s -- %s\n",
+    ["safe"]
+  );
+
+  assert.equal(
+    normalized.query,
+    "SELECT id FROM t WHERE title ILIKE '%sprint review%' /* %s */ AND value = $1 -- %s\n"
+  );
+  assert.deepEqual(normalized.parameters, ["safe"]);
+  assert.throws(
+    () => executor.normalizePlaceholders("SELECT id FROM t WHERE value = %s", []),
+    error => error.code === "PARAMETER_PLACEHOLDER_MISMATCH"
   );
 });
 

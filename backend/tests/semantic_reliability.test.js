@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ContextManager } from "../context/context_manager.js";
-import { loadAllContexts } from "../context/context_store.js";
+import { loadTestContexts, OFFLINE_PROVIDER } from "./test_context.js";
 import {
   findSemanticCandidates,
   findVerifiedPaths,
@@ -20,7 +20,7 @@ import { QueryPlan } from "../planning/query_plan.js";
 import { QueryPlanExecutor } from "../retrieval/query_plan_executor.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 
-const contexts = loadAllContexts();
+const contexts = loadTestContexts();
 
 test("semantic catalog resolves reported generic questions to authorized candidates", () => {
   const recentMeetings = findSemanticCandidates("Show me recent meetings", contexts);
@@ -115,7 +115,7 @@ test("verified project-to-company traversal is visible to the active planner", a
 
 test("meeting follow-up uses the verified project_id and never adds phrase-derived filters", async () => {
   const planner = new QuestionPlanner(contexts);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const plan = await planner.plan("Which project is associated with this meeting? Show me its project name and details.", {
     active_context: {
       source_id: "db2",
@@ -138,7 +138,7 @@ test("meeting follow-up uses the verified project_id and never adds phrase-deriv
 
 test("invoice company follow-up binds the verified company_id, not the invoice id", async () => {
   const planner = new QuestionPlanner(contexts);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const plan = await planner.plan("What is the company name of that invoice?", {
     active_context: {
       source_id: "db1",
@@ -154,10 +154,12 @@ test("invoice company follow-up binds the verified company_id, not the invoice i
 
   const validation = new QuestionPlanValidator(contexts).validate(plan);
   assert.equal(validation.valid, true, validation.errors.join("; "));
-  const sql = new SQLGenerator(contexts.db1, "db1").generate(plan, "db1");
+  const prepared = new SQLGenerator(contexts.db1, "db1").generatePrepared(plan, "db1");
+  const sql = prepared.query;
   validateReadOnlyQuery(sql);
   assert.match(sql, /FROM "companies"/i);
-  assert.match(sql, /"companies"\."id"\s*=\s*'company-1'/i);
+  assert.match(sql, /"companies"\."id"\s*=\s*%s/i);
+  assert.deepEqual(prepared.parameters, ["company-1"]);
   assert.doesNotMatch(sql, /invoice-1/i);
 });
 
@@ -218,7 +220,7 @@ test("catalog validation distinguishes unknown and stale freshness without rejec
 
 test("planner-provider failure falls back to a semantic, source-qualified plan", async () => {
   const planner = new QuestionPlanner(contexts);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const plan = await planner.plan("Show me recent meetings");
   assert.deepEqual(plan.postgresql_sources, ["db2"]);
   assert.deepEqual(plan.required_tables, ["sessions"]);

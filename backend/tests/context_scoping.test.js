@@ -4,11 +4,13 @@ import { ContextManager } from "../context/context_manager.js";
 import { QuestionPlanner } from "../planning/question_planner.js";
 import { SQLGenerator } from "../retrieval/sql_generator.js";
 import { RAGPipeline } from "../pipeline/rag_pipeline.js";
-import { loadContext } from "../context/context_store.js";
+import { loadTestContexts } from "./test_context.js";
+
+const testContexts = loadTestContexts();
 
 test("Regression Test 1: 'show details of meta briefing meeting' -> 'does it have a transcript?' scopes transcripts by session_id", async () => {
   const pipeline = new RAGPipeline();
-  const db2Context = loadContext("db2");
+  const db2Context = testContexts.db2;
   const sqlGen = new SQLGenerator(db2Context, "db2");
 
   // Turn 1: "Show me recent meetings" (returns list of 5 meetings, including meta briefing)
@@ -80,13 +82,15 @@ test("Regression Test 1: 'show details of meta briefing meeting' -> 'does it hav
   assert.ok(plan.filters.some(f => f.column === "session_id" && f.value === metaBriefingSessionId), "Plan must filter transcripts by active session_id");
 
   // Compile final SQL
-  const sql = sqlGen.generate(plan, "db2");
+  const prepared = sqlGen.generatePrepared(plan, "db2");
+  const sql = prepared.query;
   console.log("\n==================== TEST 1 GENERATED SQL ====================");
   console.log(sql);
   console.log("==============================================================\n");
 
   assert.ok(sql.includes(`FROM "transcripts"`), "Must query transcripts table");
-  assert.ok(sql.includes(`"session_id" = '${metaBriefingSessionId}'`), "Must filter WHERE session_id = <meta briefing session>");
+  assert.match(sql, /"session_id" = %s/i, "Must use a bound session_id filter");
+  assert.deepEqual(prepared.parameters, [metaBriefingSessionId, "vou-awaw-ypu"]);
 });
 
 test("a bounded recent-first invoice keeps its source-qualified company binding", () => {
@@ -104,7 +108,7 @@ test("a bounded recent-first invoice keeps its source-qualified company binding"
 });
 
 test("complex follow-up preserves the established parent identity in the first execution step", () => {
-  const planner = new QuestionPlanner({ db2: loadContext("db2") });
+  const planner = new QuestionPlanner({ db2: testContexts.db2 });
   const active = {
     source_id: "db2",
     table: "sessions",
@@ -155,16 +159,51 @@ test("plural list follow-ups resolve above/previous records to source-qualified 
   );
   assert.deepEqual(plan.filters, [{ table: "sessions", field: "session_id", operator: "in", value: ["s-1", "s-2", "s-3", "s-4", "s-5"] }]);
   assert.ok(!JSON.stringify(plan).toLowerCase().includes("meeting_title.*above"));
-  const sql = new SQLGenerator(loadContext("db2"), "db2").generate(plan, "db2");
-  assert.match(sql, /"session_id"\s+IN\s*\(/i);
+  const prepared = new SQLGenerator(testContexts.db2, "db2").generatePrepared(plan, "db2");
+  const sql = prepared.query;
+  assert.match(sql, /"sessions"\."session_id"\s*=\s*ANY\(%s\)/i);
+  assert.deepEqual(prepared.parameters, [["s-1", "s-2", "s-3", "s-4", "s-5"]]);
   assert.doesNotMatch(sql, /above/i);
 
   const noIdentityPlan = pipeline.planner._build_metadata_fallback_plan("show me details of above meetings");
   assert.ok(!(noIdentityPlan?.filters || []).some(filter => String(filter.value || "").toLowerCase() === "above"));
 });
 
+test("direct provider-shaped plural plans retain the verified active record set", () => {
+  const planner = new QuestionPlanner({ db1: testContexts.db1 });
+  const plan = planner._normalize_plan(
+    {
+      data_sources: ["postgresql"],
+      postgresql_sources: ["db1"],
+      required_tables: ["invoices"],
+      required_columns: [],
+      filters: [],
+      operations: ["lookup"],
+      limit: 50
+    },
+    "could you show me above invoices id",
+    {
+      active_context: {
+        source_id: "db1",
+        table: "invoices",
+        record_set: { key_column: "id", values: ["inv-a", "inv-b", "inv-c"], count: 3 }
+      }
+    }
+  );
+
+  assert.deepEqual(plan.filters, [{
+    table: "invoices",
+    field: "id",
+    operator: "in",
+    value: ["inv-a", "inv-b", "inv-c"]
+  }]);
+  assert.equal(plan.needs_conversation_context, true);
+  assert.equal(plan.clarification_required, undefined);
+});
+
 test("an explicit new entity takes precedence over a plural context reference", () => {
   const pipeline = new RAGPipeline();
+  pipeline.planner = new QuestionPlanner(testContexts);
   const active = {
     source_id: "db2",
     table: "sessions",
@@ -184,7 +223,8 @@ test("an explicit new entity takes precedence over a plural context reference", 
 
 test("Regression Test 2: Follow-up 'how many action items?' stays scoped to the same session", async () => {
   const pipeline = new RAGPipeline();
-  const db2Context = loadContext("db2");
+  pipeline.planner = new QuestionPlanner(testContexts);
+  const db2Context = testContexts.db2;
   const sqlGen = new SQLGenerator(db2Context, "db2");
 
   const metaBriefingSessionId = "03caf591-0016-46ce-bc58-637a0c92c207";
@@ -219,18 +259,20 @@ test("Regression Test 2: Follow-up 'how many action items?' stays scoped to the 
 
   assert.ok(plan.filters.some(f => f.column === "session_id" && f.value === metaBriefingSessionId), "Plan must filter action_items by active session_id");
 
-  const sql = sqlGen.generate(plan, "db2");
+  const prepared = sqlGen.generatePrepared(plan, "db2");
+  const sql = prepared.query;
   console.log("\n==================== TEST 2 GENERATED SQL ====================");
   console.log(sql);
   console.log("==============================================================\n");
 
   assert.ok(sql.includes(`FROM "action_items"`), "Must query action_items table");
-  assert.ok(sql.includes(`"session_id" = '${metaBriefingSessionId}'`), "Must filter WHERE session_id = <meta briefing session>");
+  assert.match(sql, /"session_id" = %s/i, "Must use a bound session_id filter");
+  assert.deepEqual(prepared.parameters, [metaBriefingSessionId, "vou-awaw-ypu"]);
 });
 
 test("Regression Test 3: After asking 'show recent meetings', a new explicit meeting name replaces the active context", async () => {
   const pipeline = new RAGPipeline();
-  const db2Context = loadContext("db2");
+  const db2Context = testContexts.db2;
   const sqlGen = new SQLGenerator(db2Context, "db2");
 
   const initialSessionId = "03caf591-0016-46ce-bc58-637a0c92c207";
@@ -301,12 +343,14 @@ test("Regression Test 3: After asking 'show recent meetings', a new explicit mee
   assert.ok(plan.filters.some(f => f.column === "session_id" && f.value === newSessionId), "Must filter by newSessionId");
   assert.ok(!plan.filters.some(f => f.value === initialSessionId), "Must NOT use old session ID");
 
-  const sql = sqlGen.generate(plan, "db2");
+  const prepared = sqlGen.generatePrepared(plan, "db2");
+  const sql = prepared.query;
   console.log("\n==================== TEST 3 GENERATED SQL ====================");
   console.log(sql);
   console.log("==============================================================\n");
 
   assert.ok(sql.includes(`FROM "transcripts"`), "Must query transcripts table");
-  assert.ok(sql.includes(`"session_id" = '${newSessionId}'`), "Must filter WHERE session_id = <new sprint retrospective session>");
-  assert.ok(!sql.includes(initialSessionId), "Must not contain initialSessionId");
+  assert.match(sql, /"session_id" = %s/i, "Must use a bound session_id filter");
+  assert.deepEqual(prepared.parameters, [newSessionId, "ret-sprint-999"]);
+  assert.ok(!prepared.parameters.includes(initialSessionId), "Must not bind initialSessionId");
 });

@@ -17,9 +17,7 @@ import { EvidenceManager } from "../llm/evidence_manager.js";
 import { AnswerGenerator } from "../llm/answer_generator.js";
 import { sanitizeApiResponse, sanitizeEvidence } from "../security/output_security_policy.js";
 import { isSensitiveQuestionIntent } from "../security/sensitive_data_policy.js";
-import { validateReadOnlyQuery } from "../database/readonly_guard.js";
-import { validateSqlSyntax } from "../retrieval/sql_validator.js";
-import { getConnection, getRegisteredPostgresqlSourceIds } from "../database/connection.js";
+import { getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { assertAuthorizedSecurityResource, assertAuthorizedSources, assertAuthorizedExternalApiOperation } from "../auth/authorization.js";
 import { logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
@@ -671,25 +669,34 @@ export class RAGPipeline {
         }
       }
 
-      let sql = sqlGenerator.generate(contractDict, sourceId, runtimeBindings);
+      const generated = sqlGenerator.generatePrepared(contractDict, sourceId, runtimeBindings);
+      let sql = generated.query;
+      let executionBindings = {
+        ...(runtimeBindings || {}),
+        parameters: generated.parameters
+      };
       let repaired = false;
       let retrieval;
 
       try {
-        retrieval = await this._executePostgresqlLive(sql, sourceId, runtimeBindings);
+        retrieval = await this._executePostgresqlLive(sql, sourceId, executionBindings);
       } catch (exc) {
-        if (isSqlRepairableError(exc) && typeof sqlGenerator.repair === "function") {
+        if (isSqlRepairableError(exc) && typeof sqlGenerator.repairPrepared === "function") {
           try {
-            const repairedSql = sqlGenerator.repair(
+            const repairedResult = sqlGenerator.repairPrepared(
               sql,
               String(exc.message || exc),
               contractDict,
               sourceId,
               runtimeBindings
             );
-            sql = repairedSql;
+            sql = repairedResult.query;
+            executionBindings = {
+              ...(runtimeBindings || {}),
+              parameters: repairedResult.parameters
+            };
             repaired = true;
-            retrieval = await this._executePostgresqlLive(sql, sourceId, runtimeBindings);
+            retrieval = await this._executePostgresqlLive(sql, sourceId, executionBindings);
           } catch {
             throw exc;
           }
@@ -747,41 +754,7 @@ export class RAGPipeline {
     if (!parameters || parameters.length === 0) {
       return await this.executor.execute(query, sourceId);
     }
-
-    try {
-      return await this.executor.execute(query, sourceId, parameters);
-    } catch (error) {
-      // Only the built-in executor may use the legacy direct-connection
-      // fallback. Injected/offline executors must surface their failure so a
-      // verification error cannot accidentally open a live connection.
-      if (!(this.executor instanceof RetrievalExecutor)) throw error;
-      // Fallback direct execution
-      validateReadOnlyQuery(query);
-      validateSqlSyntax(query);
-
-      const client = await getConnection(sourceId);
-      let queryError = null;
-      try {
-        const res = await client.query(query, parameters);
-        const rows = res.rows || [];
-        const columns = (res.fields || []).map(f => f.name);
-        return {
-          rows,
-          row_count: rows.length,
-          columns,
-          retrieval_status: rows.length > 0 ? "success_with_data" : "success_empty"
-        };
-      } catch (error) {
-        queryError = error;
-        throw error;
-      } finally {
-        if (typeof client.release === "function") {
-          client.release(queryError || undefined);
-        } else if (typeof client.close === "function") {
-          client.close();
-        }
-      }
-    }
+    return await this.executor.execute(query, sourceId, parameters);
   }
 
   async _retrieveSecurityLogs(plan, workspaceId = null) {
@@ -1547,7 +1520,19 @@ export class RAGPipeline {
     try {
       answer = await this.answer_generator.generate(cleanQuestion, evidence);
     } catch (exc) {
-      answer = "I retrieved live evidence successfully, but I could not generate the final answer from that evidence.";
+      logRuntimeDiagnostic(exc, { requestId: this.request_id, phase: "answer_generation" });
+      const fallbackFn = typeof this.answer_generator.buildFallbackAnswer === "function"
+        ? this.answer_generator.buildFallbackAnswer.bind(this.answer_generator)
+        : (typeof this.answer_generator.build_fallback_answer === "function"
+          ? this.answer_generator.build_fallback_answer.bind(this.answer_generator)
+          : null);
+      try {
+        answer = fallbackFn
+          ? fallbackFn(cleanQuestion, evidence)
+          : "I retrieved live evidence successfully, but I could not generate the final answer from that evidence.";
+      } catch {
+        answer = "I retrieved live evidence successfully, but I could not generate the final answer from that evidence.";
+      }
       answerGenerationStatus = "failed";
       answerGenerationError = {
         type: exc.name || "Error",
@@ -1555,7 +1540,10 @@ export class RAGPipeline {
       };
     }
 
-    if (answerGenerationStatus === "success") {
+    // Retrieval evidence is authoritative for context even when the optional
+    // answer provider is unavailable. Keep the verified record/set anchor so
+    // the next turn can bind safely instead of losing conversation continuity.
+    if (answerGenerationStatus === "success" || hasData) {
       const addTurnFn = typeof this.context_manager.add_turn === "function"
         ? this.context_manager.add_turn.bind(this.context_manager)
         : this.context_manager.addTurn.bind(this.context_manager);

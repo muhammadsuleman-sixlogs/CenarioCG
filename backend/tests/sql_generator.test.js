@@ -94,7 +94,26 @@ test("SQLGenerator rejects aggregate ordering by a non-grouped raw column", () =
     relationships: [], filters: [], operations: ["maximum"], grouping: [],
     requested_metrics: [{ operation: "maximum", table: "invoices", column: "total_amount" }],
     sorting: [{ field: "invoices.total_amount", direction: "desc" }], limit: 1
-  }, "db1"), /Aggregate query cannot order by non-grouped raw column/);
+}, "db1"), /Aggregate query cannot order by non-grouped raw column/);
+});
+
+test("SQLGenerator binds ordinary filter values without changing query structure", () => {
+  const generator = new SQLGenerator(loadContext("db1"), "db1");
+  const maliciousText = "x' OR 1=1 --";
+  const prepared = generator.generatePrepared({
+    required_tables: ["invoices"],
+    required_columns: ["invoices.id"],
+    relationships: [],
+    filters: [{ table: "invoices", field: "invoice_number", operator: "contains", value: maliciousText }],
+    operations: ["lookup"],
+    grouping: [],
+    sorting: [],
+    limit: 10
+  }, "db1");
+
+  assert.match(prepared.query, /"invoices"\."invoice_number" ILIKE %s/i);
+  assert.deepEqual(prepared.parameters, [`%${maliciousText}%`]);
+  assert.doesNotMatch(prepared.query, /1=1|x'/i);
 });
 
 test("SQLGenerator omits protected projection columns but keeps permitted user fields", () => {
