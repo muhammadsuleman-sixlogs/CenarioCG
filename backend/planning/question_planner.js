@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getOpenAIClient, OPENAI_MODEL } from "../llm/openai_client.js";
+import { recordLlmAttempt } from "../llm/usage_tracker.js";
 import { loadAllContexts } from "../context/context_store.js";
 import { isSensitiveQuestionIntent } from "../security/sensitive_data_policy.js";
 import { findSemanticCandidates, findVerifiedPaths } from "../context/semantic_catalog.js";
@@ -232,7 +233,7 @@ export class QuestionPlanner {
   // Public planner API
   // ------------------------------------------------------------------
 
-  async plan(question, conversationContext = null) {
+  async plan(question, conversationContext = null, usageTracker = null) {
     if (typeof question !== "string" || !question.trim()) {
       throw new Error("Question cannot be empty.");
     }
@@ -306,8 +307,22 @@ export class QuestionPlanner {
           model: OPENAI_MODEL,
           input: prompt,
         });
+        recordLlmAttempt(usageTracker, {
+          stage: "planner",
+          transport: "responses",
+          model: OPENAI_MODEL,
+          response,
+          status: (response.output_text ?? response.output) ? "success" : "empty"
+        });
         content = (response.output_text ?? response.output ?? "").trim();
-      } catch {
+      } catch (error) {
+        recordLlmAttempt(usageTracker, {
+          stage: "planner",
+          transport: "responses",
+          model: OPENAI_MODEL,
+          status: "error",
+          error
+        });
         content = "";
       }
     }
@@ -321,7 +336,21 @@ export class QuestionPlanner {
           temperature: 0.1,
         });
         content = (completion.choices?.[0]?.message?.content ?? "").trim();
-      } catch {
+        recordLlmAttempt(usageTracker, {
+          stage: "planner",
+          transport: "chat_completions",
+          model: OPENAI_MODEL,
+          response: completion,
+          status: completion.choices?.[0]?.message?.content ? "success" : "empty"
+        });
+      } catch (error) {
+        recordLlmAttempt(usageTracker, {
+          stage: "planner",
+          transport: "chat_completions",
+          model: OPENAI_MODEL,
+          status: "error",
+          error
+        });
         content = "";
       }
     }

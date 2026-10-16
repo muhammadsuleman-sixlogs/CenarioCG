@@ -21,6 +21,7 @@ import { getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { assertAuthorizedSecurityResource, assertAuthorizedSources, assertAuthorizedExternalApiOperation } from "../auth/authorization.js";
 import { logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
+import { createLlmUsageTracker, logLlmUsage, snapshotLlmUsage } from "../llm/usage_tracker.js";
 
 // Optional dynamic loaders for planning/retrieval components that may be migrated later
 let ComplexQueryPlanner = class {
@@ -125,6 +126,7 @@ export class RAGPipeline {
 
     this.answer_generator = new AnswerGenerator();
     this.answerGenerator = this.answer_generator;
+    this.llm_usage_logger = options.llm_usage_logger || console.info;
   }
 
   _validateQuestion(question) {
@@ -220,11 +222,21 @@ export class RAGPipeline {
   }
 
   _planningFailure(question, type, answer, details = []) {
-    return sanitizeApiResponse({
+    return this._attachLlmUsage(sanitizeApiResponse({
       question, plan: null, plan_repaired: false, data_sources: [], postgresql_source_ids: [],
       retrieval_status: "planning_failed", source_status: {}, evidence: {}, sources: [], answer,
       error: { type, details }
-    });
+    }));
+  }
+
+  _attachLlmUsage(result) {
+    if (!result || !this.llm_usage_tracker) return result;
+    if (!this.llm_usage_logged) {
+      logLlmUsage(this.llm_usage_tracker, this.llm_usage_logger);
+      this.llm_usage_logged = true;
+    }
+    result.llm_usage = snapshotLlmUsage(this.llm_usage_tracker);
+    return result;
   }
 
   _rewriteFollowupQuestion(question, conversationContext) {
@@ -1247,9 +1259,11 @@ export class RAGPipeline {
       workspaceId = this._validateWorkspaceId(workspaceIdOrContext);
     }
 
+    this.llm_usage_tracker = createLlmUsageTracker(this.request_id);
+
     // Security Rule 4: Fail closed immediately if requesting confidential credentials or passwords
     if (isSensitiveQuestionIntent(cleanQuestion)) {
-      return sanitizeApiResponse({
+      return this._attachLlmUsage(sanitizeApiResponse({
         question: cleanQuestion,
         plan: null,
         plan_repaired: false,
@@ -1264,7 +1278,7 @@ export class RAGPipeline {
           type: "sensitive_question_blocked",
           message: "The question requests confidential credentials or secrets."
         }
-      });
+      }));
     }
 
     const conversationContext = explicitConversationContext || this._getConversationContext();
@@ -1277,7 +1291,7 @@ export class RAGPipeline {
     const planningQuestion = this._rewriteFollowupQuestion(cleanQuestion, conversationContext);
     let rawPlan;
     try {
-      rawPlan = await this.planner.plan(planningQuestion, conversationContext);
+      rawPlan = await this.planner.plan(planningQuestion, conversationContext, this.llm_usage_tracker);
     } catch (error) {
       return this._planningFailure(cleanQuestion, "PLAN_SCHEMA_INVALID", "I could not identify one verified, authorized data path for that request. Please specify the record or data area you want to inspect.");
     }
@@ -1316,7 +1330,7 @@ export class RAGPipeline {
         const repairedValidation = this.plan_validator.validate(repairedPlan);
 
         if (!repairedValidation.valid) {
-          return sanitizeApiResponse({
+          return this._attachLlmUsage(sanitizeApiResponse({
             question: cleanQuestion,
             plan: rawPlan,
             plan_repaired: false,
@@ -1331,13 +1345,13 @@ export class RAGPipeline {
               type: "planning_failed",
               details: repairedValidation.errors || []
             }
-          });
+          }));
         }
 
         validation = repairedValidation;
         planRepaired = true;
       } else {
-        return sanitizeApiResponse({
+        return this._attachLlmUsage(sanitizeApiResponse({
           question: cleanQuestion,
           plan: rawPlan,
           plan_repaired: false,
@@ -1352,7 +1366,7 @@ export class RAGPipeline {
             type: "planning_failed",
             details: validation.errors || []
           }
-        });
+        }));
       }
     }
 
@@ -1503,7 +1517,7 @@ export class RAGPipeline {
         source_status: sourceStatus,
         retrieval_status: overallRetrievalStatus
       };
-      return sanitizeApiResponse(result);
+      return this._attachLlmUsage(sanitizeApiResponse(result));
     }
 
     const candidateResolutionResult = this._resolveIndependentCandidateEvidence(validatedPlan, postgresResults);
@@ -1518,7 +1532,7 @@ export class RAGPipeline {
     let answerGenerationError = null;
 
     try {
-      answer = await this.answer_generator.generate(cleanQuestion, evidence);
+      answer = await this.answer_generator.generate(cleanQuestion, evidence, null, null, this.llm_usage_tracker);
     } catch (exc) {
       logRuntimeDiagnostic(exc, { requestId: this.request_id, phase: "answer_generation" });
       const fallbackFn = typeof this.answer_generator.buildFallbackAnswer === "function"
@@ -1618,7 +1632,7 @@ export class RAGPipeline {
       result.security_logs_error = securityResult.error || null;
     }
 
-    return sanitizeApiResponse(result);
+    return this._attachLlmUsage(sanitizeApiResponse(result));
   }
 
   _resolveIndependentCandidateEvidence(plan, postgresResults) {

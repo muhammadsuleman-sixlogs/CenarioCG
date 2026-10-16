@@ -1,5 +1,6 @@
 import { getOpenAIClient, OPENAI_MODEL } from "./openai_client.js";
 import { EvidenceManager } from "./evidence_manager.js";
+import { recordLlmAttempt } from "./usage_tracker.js";
 import { sanitizeOutputText } from "../security/output_security_policy.js";
 
 /**
@@ -168,7 +169,7 @@ Return ONLY the final answer to the user.
 `.trim();
   }
 
-  async generate(questionOrOptions, evidence = null, retrieval = null, sources = null) {
+  async generate(questionOrOptions, evidence = null, retrieval = null, sources = null, usageTracker = null) {
     let cleanQuestion;
     let cleanEvidence;
 
@@ -204,12 +205,27 @@ Return ONLY the final answer to the user.
           input: prompt
         });
 
+        recordLlmAttempt(usageTracker, {
+          stage: "answer",
+          transport: "responses",
+          model: modelToUse,
+          response,
+          status: response?.output_text || response?.output?.[0]?.content?.[0]?.text ? "success" : "empty"
+        });
+
         if (response?.output_text) {
           answer = response.output_text.trim();
         } else if (response?.output?.[0]?.content?.[0]?.text) {
           answer = response.output[0].content[0].text.trim();
         }
       } catch (err) {
+        recordLlmAttempt(usageTracker, {
+          stage: "answer",
+          transport: "responses",
+          model: modelToUse,
+          status: "error",
+          error: err
+        });
         // Fall back to chat completions if responses API is not supported by endpoint
         answer = "";
       }
@@ -217,14 +233,33 @@ Return ONLY the final answer to the user.
 
     // 2. Fall back to Chat Completions API
     if (!answer && this.client?.chat?.completions?.create) {
-      const response = await this.client.chat.completions.create({
-        model: modelToUse,
-        messages: [{ role: "user", content: prompt }]
-      });
+      try {
+        const response = await this.client.chat.completions.create({
+          model: modelToUse,
+          messages: [{ role: "user", content: prompt }]
+        });
 
-      const content = response.choices?.[0]?.message?.content;
-      if (typeof content === "string") {
-        answer = content.trim();
+        recordLlmAttempt(usageTracker, {
+          stage: "answer",
+          transport: "chat_completions",
+          model: modelToUse,
+          response,
+          status: typeof response.choices?.[0]?.message?.content === "string" ? "success" : "empty"
+        });
+
+        const content = response.choices?.[0]?.message?.content;
+        if (typeof content === "string") {
+          answer = content.trim();
+        }
+      } catch (err) {
+        recordLlmAttempt(usageTracker, {
+          stage: "answer",
+          transport: "chat_completions",
+          model: modelToUse,
+          status: "error",
+          error: err
+        });
+        throw err;
       }
     }
 
