@@ -21,7 +21,13 @@ import { getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { assertAuthorizedSecurityResource, assertAuthorizedSources, assertAuthorizedExternalApiOperation } from "../auth/authorization.js";
 import { logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
-import { createLlmUsageTracker, logLlmUsage, snapshotLlmUsage } from "../llm/usage_tracker.js";
+import {
+  createLlmUsageTracker,
+  logLlmUsage,
+  measureAnswerEvidenceStructure,
+  recordAnswerEvidenceMetrics,
+  snapshotLlmUsage
+} from "../llm/usage_tracker.js";
 
 // Optional dynamic loaders for planning/retrieval components that may be migrated later
 let ComplexQueryPlanner = class {
@@ -286,11 +292,16 @@ export class RAGPipeline {
       /\b(?:first|latest|newest|most recent|single|one)\b/i.test(question)
     );
     const isPluralReference = /\b(?:recent|latest|newest|most recent|all|list|which)\b/i.test(question);
-    if (rows.length > 1 && isPluralReference && sourceIds.length === 1 && table) {
+    const isNamedRecordSet = plan?.named_entity_lookup === true;
+    if (rows.length > 1 && (isPluralReference || isNamedRecordSet) && sourceIds.length === 1 && table) {
       const candidateKeys = Object.keys(rows[0].row).filter(key => /(?:^|_)id$/i.test(key) && rows.every(item => Object.prototype.hasOwnProperty.call(item.row, key) && item.row[key] !== null && item.row[key] !== undefined));
       const keyColumn = candidateKeys[0];
       const values = keyColumn ? [...new Set(rows.map(item => item.row[keyColumn]).filter(value => value !== null && value !== undefined).map(String))] : [];
       if (keyColumn && values.length === rows.length) {
+        const relationshipKeys = Object.fromEntries(candidateKeys.map(column => [
+          column,
+          [...new Set(rows.map(item => item.row[column]).filter(value => value !== null && value !== undefined).map(String))]
+        ]));
         const priorActive = typeof this.context_manager.getActiveContext === "function" ? this.context_manager.getActiveContext() : null;
         const inherited = priorActive?.source_id === sourceIds[0] && priorActive?.table === table ? priorActive : {};
         this.context_manager.setActiveContext({
@@ -298,6 +309,7 @@ export class RAGPipeline {
           source_id: sourceIds[0],
           table,
           record_set: { key_column: keyColumn, values, count: values.length },
+          relationship_keys: relationshipKeys,
           validation_status: "retrieval_evidence_confirmed",
           provenance: "successful_source_retrieval"
         });
@@ -341,6 +353,155 @@ export class RAGPipeline {
     }
     this.context_manager.setActiveContext({ ...Object.fromEntries(invariantFields), source_id, table: resolvedTable, stable_keys: Object.fromEntries(stableEntries) });
     if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
+  }
+
+  _recordSetReferenceMode(question, active) {
+    const text = String(question || "");
+    if (/\b(?:above|those|these|previous|prior)\b|\ball\s+\d+\b/i.test(text)) return "plural";
+    if (!active?.record_set || !active?.source_id || !active?.table) return null;
+    const context = this.plan_validator.contexts?.[active.source_id] || {};
+    const entity = context.semantic_catalog?.entities?.[active.table] || {};
+    const aliases = [active.table, entity.entity_type, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
+      .map(value => String(value || "").replace(/_/g, " ").trim())
+      .filter(Boolean);
+    const mentionsActiveEntity = aliases.some(alias => {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\b${escaped}(?:s)?\\b`, "i").test(text);
+    });
+    return mentionsActiveEntity && /\b(?:this|that)\b/i.test(text) ? "singular" : null;
+  }
+
+  _resolveFollowupIdentityResolution(question, conversationContext, plan, postgresResults) {
+    const active = conversationContext?.active_context || conversationContext?.pending_reference || null;
+    const recordSet = active?.record_set;
+    const mode = this._recordSetReferenceMode(question, active);
+    const values = Array.isArray(recordSet?.values)
+      ? [...new Set(recordSet.values.filter(value => value !== null && value !== undefined).map(String))]
+      : [];
+    if (!active || !recordSet || !mode || !values.length) return null;
+
+    const executionPlan = plan?.execution_plan;
+    const definitions = Array.isArray(executionPlan?.steps) ? executionPlan.steps : [];
+    const stepId = step => step?.id || step?.step_id || null;
+    const resultByStep = new Map((postgresResults || [])
+      .filter(result => result?.execution_step_id)
+      .map(result => [String(result.execution_step_id), result]));
+    const firstDefinition = definitions[0] || null;
+    const finalDefinition = definitions.at(-1) || null;
+    const firstStepId = stepId(firstDefinition);
+    const finalStepId = stepId(finalDefinition);
+    const firstResult = (firstStepId && resultByStep.get(String(firstStepId))) || postgresResults?.[0] || null;
+    const firstRows = Array.isArray(firstResult?.retrieval?.rows) ? firstResult.retrieval.rows : [];
+    const keyColumn = String(recordSet.key_column || "").split(".").at(-1);
+    const firstRowsByIdentity = new Map();
+    for (const row of firstRows) {
+      const identity = row?.[keyColumn];
+      if (identity === null || identity === undefined) continue;
+      const normalized = String(identity);
+      if (!firstRowsByIdentity.has(normalized)) firstRowsByIdentity.set(normalized, []);
+      firstRowsByIdentity.get(normalized).push(row);
+    }
+
+    const states = new Map(values.map(value => [value, firstRowsByIdentity.get(value) || []]));
+    let relationshipComplete = definitions.length > 1;
+    for (let index = 1; index < definitions.length; index += 1) {
+      const definition = definitions[index];
+      const previousDefinition = definitions[index - 1];
+      const binding = Array.isArray(definition?.input_bindings) ? definition.input_bindings[0] : null;
+      const currentResult = resultByStep.get(String(stepId(definition)));
+      const currentRows = Array.isArray(currentResult?.retrieval?.rows) ? currentResult.retrieval.rows : [];
+      const fromColumn = String(binding?.from_column || "").split(".").at(-1);
+      const toColumn = String(binding?.to_column || "").split(".").at(-1);
+      if (!binding || !fromColumn || !toColumn) {
+        relationshipComplete = false;
+        break;
+      }
+
+      for (const [identity, parentRows] of states.entries()) {
+        const joinedRows = [];
+        for (const parent of parentRows) {
+          const value = parent?.[fromColumn];
+          if (value === null || value === undefined) continue;
+          joinedRows.push(...currentRows.filter(row => row?.[toColumn] !== null && row?.[toColumn] !== undefined && String(row[toColumn]) === String(value)));
+        }
+        states.set(identity, joinedRows);
+      }
+      if (!previousDefinition) relationshipComplete = false;
+    }
+
+    const finalTable = finalDefinition?.contract?.required_tables?.[0] || finalDefinition?.required_tables?.[0] || null;
+    const finalSourceId = finalDefinition?.source_id || null;
+    const finalContext = finalSourceId && finalTable
+      ? this.plan_validator.contexts?.[finalSourceId]?.tables?.[finalTable] || {}
+      : {};
+    const finalKeyColumn = String(
+      plan?.semantic_path?.at(-1)?.column || finalContext.primary_keys?.[0] || "id"
+    ).split(".").at(-1);
+
+    const mappings = [];
+    const missingIdentities = [];
+    const conflictIdentities = [];
+    const targetValues = new Set();
+    for (const identity of values) {
+      const rows = states.get(identity) || [];
+      const targets = [...new Set(rows
+        .map(row => row?.[finalKeyColumn])
+        .filter(value => value !== null && value !== undefined)
+        .map(String))];
+      for (const target of targets) targetValues.add(target);
+      if (!rows.length || !targets.length) missingIdentities.push(identity);
+      if (targets.length > 1) conflictIdentities.push(identity);
+      mappings.push({
+        from_source_id: active.source_id,
+        from_table: active.table,
+        from_key: keyColumn,
+        from_value: identity,
+        to_source_id: finalSourceId,
+        to_table: finalTable,
+        to_key: finalKeyColumn,
+        to_values: targets,
+        status: targets.length ? (targets.length > 1 ? "conflict" : "verified") : "missing"
+      });
+    }
+
+    const matchedIdentityCount = mappings.filter(mapping => mapping.to_values.length > 0).length;
+    const associationCount = mappings.reduce((total, mapping) => total + mapping.to_values.length, 0);
+    const complete = relationshipComplete && missingIdentities.length === 0 && matchedIdentityCount === values.length;
+    const identicalTarget = complete && conflictIdentities.length === 0 && targetValues.size === 1;
+    let status = "incomplete";
+    if (identicalTarget) status = "complete";
+    else if (complete && (targetValues.size > 1 || conflictIdentities.length > 0)) status = "conflict";
+
+    const resolution = {
+      mode,
+      scope: mode === "singular" && values.length > 1 && identicalTarget
+        ? "common_across_matching_records"
+        : (values.length > 1 ? "record_set" : "single_identity"),
+      status,
+      requested_count: values.length,
+      matched_identity_count: matchedIdentityCount,
+      association_count: associationCount,
+      missing_count: missingIdentities.length,
+      conflict_count: conflictIdentities.length,
+      missing_identities: missingIdentities,
+      conflict_identities: conflictIdentities,
+      mappings,
+      path: Array.isArray(plan?.semantic_path) ? plan.semantic_path : [],
+      evidence_relationships: Array.isArray(plan?.semantic_path_evidence) ? plan.semantic_path_evidence : []
+    };
+
+    if (mode === "singular" && values.length > 1 && !identicalTarget) {
+      resolution.requires_clarification = true;
+      resolution.message = status === "conflict"
+        ? "I found multiple matching records with different related results. Please identify which record you mean."
+        : "I found multiple matching records, so I could not safely identify one record for this follow-up. Please specify the record you mean.";
+    }
+
+    return {
+      ...resolution,
+      final_step_id: finalStepId,
+      source_ids: [...new Set(mappings.flatMap(mapping => [mapping.from_source_id, mapping.to_source_id]).filter(Boolean))]
+    };
   }
 
   _rememberPendingReference(question, plan, authorizedSources) {
@@ -1521,18 +1682,48 @@ export class RAGPipeline {
     }
 
     const candidateResolutionResult = this._resolveIndependentCandidateEvidence(validatedPlan, postgresResults);
+    const followupIdentityResolution = this._resolveFollowupIdentityResolution(
+      cleanQuestion,
+      conversationContext,
+      validatedPlan,
+      postgresResults.filter(result => result.source_type === "postgresql")
+    );
     const rawEvidence = this._prepareEvidence(postgresResults, securityResult, complexExecution);
     if (validatedPlan.candidate_resolution) rawEvidence.candidate_resolution = validatedPlan.candidate_resolution;
     if (candidateResolutionResult) rawEvidence.candidate_resolution_result = candidateResolutionResult;
+    if (followupIdentityResolution) rawEvidence.relationship_resolution = followupIdentityResolution;
     const evidence = sanitizeEvidence(rawEvidence);
+    const internalEvidenceMetrics = measureAnswerEvidenceStructure(evidence);
+    const relationshipAnswerOptions = followupIdentityResolution
+      ? {
+        relationship: {
+          final_step_id: followupIdentityResolution.final_step_id,
+          source_ids: followupIdentityResolution.source_ids,
+          resolution: followupIdentityResolution,
+          path: followupIdentityResolution.path,
+          evidence_relationships: followupIdentityResolution.evidence_relationships
+        }
+      }
+      : {};
+    const answerEvidence = typeof this.evidence_manager.prepareAnswerEvidence === "function"
+      ? this.evidence_manager.prepareAnswerEvidence(evidence, relationshipAnswerOptions)
+      : evidence;
+    const answerEvidenceMetrics = measureAnswerEvidenceStructure(answerEvidence);
+    recordAnswerEvidenceMetrics(this.llm_usage_tracker, {
+      before: internalEvidenceMetrics,
+      after: answerEvidenceMetrics
+    });
 
     // Generate answer
     let answer;
     let answerGenerationStatus = "success";
     let answerGenerationError = null;
 
-    try {
-      answer = await this.answer_generator.generate(cleanQuestion, evidence, null, null, this.llm_usage_tracker);
+    if (followupIdentityResolution?.requires_clarification) {
+      answer = followupIdentityResolution.message;
+      answerGenerationStatus = "skipped_identity_ambiguity";
+    } else try {
+      answer = await this.answer_generator.generate(cleanQuestion, answerEvidence, null, null, this.llm_usage_tracker);
     } catch (exc) {
       logRuntimeDiagnostic(exc, { requestId: this.request_id, phase: "answer_generation" });
       const fallbackFn = typeof this.answer_generator.buildFallbackAnswer === "function"

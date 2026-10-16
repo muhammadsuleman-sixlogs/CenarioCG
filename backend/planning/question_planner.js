@@ -31,6 +31,10 @@ function tokenWords(value) {
     .map(token => token.endsWith("s") && token.length > 3 && !/(?:ss|us|is)$/i.test(token) ? token.slice(0, -1) : token);
 }
 
+function isStatusColumnName(value) {
+  return /(?:^|_)(?:status|state|workflow_state|lifecycle_state)$/i.test(String(value || "").trim());
+}
+
 // Status labels are business metadata, but users routinely omit spaces,
 // punctuation, or use a small grammatical variant ("inprogress",
 // "in-progress", "in progress").  Compare only normalized forms; the value
@@ -290,7 +294,7 @@ export class QuestionPlanner {
       try { this.client = getOpenAIClient(); } catch { this.client = null; }
     }
 
-    const context = this._build_context_for_llm();
+    const context = this._build_context_for_llm(trimmedQuestion, conversationContext);
     const resolvedEntities = this._build_resolved_entity_context(conversationContext);
     const prompt = this._build_prompt(
       trimmedQuestion,
@@ -423,7 +427,7 @@ export class QuestionPlanner {
     const active = this._conversation_reference(conversationContext);
     const refersBack = /\b(?:it|its|that|this|those|these|details?)\b/i.test(question);
     const recordSet = active?.record_set;
-    if (recordSet && this._is_record_set_reference(question) && !this._has_explicit_new_target(question, active) && active.source_id && active.table && Array.isArray(recordSet.values) && recordSet.values.length > 0) {
+    if (recordSet && this._is_record_set_reference(question, active) && !this._has_explicit_new_target(question, active) && active.source_id && active.table && Array.isArray(recordSet.values) && recordSet.values.length > 0) {
       const tableInfo = this.contexts?.[active.source_id]?.tables?.[active.table] || {};
       const safeColumns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(Boolean);
       return {
@@ -442,17 +446,31 @@ export class QuestionPlanner {
       };
     }
     const semanticCandidates = findSemanticCandidates(question, this.contexts);
-    const candidates = semanticCandidates.map(candidate => {
-      const info = this.contexts[candidate.source_id]?.tables?.[candidate.table] || {};
-      const columns = Array.isArray(info.columns) ? info.columns : [];
-      return {
+    const buildCandidate = (candidate, sourceId, table, tableInfo, relevance) => {
+      const columns = (Array.isArray(tableInfo?.columns) ? tableInfo.columns : [])
+        .map(column => String(column?.name || column || ""))
+        .filter(Boolean)
+        .filter(column => !isSensitiveFieldName(column));
+      const enriched = {
         ...candidate,
-        relevance: this._explicit_table_phrase(question, candidate.table)
-          ? Math.max(candidate.score, this._table_question_relevance(candidate.source_id, candidate.table, question)) + 40
-          : candidate.score,
-        columns: columns.map(column => String(column?.name || column || "")).filter(Boolean),
-        primary_keys: Array.isArray(info.primary_keys) ? info.primary_keys : []
+        source_id: sourceId || candidate?.source_id,
+        table: table || candidate?.table,
+        relevance,
+        columns,
+        primary_keys: Array.isArray(tableInfo?.primary_keys) ? tableInfo.primary_keys : []
       };
+      return {
+        ...enriched,
+        display_filters: this._explicit_display_filters(question, enriched),
+        status_columns: columns.filter(isStatusColumnName)
+      };
+    };
+    let candidates = semanticCandidates.map(candidate => {
+      const info = this.contexts[candidate.source_id]?.tables?.[candidate.table] || {};
+      const relevance = this._explicit_table_phrase(question, candidate.table)
+          ? Math.max(candidate.score, this._table_question_relevance(candidate.source_id, candidate.table, question)) + 40
+          : candidate.score;
+      return buildCandidate(candidate, candidate.source_id, candidate.table, info, relevance);
     });
     // Semantic overlays cover important business entities, but do not need to
     // enumerate every ordinary source table. Keep lexical metadata candidates
@@ -466,17 +484,46 @@ export class QuestionPlanner {
         const relevance = this._table_question_relevance(sourceId, table, question);
         if (relevance <= 0) continue;
         if (active && refersBack && !this._explicit_table_phrase(question, table)) continue;
-        const columns = Array.isArray(info?.columns) ? info.columns : [];
-        candidates.push({ source_id: sourceId, table, relevance: relevance + (this._explicit_table_phrase(question, table) ? 40 : 0), columns: columns.map(column => String(column?.name || column || "")).filter(Boolean), primary_keys: Array.isArray(info?.primary_keys) ? info.primary_keys : [] });
+        candidates.push(buildCandidate(
+          { source_id: sourceId, table },
+          sourceId,
+          table,
+          info,
+          relevance + (this._explicit_table_phrase(question, table) ? 40 : 0)
+        ));
       }
     }
-    for (const candidate of candidates) candidate.columns = candidate.columns.filter(column => column && !isSensitiveFieldName(column));
+    // A named-record request must be evaluated against the schema capability
+    // needed to satisfy it.  An equally named table that has no discovered
+    // display/name or status column cannot displace a candidate that can
+    // actually execute the request.  If multiple candidates have the needed
+    // capability, retain all of them and let the existing ambiguity safeguards
+    // continue to apply.
+    const asksForStatus = /\b(?:status|state|workflow|lifecycle)\b/i.test(question);
+    const capableCandidates = candidates.filter(candidate =>
+      (!candidates.some(item => item.display_filters.length > 0) || candidate.display_filters.length > 0) &&
+      (!asksForStatus || candidate.status_columns.length > 0)
+    );
+    if (capableCandidates.length > 0 && capableCandidates.length < candidates.length) {
+      candidates = capableCandidates;
+    }
     // If the user is asking about the already established entity itself,
     // preserve that bounded lookup. Requests for a distinct semantic target
     // (transcript, project, etc.) continue to relationship resolution below.
-    const explicitNewRecord = candidates.some(candidate => this._explicit_identifier_filter(question, candidate) || this._explicit_display_filter(question, candidate));
+    const explicitNewRecord = candidates.some(candidate => this._explicit_identifier_filter(question, candidate) || candidate.display_filters.length > 0);
     if (active && refersBack && !explicitNewRecord && candidates.length && !candidates.some(candidate => candidate.source_id === active.source_id && candidate.table !== active.table)) {
       return { data_sources: ["postgresql"], postgresql_sources: [], required_tables: [], required_columns: [], filters: [], relationships: [], operations: ["lookup"], needs_conversation_context: true, confidence: 0.8 };
+    }
+    const namedCandidates = candidates.filter(candidate => candidate.display_filters.length > 0);
+    if (namedCandidates.length > 1) {
+      return {
+        data_sources: ["postgresql"],
+        postgresql_sources: [],
+        required_tables: [],
+        required_columns: [],
+        operations: [],
+        ambiguous_context_candidates: namedCandidates.map(candidate => ({ source_id: candidate.source_id, table: candidate.table }))
+      };
     }
     candidates.sort((left, right) => right.relevance - left.relevance || left.source_id.localeCompare(right.source_id) || left.table.localeCompare(right.table));
     if (!candidates.length) return null;
@@ -526,17 +573,27 @@ export class QuestionPlanner {
     }
     const requiredTables = temporalCompanion ? [best.table, temporalCompanion.table] : [best.table];
     const identifierFilter = this._explicit_identifier_filter(question, best);
-    const displayFilter = identifierFilter || statusIntent ? null : this._explicit_display_filter(question, best);
+    const displayFilters = identifierFilter ? [] : (best.display_filters || this._explicit_display_filters(question, best));
+    const persistedDisplayFilters = displayFilters.map(filter => {
+      const { provenance: _provenance, name_component: _nameComponent, ...plain } = filter;
+      return plain;
+    });
     const requiredColumns = isCount ? [] : Array.from(new Set([
       ...best.primary_keys.map(column => `${best.table}.${column}`),
       ...best.columns.map(column => `${best.table}.${column}`),
       ...(temporalCompanion ? [`${temporalCompanion.table}.${temporalCompanion.ordering_column}`] : [])
     ])).slice(0, 20);
+    for (const column of best.status_columns || []) {
+      if (/\b(?:status|state|workflow|lifecycle)\b/i.test(question) && !requiredColumns.includes(`${best.table}.${column}`)) {
+        requiredColumns.push(`${best.table}.${column}`);
+      }
+    }
     return {
       data_sources: ["postgresql"], postgresql_sources: [best.source_id], required_tables: requiredTables, required_columns: requiredColumns,
-      relationships: temporalCompanion ? [temporalCompanion.relationship] : [], filters: [statusFilter, identifierFilter, displayFilter].filter(Boolean), operations: [isCount ? "count" : (isRecent ? "ranking" : "lookup")],
+      relationships: temporalCompanion ? [temporalCompanion.relationship] : [], filters: [...(statusFilter ? [statusFilter] : []), ...(identifierFilter ? [identifierFilter] : []), ...persistedDisplayFilters], operations: [isCount ? "count" : (isRecent ? "ranking" : "lookup")],
       sorting: isRecent && orderingTable && orderingColumn ? [{ field: `${orderingTable}.${orderingColumn}`, direction: "desc" }] : [], limit: isCount ? null : (isRecent ? 10 : 50), confidence: 0.65,
       entity_target: { source_id: best.source_id, table: best.table },
+      named_entity_lookup: displayFilters.length > 0,
       semantic_candidates: semanticCandidates.length > 0 ? semanticCandidates.slice(0, 8) : undefined,
       reasoning: "A bounded metadata-only fallback selected one unambiguous authorized semantic catalog candidate after the semantic planner was unavailable."
     };
@@ -546,8 +603,27 @@ export class QuestionPlanner {
     return conversationContext?.active_context || conversationContext?.pending_reference || null;
   }
 
-  _is_record_set_reference(question) {
-    return /\b(?:above|those|these|previous|prior)\b|\ball\s+\d+\b/i.test(String(question || ""));
+  _record_set_reference_mode(question, active = null) {
+    const text = String(question || "");
+    if (/\b(?:above|those|these|previous|prior)\b|\ball\s+\d+\b/i.test(text)) return "plural";
+    if (!active?.record_set) return null;
+
+    const sourceId = String(active.source_id || "").toLowerCase();
+    const table = String(active.table || "");
+    const entity = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table] || {};
+    const aliases = [table, entity.entity_type, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
+      .map(value => String(value || "").replace(/_/g, " ").trim().toLowerCase())
+      .filter(Boolean);
+    const mentionedActiveEntity = aliases.some(alias => {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\b${escaped}(?:s)?\\b`, "i").test(text);
+    });
+    if (mentionedActiveEntity && /\b(?:this|that)\b/i.test(text)) return "singular";
+    return null;
+  }
+
+  _is_record_set_reference(question, active = null) {
+    return Boolean(this._record_set_reference_mode(question, active));
   }
 
   _has_explicit_new_target(question, active) {
@@ -583,21 +659,83 @@ export class QuestionPlanner {
     return { table: candidate.table, field: scored[0].column, operator: "=", value };
   }
 
-  _explicit_display_filter(question, candidate) {
+  _named_record_value(question, candidate) {
     const parsingQuestion = this._strip_structural_prefix_for_display_parsing(question);
     const text = String(parsingQuestion || "").toLowerCase();
     if (!/\b(?:show|details?|about|information|find)\b/.test(text) || !candidate) return null;
     if (this._is_record_set_reference(parsingQuestion)) return null;
     const tokens = tokenWords(parsingQuestion);
-    const entityWords = new Set([candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])].flatMap(tokenWords));
-    const entityIndex = tokens.findIndex(token => entityWords.has(token));
-    if (entityIndex < 1) return null;
+    const entityAliases = [candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])]
+      .map(value => tokenWords(value))
+      .filter(alias => alias.length > 0)
+      .sort((left, right) => right.length - left.length);
+    let entityStart = -1;
+    let entityEnd = -1;
+    for (let index = 0; index < tokens.length; index++) {
+      const alias = entityAliases.find(value => value.every((token, offset) => tokens[index + offset] === token));
+      if (!alias) continue;
+      entityStart = index;
+      entityEnd = index + alias.length;
+      break;
+    }
+    if (entityStart < 1) return null;
     const quoted = [...String(parsingQuestion).matchAll(/["']([^"']+)["']/g)].map(match => match[1].trim()).filter(Boolean);
-    const ignored = new Set(["show", "me", "the", "a", "an", "all", "details", "detail", "about", "information", "find", "with", "for", "of", "it", "its", "that", "this", "those", "these", "related", "total", "count", "number", "how", "many"]);
-    const valueTokens = tokens.slice(0, entityIndex).filter(token => !ignored.has(token) && !this._is_temporal_modifier_token(token));
-    const displayValue = quoted[0] || valueTokens.join(" ");
-    if (!displayValue || valueTokens.length > 8) return null;
+    if (quoted[0]) return quoted[0];
+
+    const ignored = new Set([
+      "show", "me", "the", "a", "an", "all", "details", "detail", "about", "information", "find",
+      "with", "for", "of", "it", "its", "that", "this", "those", "these", "related", "total", "count",
+      "number", "how", "many", "record", "records", "whose", "where", "having", "status", "state", "workflow",
+      "lifecycle", "is", "are", "active", "inactive", "pending", "open", "closed", "resolved", "unresolved",
+      "completed", "cancelled", "canceled", "in", "progress", "inprogress", "on", "hold"
+    ]);
+    const collect = values => values
+      .filter(token => !ignored.has(token) && !this._is_temporal_modifier_token(token));
+    const beforeEntityTokens = tokens.slice(0, entityStart);
+    if (beforeEntityTokens.some(token => ["for", "about", "related", "of"].includes(token))) return null;
+    const beforeEntity = collect(beforeEntityTokens);
+    const afterEntity = [];
+    for (const token of tokens.slice(entityEnd)) {
+      if (new Set(["whose", "where", "with", "having", "status", "state", "workflow", "lifecycle", "related"]).has(token)) break;
+      if (!ignored.has(token) && !this._is_temporal_modifier_token(token)) afterEntity.push(token);
+    }
+    const candidateEntityWords = new Set(entityAliases.flat());
+    const discoveredEntityWords = new Set();
+    for (const context of Object.values(this.contexts || {})) {
+      for (const [table, entity] of Object.entries(context?.semantic_catalog?.entities || {})) {
+        for (const token of [table, entity?.entity_type, ...(Array.isArray(entity?.synonyms) ? entity.synonyms : [])].flatMap(tokenWords)) {
+          if (!candidateEntityWords.has(token)) discoveredEntityWords.add(token);
+        }
+      }
+      for (const table of Object.keys(context?.tables || {})) {
+        for (const token of tokenWords(table)) {
+          if (!candidateEntityWords.has(token)) discoveredEntityWords.add(token);
+        }
+      }
+    }
+    if (afterEntity.some(token => discoveredEntityWords.has(token))) return null;
+    const valueTokens = afterEntity.length > 0 ? afterEntity : beforeEntity;
+    if (valueTokens.length === 0 || valueTokens.length > 8) return null;
+    return valueTokens.join(" ");
+  }
+
+  _explicit_display_filters(question, candidate) {
+    const displayValue = this._named_record_value(question, candidate);
+    if (!displayValue || !candidate) return [];
     const columns = candidate.columns || [];
+    const entityWords = new Set([candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])].flatMap(tokenWords));
+    const firstName = columns.find(column => /^(?:first|given|forename)(?:_?name)?$/i.test(String(column).trim()));
+    const lastName = columns.find(column => /^(?:last|family|sur|surname)(?:_?name)?$/i.test(String(column).trim()));
+    const nameTokens = tokenWords(displayValue);
+    const provenance = "authorized_discovered_display_column";
+
+    if (firstName && lastName && nameTokens.length === 2) {
+      return [
+        { table: candidate.table, field: firstName, operator: "case_insensitive_equals", value: nameTokens[0], provenance, name_component: "given" },
+        { table: candidate.table, field: lastName, operator: "case_insensitive_equals", value: nameTokens.slice(1).join(" "), provenance, name_component: "family" }
+      ];
+    }
+
     const displayHints = new Set(["title", "name", "label", "subject", "summary"]);
     const scored = columns.map(column => {
       const words = String(column).toLowerCase().split(/[^a-z0-9]+|_/).filter(Boolean).map(word => word.endsWith("s") && word.length > 3 ? word.slice(0, -1) : word);
@@ -607,8 +745,19 @@ export class QuestionPlanner {
       if (String(column).toLowerCase() === "name" || String(column).toLowerCase() === "title") score += 10;
       return { column, score };
     }).filter(item => item.score >= 50).sort((left, right) => right.score - left.score || left.column.localeCompare(right.column));
-    if (!scored.length || (scored[1] && scored[0].score === scored[1].score)) return null;
-    return { table: candidate.table, field: scored[0].column, operator: "contains", value: displayValue };
+    if (!scored.length || (scored[1] && scored[0].score === scored[1].score)) return [];
+    return [{ table: candidate.table, field: scored[0].column, operator: "contains", value: displayValue, provenance, name_component: "display" }];
+  }
+
+  _explicit_display_filter(question, candidate) {
+    const filters = this._explicit_display_filters(question, candidate);
+    const stripMetadata = filter => {
+      const { provenance: _provenance, name_component: _nameComponent, ...plain } = filter;
+      return plain;
+    };
+    if (filters.length === 1) return stripMetadata(filters[0]);
+    if (filters.length > 1) return filters.map(stripMetadata);
+    return null;
   }
 
   _strip_structural_prefix_for_display_parsing(question) {
@@ -621,11 +770,18 @@ export class QuestionPlanner {
   }
 
   _is_bounded_detail_lookup(question, plan) {
-    if (!plan || !Array.isArray(plan.filters) || plan.filters.length !== 1) return false;
+    if (!plan || !Array.isArray(plan.filters) || plan.filters.length === 0) return false;
     if (!/\b(?:show|details?|about|information|find)\b/i.test(String(question || ""))) return false;
     if (!Array.isArray(plan.required_tables) || plan.required_tables.length !== 1) return false;
     if (!Array.isArray(plan.postgresql_sources) || plan.postgresql_sources.length !== 1) return false;
-    return ["=", "contains", "in"].includes(String(plan.filters[0]?.operator || "").toLowerCase());
+    const operatorsAreBounded = plan.filters.every(filter => ["=", "contains", "in", "case_insensitive_equals"].includes(String(filter?.operator || "").toLowerCase()));
+    if (!operatorsAreBounded) return false;
+    if (plan.named_entity_lookup === true) {
+      const namedFilters = plan.filters.filter(filter => !this._is_status_filter(filter, plan));
+      const otherFilters = plan.filters.filter(filter => this._is_status_filter(filter, plan));
+      return namedFilters.length > 0 && otherFilters.every(filter => filter?.verification === "runtime_distinct_required" || this._is_status_filter(filter, plan));
+    }
+    return plan.filters.length === 1;
   }
 
   _is_temporal_modifier_token(token) {
@@ -817,7 +973,17 @@ export class QuestionPlanner {
     const score = value => /^(status|state|workflow_state|lifecycle_state)$/i.test(value) ? 2 : 1;
     if (ranked.length > 1 && score(ranked[0]) === score(ranked[1])) return null;
     const preferred = ranked[0];
-    const questionTokens = tokenWords(question);
+    const questionText = String(question || "");
+    const statusTail = questionText.match(/\b(?:status|state|workflow|lifecycle)\b([\s\S]*)/i)?.[1] || "";
+    const statusValueTokens = tokenWords(statusTail);
+    const statusStopWords = new Set(["for", "with", "whose", "where", "having", "show", "find", "list", "details", "detail"]);
+    const explicitValueTokens = [];
+    for (const token of statusValueTokens) {
+      if (statusStopWords.has(token)) break;
+      if (!["is", "are", "=", ":"].includes(token)) explicitValueTokens.push(token);
+      if (explicitValueTokens.length >= 3) break;
+    }
+    const questionTokens = explicitValueTokens.length > 0 ? explicitValueTokens : tokenWords(question);
     const entityTokens = [candidate.table, candidate.entity_type, ...(candidate.matched_aliases || [])].flatMap(tokenWords);
     const ignored = new Set(["show", "me", "the", "a", "an", "all", "only", "total", "count", "number", "of", "how", "many", "which", "ones", "what", "are", "is", "with", "where", "status", "state", "workflow", "lifecycle", "records", "this", "that", "these", "those", "them", "it", "its", "their", "they", "above", "previous", "prior", "related"]);
     const valueTokens = questionTokens.filter(token => !entityTokens.includes(token) && !ignored.has(token) && !this._is_temporal_modifier_token(token));
@@ -833,7 +999,7 @@ export class QuestionPlanner {
   }
 
   _has_unverified_status_intent(candidate, question) {
-    const hasStatusColumn = candidate.columns.some(column => /^(status|state|workflow_state|lifecycle_state)$/i.test(String(column).trim()));
+    const hasStatusColumn = candidate.columns.some(column => isStatusColumnName(column));
     if (!hasStatusColumn) return false;
     const text = String(question || "").toLowerCase();
     // A status column alone is not evidence that every non-table word is a
@@ -933,8 +1099,8 @@ ${JSON.stringify(availableSources, null, 2)}
 DISCOVERED CONTEXT LAYER:
 ${JSON.stringify(context, null, 2)}
 
-DYNAMIC RECENT-RECORD CANDIDATES:
-${JSON.stringify(this._build_recent_record_candidates(), null, 2)}
+    DYNAMIC RECENT-RECORD CANDIDATES:
+${JSON.stringify(this._build_recent_record_candidates(question, this._build_context_focus(question, conversationContext)?.tableKeys || null), null, 2)}
 
 The recent-record candidates above are deterministic hints generated only
 from discovered schema metadata. They are NOT database rows and must never
@@ -1418,110 +1584,286 @@ The final execution plan step objects must use:
   // Context
   // ------------------------------------------------------------------
 
-  _build_context_for_llm() {
+  _build_context_focus(question, conversationContext = null) {
+    const text = String(question || "").trim();
+    if (!text) return null;
+
+    const queryTokens = new Set(tokenWords(text));
+    const active = this._conversation_reference(conversationContext);
+    const semanticCandidates = findSemanticCandidates(text, this.contexts);
+    const directEntityContext = this._is_direct_entity_lookup_context(text, semanticCandidates);
+    const selected = new Map();
+
+    const addTable = (sourceId, table, reason = "query") => {
+      const source = String(sourceId || "").trim().toLowerCase();
+      const name = String(table || "").trim();
+      if (!source || !name || !this.contexts?.[source]?.tables?.[name]) return;
+      const key = `${source}:${name}`;
+      const current = selected.get(key) || { source_id: source, table: name, reasons: new Set() };
+      current.reasons.add(reason);
+      selected.set(key, current);
+    };
+
+    const bestSemanticScore = semanticCandidates.reduce((best, candidate) => Math.max(best, Number(candidate.score) || 0), 0);
+    const semanticThreshold = bestSemanticScore > 0 ? Math.max(1, bestSemanticScore * 0.75) : 0;
+    for (const candidate of semanticCandidates) {
+      const explicit = this._explicit_table_phrase(text, candidate.table);
+      if (explicit || (Number(candidate.score) || 0) >= semanticThreshold) {
+        addTable(candidate.source_id, candidate.table, "semantic_candidate");
+      }
+    }
+
+    // Technical metadata remains a valid fallback when the approved semantic
+    // overlay is unavailable or when a newly discovered table has no semantic
+    // definition yet. Keep every positively matching table in that case so
+    // ambiguity remains visible to the existing planner and validator.
+    const lexical = [];
+    for (const [sourceId, context] of Object.entries(this.contexts || {})) {
+      for (const [table, info] of Object.entries(context?.tables || {})) {
+        const relevance = this._table_question_relevance(sourceId, table, text);
+        if (relevance <= 0) continue;
+        const tableWords = tokenWords(table);
+        const tableNameMatch = tableWords.some(word => queryTokens.has(word));
+        const explicit = this._explicit_table_phrase(text, table);
+        lexical.push({ source_id: sourceId, table, relevance, tableNameMatch, explicit });
+      }
+    }
+    const lexicalBest = lexical.reduce((best, candidate) => Math.max(best, candidate.relevance), 0);
+    for (const candidate of lexical) {
+      const semanticAlreadySelected = selected.has(`${candidate.source_id}:${candidate.table}`);
+      const keep = candidate.explicit ||
+        (!semanticCandidates.length && candidate.relevance >= 2) ||
+        (candidate.tableNameMatch && candidate.relevance >= Math.max(10, lexicalBest * 0.75));
+      if (keep || semanticAlreadySelected) addTable(candidate.source_id, candidate.table, "technical_match");
+    }
+
+    if (active?.source_id && active?.table) addTable(active.source_id, active.table, "active_context");
+    for (const entity of Array.isArray(conversationContext?.entities) ? conversationContext.entities : []) {
+      if (entity?.source_id && entity?.entity_table) addTable(entity.source_id, entity.entity_table, "conversation_entity");
+    }
+
+    // API operation metadata has no table namespace. Select only operations
+    // whose discovered operation IDs or response fields match the question.
+    const selectedApi = new Map();
+    for (const [sourceId, context] of Object.entries(this.contexts || {})) {
+      for (const [operationId, operation] of Object.entries(context?.api_operations || {})) {
+        const words = new Set([
+          ...tokenWords(operationId),
+          ...((operation?.response_fields || []).flatMap(tokenWords))
+        ]);
+        if ([...words].some(word => queryTokens.has(word))) {
+          if (!selectedApi.has(sourceId)) selectedApi.set(sourceId, new Set());
+          selectedApi.get(sourceId).add(operationId);
+        }
+      }
+    }
+
+    if (selected.size === 0 && selectedApi.size === 0) return null;
+
+    const selectedKeys = new Set(selected.keys());
+    const activeOption = active?.source_id && active?.table ? { active } : {};
+    let paths = [];
+    try {
+      paths = findVerifiedPaths(text, this.contexts, null, activeOption);
+    } catch {
+      paths = [];
+    }
+    paths = paths.filter(path =>
+      path?.validation_status === "validated" &&
+      Array.isArray(path.steps) &&
+      path.steps.some(step => selectedKeys.has(`${step?.source_id}:${step?.table}`))
+    );
+
+    const focusedKeys = new Set(selectedKeys);
+    const relationshipKeys = new Set();
+    for (const path of paths) {
+      for (const step of path.steps || []) {
+        if (step?.source_id && step?.table) focusedKeys.add(`${step.source_id}:${step.table}`);
+      }
+    }
+
+    // Preserve directly declared relationship edges around selected entities,
+    // including technical FK paths needed by unfamiliar tables. This is a
+    // bounded neighborhood, not a replacement graph or inferred relationship.
+    const seedKeys = new Set(selectedKeys);
+    const coreTableKeys = new Set(selectedKeys);
+    for (const path of paths) {
+      for (const step of path.steps || []) {
+        if (step?.source_id && step?.table) coreTableKeys.add(`${step.source_id}:${step.table}`);
+      }
+    }
+    for (const [sourceId, context] of Object.entries(this.contexts || {})) {
+      if (directEntityContext) continue;
+      for (const relationship of Array.isArray(context?.relationships) ? context.relationships : []) {
+        const left = `${sourceId}:${relationship?.source_table || ""}`;
+        const right = `${sourceId}:${relationship?.target_table || ""}`;
+        if (seedKeys.has(left) || seedKeys.has(right)) {
+          relationshipKeys.add(`${left}:${relationship?.source_column || ""}->${right}:${relationship?.target_column || ""}`);
+          if (relationship?.source_table) focusedKeys.add(left);
+          if (relationship?.target_table) focusedKeys.add(right);
+        }
+      }
+    }
+
+    // A verified path may contain an ordinary same-source FK edge that was
+    // not incident to the original candidate (for example, an intermediate
+    // bridge table). Retain only those exact path edges, never every edge
+    // between the expanded neighborhood.
+    for (const path of paths) {
+      const steps = Array.isArray(path.steps) ? path.steps : [];
+      for (let index = 0; index < steps.length - 1; index++) {
+        const leftStep = steps[index];
+        const rightStep = steps[index + 1];
+        if (!leftStep?.source_id || !rightStep?.source_id || leftStep.source_id !== rightStep.source_id) continue;
+        for (const relationship of this.contexts?.[leftStep.source_id]?.relationships || []) {
+          const matches = (relationship?.source_table === leftStep.table && relationship?.target_table === rightStep.table) ||
+            (relationship?.source_table === rightStep.table && relationship?.target_table === leftStep.table);
+          if (!matches) continue;
+          const source = `${leftStep.source_id}:${relationship.source_table}`;
+          const target = `${leftStep.source_id}:${relationship.target_table}`;
+          relationshipKeys.add(`${source}:${relationship.source_column || ""}->${target}:${relationship.target_column || ""}`);
+        }
+      }
+    }
+
+    return {
+      candidates: semanticCandidates.filter(candidate => selectedKeys.has(`${candidate.source_id}:${candidate.table}`)),
+      tableKeys: focusedKeys,
+      coreTableKeys,
+      relationshipKeys,
+      apiOperations: selectedApi,
+      paths
+    };
+  }
+
+  _is_direct_entity_lookup_context(question, semanticCandidates = []) {
+    const text = String(question || "");
+    if (!/\b(?:show|details?|about|information|find)\b/i.test(text)) return false;
+    if (/\b(?:recent|latest|newest|count|how many|total|list|which|compare|comparison|ranking|top)\b/i.test(text)) return false;
+    if (/\b(?:and|with|related|associated|whose|owner|owns|belongs|relationship|connect|linked)\b/i.test(text)) return false;
+    const tables = new Set((semanticCandidates || []).map(candidate => String(candidate?.table || "").trim().toLowerCase()).filter(Boolean));
+    return tables.size === 1 && semanticCandidates.length > 0;
+  }
+
+  _build_context_for_llm(question = null, conversationContext = null) {
+    const focus = this._build_context_focus(question, conversationContext);
     const sources = {};
 
     for (const [sourceId, context] of Object.entries(this.contexts)) {
-      if (!context || typeof context !== "object" || Array.isArray(context)) {
-        continue;
-      }
+      if (!context || typeof context !== "object" || Array.isArray(context)) continue;
+      const normalizedSourceId = String(sourceId).trim().toLowerCase();
+      const sourceTableKeys = focus
+        ? new Set([...focus.tableKeys].filter(key => key.startsWith(`${normalizedSourceId}:`)).map(key => key.slice(normalizedSourceId.length + 1)))
+        : null;
+      const apiSelection = focus?.apiOperations?.get(sourceId) || focus?.apiOperations?.get(normalizedSourceId) || null;
+      if (focus && sourceTableKeys?.size === 0 && !apiSelection) continue;
 
-      const tables = context.tables && typeof context.tables === "object" && !Array.isArray(context.tables)
-        ? context.tables
-        : {};
-
+      const tables = context.tables && typeof context.tables === "object" && !Array.isArray(context.tables) ? context.tables : {};
       const boundedTables = {};
-      const tableEntries = Object.entries(tables);
+      const tableEntries = Object.entries(tables).filter(([tableName]) => !focus || sourceTableKeys.has(tableName));
 
-      for (let tableIndex = 0; tableIndex < tableEntries.length; tableIndex++) {
-        if (tableIndex >= this.MAX_CONTEXT_TABLES_PER_SOURCE) {
-          break;
-        }
-
+      for (let tableIndex = 0; tableIndex < tableEntries.length && tableIndex < this.MAX_CONTEXT_TABLES_PER_SOURCE; tableIndex++) {
         const [tableName, tableInfo] = tableEntries[tableIndex];
-        if (!tableInfo || typeof tableInfo !== "object" || Array.isArray(tableInfo)) {
-          continue;
-        }
-
-        const columns = tableInfo.columns || [];
+        if (!tableInfo || typeof tableInfo !== "object" || Array.isArray(tableInfo)) continue;
         const boundedColumns = [];
-
-        if (Array.isArray(columns)) {
-          for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
-            if (columnIndex >= this.MAX_CONTEXT_COLUMNS_PER_TABLE) {
-              break;
-            }
-
-            const column = columns[columnIndex];
-            if (!column || typeof column !== "object" || Array.isArray(column)) {
-              continue;
-            }
-
-            const columnName = column.name;
-            if (!columnName) {
-              continue;
-            }
-
-            // The planner must not expose protected schema fields to the AI
-            // provider. The SQL generator remains a second defense for
-            // malformed provider output, but normal planning should never be
-            // prompted with credential-like columns.
-            if (isSensitiveFieldName(columnName)) {
-              continue;
-            }
-
-            boundedColumns.push({
-              name: String(columnName),
-              data_type: column.data_type !== undefined ? column.data_type : column.type,
-            });
+        const columns = Array.isArray(tableInfo.columns) ? tableInfo.columns : [];
+        const tableKey = `${normalizedSourceId}:${tableName}`;
+        const coreTable = !focus || focus.coreTableKeys.has(tableKey);
+        const requiredNeighborhoodColumns = new Set(Array.isArray(tableInfo.primary_keys) ? tableInfo.primary_keys.map(String) : []);
+        if (focus && !coreTable) {
+          for (const relationship of Array.isArray(context.relationships) ? context.relationships : []) {
+            const relationshipKey = `${normalizedSourceId}:${relationship?.source_table || ""}:${relationship?.source_column || ""}->${normalizedSourceId}:${relationship?.target_table || ""}:${relationship?.target_column || ""}`;
+            if (!focus.relationshipKeys.has(relationshipKey)) continue;
+            if (relationship?.source_table === tableName && relationship?.source_column) requiredNeighborhoodColumns.add(String(relationship.source_column));
+            if (relationship?.target_table === tableName && relationship?.target_column) requiredNeighborhoodColumns.add(String(relationship.target_column));
           }
         }
-
+        for (let columnIndex = 0; columnIndex < columns.length && columnIndex < this.MAX_CONTEXT_COLUMNS_PER_TABLE; columnIndex++) {
+          const column = columns[columnIndex];
+          if (!column || typeof column !== "object" || Array.isArray(column)) continue;
+          const columnName = column.name;
+          if (!columnName || isSensitiveFieldName(columnName)) continue;
+          if (!coreTable && !requiredNeighborhoodColumns.has(String(columnName))) continue;
+          boundedColumns.push({
+            name: String(columnName),
+            data_type: column.data_type !== undefined ? column.data_type : column.type,
+          });
+        }
         boundedTables[String(tableName)] = {
           columns: boundedColumns,
           primary_keys: Array.isArray(tableInfo.primary_keys) ? [...tableInfo.primary_keys] : [],
         };
       }
 
-      const relationships = Array.isArray(context.relationships) ? context.relationships : [];
-      const boundedRelationships = relationships
-        .slice(0, this.MAX_CONTEXT_RELATIONSHIPS)
-        .filter(rel => rel && typeof rel === "object" && !Array.isArray(rel));
+      const relationshipMatches = relationship => {
+        if (!focus) return true;
+        const left = `${normalizedSourceId}:${relationship?.source_table || ""}`;
+        const right = `${normalizedSourceId}:${relationship?.target_table || ""}`;
+        const relationshipKey = `${left}:${relationship?.source_column || ""}->${right}:${relationship?.target_column || ""}`;
+        return focus.relationshipKeys.has(relationshipKey);
+      };
+      const boundedRelationships = (Array.isArray(context.relationships) ? context.relationships : [])
+        .filter(rel => rel && typeof rel === "object" && !Array.isArray(rel) && relationshipMatches(rel))
+        .slice(0, this.MAX_CONTEXT_RELATIONSHIPS);
+      const businessRelationshipMatches = relationship => {
+        if (!focus) return true;
+        const leftSource = String(relationship?.source_id || relationship?.source_source_id || normalizedSourceId).toLowerCase();
+        const rightSource = String(relationship?.target_id || relationship?.target_source_id || normalizedSourceId).toLowerCase();
+        return focus.tableKeys.has(`${leftSource}:${relationship?.source_table || ""}`) &&
+          focus.tableKeys.has(`${rightSource}:${relationship?.target_table || ""}`);
+      };
+      const boundedBusinessRelationships = (Array.isArray(context.business_relationships) ? context.business_relationships : [])
+        .filter(rel => rel && typeof rel === "object" && !Array.isArray(rel) && businessRelationshipMatches(rel))
+        .slice(0, this.MAX_CONTEXT_RELATIONSHIPS);
 
-      const businessRelationships = Array.isArray(context.business_relationships) ? context.business_relationships : [];
-      const boundedBusinessRelationships = businessRelationships
-        .slice(0, this.MAX_CONTEXT_RELATIONSHIPS)
-        .filter(rel => rel && typeof rel === "object" && !Array.isArray(rel));
-      const apiOperations = context.api_operations && typeof context.api_operations === "object" && !Array.isArray(context.api_operations)
-        ? Object.fromEntries(Object.entries(context.api_operations).slice(0, this.MAX_CONTEXT_TABLES_PER_SOURCE).map(([operationId, operation]) => [operationId, {
-          operation_id: operation?.operation_id,
-          response_fields: Array.isArray(operation?.response_fields) ? operation.response_fields.slice(0, this.MAX_CONTEXT_COLUMNS_PER_TABLE) : []
-        }]))
-        : {};
+      const allApiOperations = context.api_operations && typeof context.api_operations === "object" && !Array.isArray(context.api_operations) ? context.api_operations : {};
+      const apiEntries = focus && apiSelection
+        ? Object.entries(allApiOperations).filter(([operationId]) => apiSelection.has(operationId))
+        : (focus ? [] : Object.entries(allApiOperations));
+      const apiOperations = Object.fromEntries(apiEntries.slice(0, this.MAX_CONTEXT_TABLES_PER_SOURCE).map(([operationId, operation]) => [operationId, {
+        operation_id: operation?.operation_id,
+        response_fields: Array.isArray(operation?.response_fields) ? operation.response_fields.slice(0, this.MAX_CONTEXT_COLUMNS_PER_TABLE) : []
+      }]));
 
-      sources[String(sourceId).trim().toLowerCase()] = {
+      const semanticEntities = Object.fromEntries(Object.entries(context.semantic_catalog?.entities || {})
+        .filter(([table]) => !focus || sourceTableKeys.has(table))
+        .slice(0, this.MAX_CONTEXT_TABLES_PER_SOURCE)
+        .map(([table, entity]) => [table, {
+          entity_type: entity.entity_type,
+          description: entity.description,
+          synonyms: entity.synonyms,
+          source_qualified_meaning: entity.source_qualified_meaning,
+          ordering: entity.ordering,
+          provenance: entity.provenance,
+          trust_level: entity.trust_level || "approved_semantic",
+          technical_entity: Boolean(entity.technical_entity)
+        }]));
+
+      sources[normalizedSourceId] = {
         source_type: context.source_type || "postgresql",
         catalog_status: context.semantic_catalog_status || { validation_status: "unknown", freshness_status: "unknown" },
         tables: boundedTables,
         relationships: boundedRelationships,
         business_relationships: boundedBusinessRelationships,
         api_operations: apiOperations,
-        semantic_entities: Object.fromEntries(Object.entries(context.semantic_catalog?.entities || {}).slice(0, this.MAX_CONTEXT_TABLES_PER_SOURCE).map(([table, entity]) => [table, {
-          entity_type: entity.entity_type,
-          description: entity.description,
-          synonyms: entity.synonyms,
-          source_qualified_meaning: entity.source_qualified_meaning,
-          ordering: entity.ordering,
-          provenance: entity.provenance
-          ,trust_level: entity.trust_level || "approved_semantic"
-          ,technical_entity: Boolean(entity.technical_entity)
-        }]))
+        semantic_entities: semanticEntities
       };
     }
 
     return {
       sources,
-      verified_paths: Object.values(this.contexts).flatMap(context => context.semantic_catalog?.verified_paths || []).slice(0, this.MAX_CONTEXT_RELATIONSHIPS)
+      candidate_entities: focus ? focus.candidates.map(candidate => ({
+        source_id: candidate.source_id,
+        table: candidate.table,
+        entity_type: candidate.entity_type,
+        matched_aliases: candidate.matched_aliases,
+        score: candidate.score,
+        ordering_column: candidate.ordering_column,
+        provenance: candidate.provenance
+      })) : undefined,
+      verified_paths: focus
+        ? focus.paths
+        : Object.values(this.contexts).flatMap(context => context.semantic_catalog?.verified_paths || []).slice(0, this.MAX_CONTEXT_RELATIONSHIPS)
     };
   }
 
@@ -1622,8 +1964,10 @@ The final execution plan step objects must use:
     return score;
   }
 
-  _build_recent_record_candidates() {
+  _build_recent_record_candidates(question = null, tableKeys = null) {
     const candidates = [];
+    const focusedKeys = tableKeys instanceof Set ? tableKeys : null;
+    if (question && !this._is_recent_records_question(question)) return candidates;
 
     for (const [sourceId, context] of Object.entries(this.contexts)) {
       const tables = context && typeof context === "object" && !Array.isArray(context) ? (context.tables || {}) : {};
@@ -1632,6 +1976,7 @@ The final execution plan step objects must use:
       }
 
       for (const [tableName, tableInfo] of Object.entries(tables)) {
+        if (focusedKeys && !focusedKeys.has(`${sourceId}:${tableName}`)) continue;
         if (!tableInfo || typeof tableInfo !== "object" || Array.isArray(tableInfo)) {
           continue;
         }
@@ -2300,7 +2645,7 @@ The final execution plan step objects must use:
               ? { ...filter, operator: "case_insensitive_equals", verification: verified.verification, provenance: verified.provenance }
               : filter;
           });
-        } else if (statusIntent && !verified && !hasStatusFilter && columns.some(column => /^(status|state|workflow_state|lifecycle_state)$/i.test(column))) {
+        } else if (statusIntent && !verified && !hasStatusFilter && columns.some(column => isStatusColumnName(column))) {
           return { ...updated, clarification_required: { type: "business_status_semantics", message: "I could not verify the requested status meaning, so I did not run an unfiltered retrieval." } };
         }
       }
@@ -2379,7 +2724,7 @@ The final execution plan step objects must use:
   _apply_active_record_set_context(plan, question, conversationContext) {
     const active = this._conversation_reference(conversationContext);
     const recordSet = active?.record_set;
-    if (!active || !recordSet || !this._is_record_set_reference(question)) return plan;
+    if (!active || !recordSet || !this._is_record_set_reference(question, active)) return plan;
 
     const sourceId = String(active.source_id || "").trim().toLowerCase();
     const table = String(active.table || "").trim();
@@ -2463,6 +2808,11 @@ The final execution plan step objects must use:
     const stableKeys = active.stable_keys && typeof active.stable_keys === "object"
       ? active.stable_keys
       : Object.fromEntries(Object.entries(active).filter(([column, value]) => /(?:^|_)id$/.test(column) && value !== null && value !== undefined));
+    const recordSet = active.record_set && typeof active.record_set === "object" ? active.record_set : null;
+    const recordSetValues = Array.isArray(recordSet?.values)
+      ? [...new Set(recordSet.values.filter(value => value !== null && value !== undefined).map(String))]
+      : [];
+    const recordSetMode = this._record_set_reference_mode(question, active);
     const sourceMentionPattern = Object.keys(this.contexts || {}).map(source => source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).filter(Boolean).join("|");
     const explicitMultiSource = /\b(?:both|combine|across|sources?)\b/i.test(question) || (sourceMentionPattern ? new RegExp(`\\b(?:${sourceMentionPattern})\\b`, "i").test(question) : false);
     const hasDirectSameSourceTarget = findSemanticCandidates(question, this.contexts, [sourceId]).some(candidate =>
@@ -2527,14 +2877,42 @@ The final execution plan step objects must use:
       }
     }
     const paths = findVerifiedPaths(question, this.contexts, null, { active });
-    const path = paths.find(candidate => candidate.steps[0]?.source_id === sourceId && candidate.steps[0]?.table === activeTable);
-    if (!path || !Object.keys(stableKeys).length) return plan;
+    const requestedCandidates = findSemanticCandidates(question, this.contexts)
+      .filter(candidate => Array.isArray(candidate.matched_aliases) && candidate.matched_aliases.length > 0)
+      .sort((left, right) => {
+        const lastMention = candidate => Math.max(...candidate.matched_aliases.map(alias => String(question).toLowerCase().lastIndexOf(String(alias).toLowerCase())));
+        return lastMention(right) - lastMention(left) || right.score - left.score;
+      });
+    const requestedTables = new Set(requestedCandidates.map(candidate => String(candidate.table).toLowerCase()));
+    const pathCandidates = paths.filter(candidate =>
+      candidate.steps[0]?.source_id === sourceId &&
+      candidate.steps[0]?.table === activeTable &&
+      (!requestedTables.size || requestedTables.has(String(candidate.steps.at(-1)?.table || "").toLowerCase()))
+    );
+    const path = [...(pathCandidates.length ? pathCandidates : paths.filter(candidate => candidate.steps[0]?.source_id === sourceId && candidate.steps[0]?.table === activeTable))]
+      .sort((left, right) => {
+        const forwardEdge = candidate => (candidate.evidence_relationships || []).some(edge =>
+          String(edge).toLowerCase().startsWith(`${sourceId}.${activeTable.toLowerCase()}.`)
+        ) ? 1 : 0;
+        const leftSameSource = left.steps.at(-1)?.source_id === sourceId ? 1 : 0;
+        const rightSameSource = right.steps.at(-1)?.source_id === sourceId ? 1 : 0;
+        return forwardEdge(right) - forwardEdge(left) || rightSameSource - leftSameSource || left.steps.length - right.steps.length;
+      })[0];
+    if (!path || (!Object.keys(stableKeys).length && !recordSetValues.length)) return plan;
 
     const distinctSources = new Set(path.steps.map(step => step.source_id));
-    if (distinctSources.size < 2) return plan;
+    if (distinctSources.size < 2 && !recordSetValues.length) return plan;
     const first = path.steps[0];
-    const stableColumn = Object.keys(stableKeys).find(column => (this.contexts[sourceId]?.tables?.[activeTable]?.columns || []).some(item => String(item?.name || item) === column));
-    if (!stableColumn) return plan;
+    const activeColumns = (this.contexts[sourceId]?.tables?.[activeTable]?.columns || [])
+      .map(item => String(item?.name || item));
+    const stableColumn = Object.keys(stableKeys).find(column => activeColumns.includes(column));
+    const bindingColumn = stableColumn || (recordSetValues.length && activeColumns.includes(String(recordSet.key_column || "")) ? String(recordSet.key_column) : null);
+    if (!bindingColumn) return plan;
+    const bindingValue = stableColumn ? stableKeys[stableColumn] : recordSetValues;
+    const bindingOperator = Array.isArray(bindingValue) ? "in" : "=";
+    const semanticPath = path.steps.map((node, index) => index === 0
+      ? { ...node, column: bindingColumn }
+      : { ...node });
     const bindings = path.steps.slice(1).map((node, index) => this._path_binding(path.steps[index], node, path.evidence_relationships));
     if (bindings.some(binding => !binding)) {
       return {
@@ -2566,7 +2944,7 @@ The final execution plan step objects must use:
         ...(tableInfo.primary_keys || []),
         ...safeColumns
       ])).filter(Boolean);
-      const filters = index === 0 ? [{ table: node.table, field: stableColumn, operator: "=", value: stableKeys[stableColumn] }] : [];
+       const filters = index === 0 ? [{ table: node.table, field: bindingColumn, operator: bindingOperator, value: bindingValue }] : [];
       return {
         id: `s${index + 1}`,
         type: index === path.steps.length - 1 ? "final_query" : "source_query",
@@ -2585,9 +2963,14 @@ The final execution plan step objects must use:
       postgresql_sources: [...distinctSources].sort(),
       required_tables: [], required_columns: [], relationships: [], filters: [], operations: ["lookup"],
       execution_plan: { mode: "multi_step", steps, final_step: `s${steps.length}` },
-      semantic_path: path.steps,
+      semantic_path: semanticPath,
+      semantic_path_evidence: Array.isArray(path.evidence_relationships) ? [...path.evidence_relationships] : [],
       ambiguous_context_candidates: [],
       needs_conversation_context: true,
+      followup_identity_scope: recordSetValues.length
+        ? (recordSetMode === "singular" ? "singular_record_set" : "plural_record_set")
+        : "single_identity",
+      followup_record_count: recordSetValues.length || 1,
       confidence: 0.9,
       reasoning: "A verified authorized cross-source relationship path was selected from a uniquely established conversation entity."
     };
@@ -2603,10 +2986,13 @@ The final execution plan step objects must use:
     const currentSource = String(current.source_id || "").toLowerCase();
     if (!previousSource || !currentSource) return null;
     if (previousSource === currentSource) {
-      const relationship = (this.contexts?.[previousSource]?.relationships || []).find(item =>
+      const relationships = (this.contexts?.[previousSource]?.relationships || []).filter(item =>
         (item.source_table === previous.table && item.target_table === current.table) ||
         (item.target_table === previous.table && item.source_table === current.table)
       );
+      const relationship = relationships.find(item =>
+        item.source_table === previous.table && item.target_table === current.table
+      ) || relationships[0];
       if (!relationship) return null;
       return relationship.source_table === previous.table
         ? { from_column: relationship.source_column, to_column: relationship.target_column }

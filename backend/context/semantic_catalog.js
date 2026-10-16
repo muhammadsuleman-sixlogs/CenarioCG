@@ -251,17 +251,25 @@ export function reconcileSemanticCatalog(contexts, catalog, { generation = null,
 
 export function getSemanticCatalogStatus(contexts, catalog, now = Date.now(), maxAgeMs = 24 * 60 * 60 * 1000) {
   const errors = validateSemanticCatalog(contexts, catalog);
-  const generatedAt = catalog?.generated_at ? Date.parse(catalog.generated_at) : NaN;
+  const hasVerificationTimestamp = Object.prototype.hasOwnProperty.call(catalog || {}, "last_verified_at");
+  const verificationTimestampValue = hasVerificationTimestamp ? catalog?.last_verified_at : catalog?.generated_at;
+  const generatedAt = verificationTimestampValue ? Date.parse(verificationTimestampValue) : NaN;
   const age = Number.isFinite(generatedAt) ? Math.max(0, now - generatedAt) : null;
   const expectedFingerprint = catalogFingerprint(contexts);
   const declaredFingerprint = typeof catalog?.technical_fingerprint === "string" ? catalog.technical_fingerprint : null;
   const fingerprintStatus = declaredFingerprint ? (declaredFingerprint === expectedFingerprint ? "verified" : "mismatch") : "unknown";
   if (fingerprintStatus === "mismatch") errors.push("semantic catalog technical fingerprint does not match the loaded schemas");
   if (!catalog?.provenance || catalog.provenance.kind !== "application_owned_semantic_overlay" || catalog.provenance.business_approval_required_for_new_mappings !== true) errors.push("semantic catalog provenance is incomplete");
+  const freshnessStatus = errors.length
+    ? "invalid"
+    : (age === null
+      ? (hasVerificationTimestamp ? "invalid" : "unknown")
+      : (age > maxAgeMs ? "stale" : "fresh"));
   return {
     validation_status: errors.length ? "invalid" : "validated",
-    freshness_status: errors.length ? "invalid" : (age === null ? "unknown" : (age > maxAgeMs ? "stale" : "fresh")),
+    freshness_status: freshnessStatus,
     age_ms: age,
+    freshness_source: hasVerificationTimestamp ? "last_verified_at" : "generated_at",
     fingerprint: expectedFingerprint,
     fingerprint_status: fingerprintStatus,
     errors
@@ -275,7 +283,8 @@ export function attachSemanticCatalog(contexts, catalog = null) {
   // A routine technical addition changes the fingerprint but does not make
   // unrelated, still schema-valid approved definitions unsafe. Any missing
   // table/column/path validation error still disables the approved overlay.
-  const semanticUsable = (status.validation_status !== "invalid" || fingerprintOnlyMismatch) && status.freshness_status !== "stale";
+  const freshnessUsable = status.freshness_status === "fresh" || status.freshness_status === "unknown";
+  const semanticUsable = (status.validation_status !== "invalid" || fingerprintOnlyMismatch) && freshnessUsable;
   const enriched = Object.fromEntries(Object.entries(contexts || {}).map(([sourceId, context]) => {
     const approved = semanticUsable ? (semanticCatalog.sources?.[sourceId]?.entities || {}) : {};
     // Approved entries always win. Derived entries are intentionally scoped to
@@ -333,11 +342,19 @@ export function findSemanticCandidates(question, contexts, authorizedSources = n
       });
     }
   }
-  // Established business semantics retain precedence. Technical candidates
-  // exist for newly discovered objects, not to silently change existing
-  // meeting/project/company routing behavior.
+  // Established business semantics retain precedence when the query only
+  // matches metadata incidentally (for example, a status column).  A direct
+  // table/entity/synonym match is stronger evidence than that weak column
+  // overlap, however.  Keep every directly matched authorized candidate so a
+  // discovered entity such as users is not hidden by an unrelated approved
+  // project/session definition.  The planner remains responsible for
+  // resolving genuine source ambiguity.
+  const direct = candidates.filter(candidate =>
+    Array.isArray(candidate.matched_aliases) && candidate.matched_aliases.length > 0
+  );
   const approved = candidates.filter(candidate => !contexts?.[candidate.source_id]?.semantic_catalog?.entities?.[candidate.table]?.technical_entity);
-  return (approved.length > 0 ? approved : candidates)
+  const selected = direct.length > 0 ? direct : (approved.length > 0 ? approved : candidates);
+  return selected
     .sort((left, right) => right.score - left.score || left.source_id.localeCompare(right.source_id) || left.table.localeCompare(right.table));
 }
 

@@ -59,11 +59,89 @@ function emptyStage() {
 export function createLlmUsageTracker(requestId = null) {
   return {
     request_id: requestId || null,
+    answer_evidence: null,
     stages: {
       planner: emptyStage(),
       answer: emptyStage()
     }
   };
+}
+
+function safeJsonLength(value) {
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function collectRowRepresentations(value, path = [], output = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectRowRepresentations(item, path, output);
+    return output;
+  }
+  if (!value || typeof value !== "object") return output;
+
+  for (const [key, item] of Object.entries(value)) {
+    const nextPath = [...path, key];
+    if (key === "rows" && Array.isArray(item)) {
+      for (const row of item) output.push({ row, canonical: false });
+      continue;
+    }
+    if (key === "row" && path.at(-1) === "items") {
+      output.push({ row: item, canonical: true });
+      continue;
+    }
+    collectRowRepresentations(item, nextPath, output);
+  }
+  return output;
+}
+
+/**
+ * Return privacy-safe structural measurements for answer evidence.  This
+ * function stores only counts and character lengths; it never returns row
+ * values or prompt text.
+ */
+export function measureAnswerEvidenceStructure(evidence) {
+  const source = evidence && typeof evidence === "object" ? evidence : {};
+  const sections = {};
+  for (const [key, value] of Object.entries(source)) sections[key] = safeJsonLength(value);
+
+  const representations = collectRowRepresentations(source);
+  const seen = new Map();
+  for (const item of representations) {
+    const fingerprint = safeJsonLength(item.row) + ":" + (() => {
+      try { return JSON.stringify(item.row); } catch { return ""; }
+    })();
+    seen.set(fingerprint, (seen.get(fingerprint) || 0) + 1);
+  }
+
+  let duplicateRepresentationCount = 0;
+  for (const count of seen.values()) duplicateRepresentationCount += Math.max(0, count - 1);
+
+  const mappings = source.relationship_resolution?.mappings;
+  return {
+    section_characters: sections,
+    evidence_characters: safeJsonLength(source),
+    canonical_row_count: Array.isArray(source.items)
+      ? source.items.filter(item => item && typeof item === "object" && item.row !== undefined).length
+      : 0,
+    relationship_mapping_count: Array.isArray(mappings) ? mappings.length : 0,
+    duplicate_representation_count: duplicateRepresentationCount,
+    row_representation_count: representations.length
+  };
+}
+
+/**
+ * Attach privacy-safe answer-evidence metrics to the request tracker.
+ */
+export function recordAnswerEvidenceMetrics(tracker, metrics = {}) {
+  if (!tracker || typeof tracker !== "object") return;
+  const previous = tracker.answer_evidence && typeof tracker.answer_evidence === "object"
+    ? tracker.answer_evidence
+    : {};
+  tracker.answer_evidence = { ...previous, ...metrics };
 }
 
 /**
@@ -142,6 +220,7 @@ export function snapshotLlmUsage(tracker) {
     request_id: tracker?.request_id || null,
     call_count: allCalls.length,
     fallback_attempts: planner.fallback_attempts + answer.fallback_attempts,
+    answer_evidence: tracker?.answer_evidence || null,
     stages: { planner, answer },
     totals: {
       input_tokens: aggregateMetric(allCalls, "input_tokens"),
@@ -179,5 +258,7 @@ export default {
   extractProviderUsage,
   logLlmUsage,
   recordLlmAttempt,
+  measureAnswerEvidenceStructure,
+  recordAnswerEvidenceMetrics,
   snapshotLlmUsage
 };

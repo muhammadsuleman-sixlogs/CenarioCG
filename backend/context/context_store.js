@@ -78,19 +78,22 @@ function readActiveGeneration(activeGenerationFile = ACTIVE_GENERATION_FILE) {
   } catch { return null; }
 }
 
-function generationContextFile(sourceId) {
-  const active = readActiveGeneration();
+function generationContextFile(sourceId, directory = CONTEXT_DIR) {
+  const { activeGenerationFile } = storagePaths(directory);
+  const active = readActiveGeneration(activeGenerationFile);
   if (!active) return null;
   if (!Array.isArray(active.sources) || !active.sources.includes(sourceId)) return null;
-  const file = resolve(CONTEXT_GENERATIONS_DIR, active.generation, `${sourceId}.json`);
-  const expectedRoot = resolve(CONTEXT_GENERATIONS_DIR, active.generation);
+  const { generationsDir } = storagePaths(directory);
+  const file = resolve(generationsDir, active.generation, `${sourceId}.json`);
+  const expectedRoot = resolve(generationsDir, active.generation);
   return file.startsWith(`${expectedRoot}\\`) || file.startsWith(`${expectedRoot}/`) ? file : null;
 }
 
-export function getActiveSemanticCatalogFile() {
-  const active = readActiveGeneration();
+export function getActiveSemanticCatalogFile(directory = CONTEXT_DIR) {
+  const { generationsDir, activeGenerationFile } = storagePaths(directory);
+  const active = readActiveGeneration(activeGenerationFile);
   if (!active) return null;
-  const file = resolve(CONTEXT_GENERATIONS_DIR, active.generation, SEMANTIC_CATALOG_SNAPSHOT_FILE);
+  const file = resolve(generationsDir, active.generation, SEMANTIC_CATALOG_SNAPSHOT_FILE);
   return fs.existsSync(file) ? file : null;
 }
 
@@ -199,6 +202,7 @@ export function publishContextGeneration(contexts, { now = new Date(), retention
       generation,
       fingerprint,
       generated_at: generatedAt,
+      last_verified_at: generatedAt,
       sources: sourceIds,
       validation_status: "validated",
       ...(semanticSnapshot ? {
@@ -228,6 +232,43 @@ export function publishContextGeneration(contexts, { now = new Date(), retention
     fs.rmSync(resolve(generationsDir, oldGeneration), { recursive: true, force: true });
   }
   return { published: true, generation, fingerprint };
+}
+
+/**
+ * Record a successful live verification of the active generation without
+ * creating a new schema snapshot. This is deliberately a manifest-only,
+ * atomic update: the technical snapshots and semantic catalog remain the
+ * exact coherent generation that was just validated by refresh.
+ */
+export function markActiveGenerationVerified({ now = new Date(), directory = CONTEXT_DIR } = {}) {
+  const { generationsDir, activeGenerationFile } = storagePaths(directory);
+  const active = readActiveGeneration(activeGenerationFile);
+  if (!active?.generation) throw new Error("No active context generation is available to verify.");
+
+  const generationDirectory = resolve(generationsDir, active.generation);
+  const manifestFile = resolve(generationDirectory, "manifest.json");
+  if (!fs.existsSync(manifestFile)) throw new Error("The active context generation manifest is unavailable.");
+
+  let generationManifest;
+  try {
+    generationManifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
+  } catch (error) {
+    throw new Error(`The active context generation manifest is invalid: ${error.message || String(error)}`);
+  }
+  if (generationManifest?.generation !== active.generation || generationManifest.validation_status !== "validated") {
+    throw new Error("The active context generation is not validated.");
+  }
+  for (const sourceId of active.sources || generationManifest.sources || []) {
+    const sourceFile = resolve(generationDirectory, `${sourceId}.json`);
+    if (!fs.existsSync(sourceFile)) throw new Error("The active context generation is incomplete.");
+  }
+
+  const verifiedAt = new Date(now).toISOString();
+  const updated = { ...active, last_verified_at: verifiedAt, verification_status: "verified" };
+  const temporaryManifest = `${activeGenerationFile}.tmp`;
+  fs.writeFileSync(temporaryManifest, JSON.stringify(updated, null, 2), "utf8");
+  fs.renameSync(temporaryManifest, activeGenerationFile);
+  return updated;
 }
 
 export function rollbackContextGeneration(generation, { directory = CONTEXT_DIR } = {}) {
@@ -312,7 +353,15 @@ export function load_all_contexts() {
   // must never replace or mutate the technical schema snapshots.
   try {
     const catalogFile = getActiveSemanticCatalogFile();
-    return attachSemanticCatalog(contexts, loadSemanticCatalog(catalogFile || undefined)).contexts;
+    const catalog = loadSemanticCatalog(catalogFile || undefined);
+    // `generated_at` identifies when approved semantic definitions were
+    // reconciled. A successful unchanged-schema refresh records a separate
+    // manifest verification timestamp, which is safe to trust only because
+    // the active pointer and all generation files were read together above.
+    const verifiedCatalog = active?.last_verified_at
+      ? { ...catalog, last_verified_at: active.last_verified_at }
+      : catalog;
+    return attachSemanticCatalog(contexts, verifiedCatalog).contexts;
   } catch {
     return contexts;
   }
@@ -335,6 +384,7 @@ export default {
   loadContext,
   contextFingerprint,
   publishContextGeneration,
+  markActiveGenerationVerified,
   rollbackContextGeneration,
   getContextFreshness,
   load_all_contexts,

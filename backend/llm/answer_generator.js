@@ -1,6 +1,10 @@
 import { getOpenAIClient, OPENAI_MODEL } from "./openai_client.js";
 import { EvidenceManager } from "./evidence_manager.js";
-import { recordLlmAttempt } from "./usage_tracker.js";
+import {
+  measureAnswerEvidenceStructure,
+  recordAnswerEvidenceMetrics,
+  recordLlmAttempt
+} from "./usage_tracker.js";
 import { sanitizeOutputText } from "../security/output_security_policy.js";
 
 /**
@@ -193,6 +197,13 @@ Return ONLY the final answer to the user.
     }
 
     const prompt = this.buildPrompt(cleanQuestion, cleanEvidence);
+    if (usageTracker) {
+      const structure = measureAnswerEvidenceStructure(cleanEvidence);
+      recordAnswerEvidenceMetrics(usageTracker, {
+        ...structure,
+        prompt_characters: prompt.length
+      });
+    }
     const modelToUse = this.model || OPENAI_MODEL;
 
     let answer = "";
