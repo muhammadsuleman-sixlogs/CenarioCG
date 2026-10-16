@@ -377,6 +377,7 @@ function App() {
   const chatPanelRef = useRef(null);
   const chatDragRef = useRef(null);
   const chatResizeRef = useRef(null);
+  const composerTextareaRef = useRef(null);
   const graphPanelRef = useRef(null);
   const [feedbackCount, setFeedbackCount] = useState(0);
 
@@ -842,27 +843,6 @@ function App() {
     }
   }, [isChatOpen]);
 
-  useEffect(() => {
-    if (!isChatOpen) return undefined;
-
-    const clearUserMessageSelection = () => {
-      const selection = window.getSelection?.();
-      const anchorElement = selection?.anchorNode?.parentElement;
-
-      if (
-        selection?.rangeCount &&
-        anchorElement?.closest?.(".floating-chat .message.user")
-      ) {
-        selection.removeAllRanges();
-      }
-    };
-
-    document.addEventListener("selectionchange", clearUserMessageSelection);
-    return () => {
-      document.removeEventListener("selectionchange", clearUserMessageSelection);
-    };
-  }, [isChatOpen]);
-
   const handleEntitySelect = useCallback((entity) => {
     setSelectedEntity(entity);
   }, []);
@@ -930,6 +910,9 @@ function App() {
     ]);
 
     setQuestion("");
+    if (composerTextareaRef.current) {
+      composerTextareaRef.current.style.height = "auto";
+    }
     setLoading(true);
     setSelectedSource(null);
 
@@ -1615,7 +1598,6 @@ function App() {
 
                         <div
                           className={`message-body ${message.role === "user" ? "user-message-body" : "assistant-message-body"}`}
-                          onMouseDown={message.role === "user" ? (event) => event.preventDefault() : undefined}
                         >
                           {message.role === "assistant" ? (
                             <StreamingMarkdown
@@ -1811,32 +1793,56 @@ function App() {
                   handleAsk();
                 }}
               >
-                <input
-                  type="text"
+                <textarea
+                  ref={composerTextareaRef}
+                  rows={1}
                   value={question}
                   onChange={(event) =>
                     setQuestion(
                       event.target.value
                     )
                   }
-                  placeholder="Ask a question about your connected data..."
+                  onInput={(event) => {
+                    const textarea = event.currentTarget;
+                    textarea.style.height = "auto";
+                    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !event.isComposing
+                    ) {
+                      event.preventDefault();
+                      if (!loading && question.trim()) {
+                        handleAsk();
+                      }
+                    }
+                  }}
+                  placeholder="Ask anything about your connected data..."
                   disabled={loading}
                 />
 
                 <button
                   type="submit"
+                  aria-label={loading ? "Sending message" : "Send message"}
                   disabled={
                     loading ||
                     !question.trim()
                   }
                 >
-                  <span>
-                    {loading
-                      ? "Tracing..."
-                      : "Send"}
-                  </span>
-
-                  <span>→</span>
+                  <svg
+                    className="send-icon"
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.25"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M12 19V5M5 12l7-7 7 7" />
+                  </svg>
                 </button>
               </form>
             </div>}
