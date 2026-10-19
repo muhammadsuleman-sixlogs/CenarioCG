@@ -2,9 +2,9 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getOpenAIClient, OPENAI_MODEL } from "../llm/openai_client.js";
-import { recordLlmAttempt } from "../llm/usage_tracker.js";
+import { recordLlmAttempt, recordPlannerContextMetrics } from "../llm/usage_tracker.js";
 import { loadAllContexts } from "../context/context_store.js";
-import { isSensitiveQuestionIntent } from "../security/sensitive_data_policy.js";
+import { isSensitiveQuestionIntent, isMutationQuestionIntent } from "../security/sensitive_data_policy.js";
 import { findSemanticCandidates, findVerifiedPaths } from "../context/semantic_catalog.js";
 import { isSensitiveFieldName } from "../security/sensitive_data_policy.js";
 import { extractEntitySearchText } from "../entity_resolution/entity_search.js";
@@ -243,11 +243,46 @@ export class QuestionPlanner {
     }
 
     const trimmedQuestion = question.trim();
+    if (conversationContext && typeof conversationContext === "object" && !Array.isArray(conversationContext)) {
+      try {
+        Object.defineProperty(conversationContext, "_reference_question", {
+          value: trimmedQuestion,
+          enumerable: false,
+          configurable: true,
+          writable: true
+        });
+      } catch {
+        // A caller may provide a sealed context object; reference selection
+        // remains safely anchored to active_context in that case.
+      }
+    }
+    const normalizePlan = (candidate, recordDeterministicMetrics = true) => {
+      if (recordDeterministicMetrics) recordPlannerContextMetrics(usageTracker, {
+          mode: "deterministic",
+          context_characters: 0,
+          prompt_characters: 0,
+          focused_table_count: 0,
+          focused_relationship_count: 0,
+          verified_path_count: 0,
+          candidate_count: 0
+        });
+      return this._normalize_plan(candidate, trimmedQuestion, conversationContext);
+    };
 
     // Sensitive credential security check
     if (typeof isSensitiveQuestionIntent === "function" && isSensitiveQuestionIntent(trimmedQuestion)) {
       const err = new Error("Access to credentials, passwords, tokens, and confidential secrets is strictly restricted.");
       err.isSensitiveViolation = true;
+      throw err;
+    }
+
+    // Authoritative sources are permanently read-only.  Reject explicit
+    // mutation intent before deterministic candidate selection or any
+    // provider call so a write request can never become an unrelated SELECT.
+    if (typeof isMutationQuestionIntent === "function" && isMutationQuestionIntent(trimmedQuestion)) {
+      const err = new Error("Connected authoritative data sources are read-only; I cannot perform data or schema modifications.");
+      err.isReadOnlyMutationViolation = true;
+      err.code = "READ_ONLY_MUTATION_REJECTED";
       throw err;
     }
 
@@ -257,7 +292,7 @@ export class QuestionPlanner {
     // malformed provider plan cannot add unrelated tables to a detail query.
     const deterministicDetail = this._build_metadata_fallback_plan(trimmedQuestion, conversationContext);
     if (this._is_bounded_detail_lookup(trimmedQuestion, deterministicDetail)) {
-      return this._normalize_plan(deterministicDetail, trimmedQuestion, conversationContext);
+      return normalizePlan(deterministicDetail);
     }
 
     // For an explicit ordinary table noun, the existing metadata fallback is
@@ -278,6 +313,13 @@ export class QuestionPlanner {
     const deterministicIndependentPlan = deterministicDetail?.candidate_resolution?.mode === "independent" &&
       deterministicSteps.length > 0 &&
       deterministicSteps.every(step => Array.isArray(step?.contract?.required_tables) && step.contract.required_tables.length > 0);
+    // Named relationship requests are completely schema-grounded when the
+    // display-name lookup and every hop use declared same-source FKs.  Return
+    // these plans before calling a provider: that avoids both an unbounded
+    // fallback and an unnecessary planning-model request.
+    const deterministicRelationshipPlan = deterministicDetail?.named_relationship_lookup === true &&
+      deterministicSteps.length > 1 &&
+      deterministicSteps.every(step => Array.isArray(step?.contract?.required_tables) && step.contract.required_tables.length === 1);
     const deterministicRecentPlan = Array.isArray(deterministicDetail?.operations) &&
       deterministicDetail.operations.includes("ranking") &&
       Array.isArray(deterministicDetail.sorting) &&
@@ -285,9 +327,9 @@ export class QuestionPlanner {
     if (
       deterministicDetail &&
       !deterministicDetail.clarification_required &&
-      (deterministicHasExplicitTable || deterministicHasVerifiedFilter || deterministicIndependentPlan || deterministicRecentPlan)
+      (deterministicHasExplicitTable || deterministicHasVerifiedFilter || deterministicIndependentPlan || deterministicRelationshipPlan || deterministicRecentPlan)
     ) {
-      return this._normalize_plan(deterministicDetail, trimmedQuestion, conversationContext);
+      return normalizePlan(deterministicDetail);
     }
 
     if (!this.client) {
@@ -302,6 +344,18 @@ export class QuestionPlanner {
       conversationContext,
       resolvedEntities
     );
+    const contextSources = context && typeof context.sources === "object" ? Object.values(context.sources) : [];
+    recordPlannerContextMetrics(usageTracker, {
+      mode: "provider",
+      context_characters: (() => {
+        try { return JSON.stringify(context).length; } catch { return 0; }
+      })(),
+      prompt_characters: prompt.length,
+      focused_table_count: contextSources.reduce((count, source) => count + Object.keys(source?.tables || {}).length, 0),
+      focused_relationship_count: contextSources.reduce((count, source) => count + (Array.isArray(source?.relationships) ? source.relationships.length : 0) + (Array.isArray(source?.business_relationships) ? source.business_relationships.length : 0), 0),
+      verified_path_count: Array.isArray(context?.verified_paths) ? context.verified_paths.length : 0,
+      candidate_count: Array.isArray(context?.candidate_entities) ? context.candidate_entities.length : 0
+    });
 
     let content = "";
 
@@ -361,14 +415,14 @@ export class QuestionPlanner {
 
     if (!content) {
       const fallback = this._build_metadata_fallback_plan(trimmedQuestion, conversationContext);
-      if (fallback) return this._normalize_plan(fallback, trimmedQuestion, conversationContext);
+      if (fallback) return normalizePlan(fallback, false);
       throw new Error("Question planner could not produce a schema-grounded retrieval plan.");
     }
 
     let rawPlan;
     try { rawPlan = this._parse_json_response(content); } catch {
       const fallback = this._build_metadata_fallback_plan(trimmedQuestion, conversationContext);
-      if (fallback) return this._normalize_plan(fallback, trimmedQuestion, conversationContext);
+      if (fallback) return normalizePlan(fallback, false);
       throw new Error("Question planner returned an invalid retrieval plan.");
     }
 
@@ -390,7 +444,7 @@ export class QuestionPlanner {
         (Array.isArray(incompleteProviderFallback?.required_tables) && incompleteProviderFallback.required_tables.length > 0) ||
         fallbackSteps.some(step => Array.isArray(step?.contract?.required_tables) && step.contract.required_tables.length > 0);
       if (fallbackHasTarget) {
-        return this._normalize_plan(incompleteProviderFallback, trimmedQuestion, conversationContext);
+        return normalizePlan(incompleteProviderFallback, false);
       }
     }
 
@@ -424,18 +478,42 @@ export class QuestionPlanner {
 
   _build_metadata_fallback_plan(question, conversationContext = null) {
     question = String(question).replace(/\s+\[context\s+[^\]]+\]\s*$/i, "").trim();
+    const namedRelationshipPlan = this._build_possessive_task_assignment_plan(question) || this._build_named_relationship_plan(question) || this._build_named_company_users_plan(question);
+    if (namedRelationshipPlan) return namedRelationshipPlan;
+    const verifiedRelationshipPlan = !this._conversation_reference(conversationContext)
+      ? this._build_verified_relationship_plan(question)
+      : null;
+    if (verifiedRelationshipPlan) return verifiedRelationshipPlan;
     const active = this._conversation_reference(conversationContext);
     const refersBack = /\b(?:it|its|that|this|those|these|details?)\b/i.test(question);
     const recordSet = active?.record_set;
     if (recordSet && this._is_record_set_reference(question, active) && !this._has_explicit_new_target(question, active) && active.source_id && active.table && Array.isArray(recordSet.values) && recordSet.values.length > 0) {
       const tableInfo = this.contexts?.[active.source_id]?.tables?.[active.table] || {};
       const safeColumns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(Boolean);
+      const identityFilter = this._active_record_set_identity_filter(question, active, tableInfo);
+      if (identityFilter?.unsupported) {
+        return {
+          data_sources: ["postgresql"],
+          postgresql_sources: [String(active.source_id).toLowerCase()],
+          required_tables: [active.table],
+          required_columns: [],
+          filters: [],
+          operations: [],
+          clarification_required: {
+            type: "unsupported_identity_qualifier",
+            message: "I could not verify that identity qualifier for the referenced records, so I did not broaden the retrieval."
+          }
+        };
+      }
       return {
         data_sources: ["postgresql"],
         postgresql_sources: [String(active.source_id).toLowerCase()],
         required_tables: [active.table],
         required_columns: safeColumns.map(column => `${active.table}.${column}`).slice(0, 20),
-        filters: [{ table: active.table, field: recordSet.key_column, operator: "in", value: recordSet.values }],
+        filters: [
+          { table: active.table, field: recordSet.key_column, operator: "in", value: recordSet.values },
+          ...(identityFilter ? [identityFilter] : [])
+        ],
         relationships: [],
         operations: ["lookup"],
         limit: Math.max(recordSet.values.length, 1),
@@ -507,10 +585,17 @@ export class QuestionPlanner {
     if (capableCandidates.length > 0 && capableCandidates.length < candidates.length) {
       candidates = capableCandidates;
     }
+    // An explicit identity qualifier narrows the candidate set before source
+    // ambiguity is evaluated.  Never retain unrelated entity tables merely
+    // because they share a lexical noun with the question.
+    const identityCandidates = candidates.filter(candidate => this._explicit_identity_filter(question, candidate));
+    if (identityCandidates.length > 0 && identityCandidates.length < candidates.length) {
+      candidates = identityCandidates;
+    }
     // If the user is asking about the already established entity itself,
     // preserve that bounded lookup. Requests for a distinct semantic target
     // (transcript, project, etc.) continue to relationship resolution below.
-    const explicitNewRecord = candidates.some(candidate => this._explicit_identifier_filter(question, candidate) || candidate.display_filters.length > 0);
+    const explicitNewRecord = candidates.some(candidate => this._explicit_identity_filter(question, candidate) || candidate.display_filters.length > 0);
     if (active && refersBack && !explicitNewRecord && candidates.length && !candidates.some(candidate => candidate.source_id === active.source_id && candidate.table !== active.table)) {
       return { data_sources: ["postgresql"], postgresql_sources: [], required_tables: [], required_columns: [], filters: [], relationships: [], operations: ["lookup"], needs_conversation_context: true, confidence: 0.8 };
     }
@@ -572,7 +657,7 @@ export class QuestionPlanner {
       };
     }
     const requiredTables = temporalCompanion ? [best.table, temporalCompanion.table] : [best.table];
-    const identifierFilter = this._explicit_identifier_filter(question, best);
+    const identifierFilter = this._explicit_identity_filter(question, best);
     const displayFilters = identifierFilter ? [] : (best.display_filters || this._explicit_display_filters(question, best));
     const persistedDisplayFilters = displayFilters.map(filter => {
       const { provenance: _provenance, name_component: _nameComponent, ...plain } = filter;
@@ -599,8 +684,381 @@ export class QuestionPlanner {
     };
   }
 
+  _build_verified_relationship_plan(question) {
+    const text = String(question || "").trim();
+    const relationshipCue = /\b(?:belongs?|associated|related|linked|connect(?:ed)?|with|alongside|their|its)\b/i.test(text) ||
+      /\b(?:each|every)\s+[a-z][a-z'-]*['\u2019]s\b/i.test(text);
+    if (!text || !relationshipCue) return null;
+
+    const candidates = findSemanticCandidates(text, this.contexts)
+      .filter(candidate => Array.isArray(candidate.matched_aliases) && candidate.matched_aliases.length > 0);
+    if (candidates.length < 2) return null;
+    const roleForNode = new Map(candidates.map(candidate => [`${candidate.source_id}:${candidate.table}`, this._semantic_role_key(candidate)]));
+    const roles = new Set(roleForNode.values());
+    if (roles.size < 2) return null;
+
+    const firstMention = candidate => Math.min(...candidate.matched_aliases
+      .map(alias => text.toLowerCase().indexOf(String(alias).toLowerCase()))
+      .filter(index => index >= 0));
+    const anchorCandidate = [...candidates]
+      .map(candidate => ({ candidate, position: firstMention(candidate) }))
+      .filter(item => Number.isFinite(item.position))
+      .sort((left, right) => left.position - right.position || right.candidate.score - left.candidate.score)[0]?.candidate;
+    if (!anchorCandidate) return null;
+
+    const paths = findVerifiedPaths(text, this.contexts)
+      .filter(path => path?.validation_status === "validated" && Array.isArray(path.steps) && path.steps.length > 1);
+    if (!paths.length) return null;
+
+    const reverseEvidence = evidence => {
+      const [left, right] = String(evidence || "").split(" -> ");
+      return left && right ? `${right} -> ${left}` : evidence;
+    };
+    const endpointMatches = (value, step, strict = false) => {
+      const [source, table, column] = String(value || "").split(".");
+      return String(source).toLowerCase() === String(step?.source_id || "").toLowerCase() &&
+        String(table) === String(step?.table) && (!strict || !column || !step?.column || String(column) === String(step.column));
+    };
+    const adjacency = new Map();
+    const addEdge = (from, to, evidence) => {
+      const key = `${from.source_id}:${from.table}`;
+      if (!adjacency.has(key)) adjacency.set(key, []);
+      const targetKey = `${to.source_id}:${to.table}`;
+      if (!adjacency.get(key).some(edge => edge.targetKey === targetKey && edge.evidence === evidence)) {
+        adjacency.get(key).push({ node: { ...to }, evidence, targetKey });
+      }
+    };
+    for (const path of paths) {
+      for (let index = 0; index < path.steps.length - 1; index++) {
+        const left = path.steps[index];
+        const right = path.steps[index + 1];
+        const exactEvidence = (path.evidence_relationships || []).find(item => {
+          const [from, to] = String(item || "").split(" -> ");
+          return (endpointMatches(from, left, true) && endpointMatches(to, right, true)) || (endpointMatches(from, right, true) && endpointMatches(to, left, true));
+        });
+        const evidence = exactEvidence || (path.evidence_relationships || []).find(item => {
+          const [from, to] = String(item || "").split(" -> ");
+          return (endpointMatches(from, left) && endpointMatches(to, right)) || (endpointMatches(from, right) && endpointMatches(to, left));
+        });
+        if (!evidence) continue;
+        const forward = endpointMatches(String(evidence).split(" -> ")[0], left) ? evidence : reverseEvidence(evidence);
+        addEdge(left, right, forward);
+        addEdge(right, left, reverseEvidence(forward));
+      }
+    }
+
+    const anchorRole = this._semantic_role_key(anchorCandidate);
+    const targetRoles = new Set([...roles].filter(role => role !== anchorRole));
+    const startKey = `${anchorCandidate.source_id}:${anchorCandidate.table}`;
+    const queue = [{ nodes: [{ source_id: anchorCandidate.source_id, table: anchorCandidate.table, column: null }], evidence: [] }];
+    const completePaths = [];
+    while (queue.length && completePaths.length < 16) {
+      const state = queue.shift();
+      const last = state.nodes.at(-1);
+      const covered = new Set(state.nodes.map(node => roleForNode.get(`${node.source_id}:${node.table}`)).filter(Boolean));
+      if ([...targetRoles].every(role => covered.has(role))) {
+        completePaths.push(state);
+        continue;
+      }
+      if (state.nodes.length >= 5) continue;
+      for (const edge of adjacency.get(`${last.source_id}:${last.table}`) || []) {
+        if (state.nodes.some(node => `${node.source_id}:${node.table}` === edge.targetKey)) continue;
+        queue.push({ nodes: [...state.nodes, edge.node], evidence: [...state.evidence, edge.evidence] });
+      }
+    }
+    if (!completePaths.length) return null;
+    completePaths.sort((left, right) => {
+      const uuidScore = path => path.nodes.some(node => ["id", "project_id"].includes(String(node.column || "").toLowerCase())) ? 1 : 0;
+      return left.nodes.length - right.nodes.length || uuidScore(right) - uuidScore(left);
+    });
+    const selected = completePaths[0];
+    const bindings = selected.nodes.slice(1).map((node, index) => this._path_binding(selected.nodes[index], node, selected.evidence));
+    if (bindings.some(binding => !binding)) return null;
+    const semanticPath = selected.nodes.map(node => ({ ...node }));
+    if (semanticPath[0] && bindings[0]?.from_column) semanticPath[0].column = bindings[0].from_column;
+
+    const safeProjection = (node, incoming, outgoing) => {
+      const tableInfo = this.contexts?.[node.source_id]?.tables?.[node.table] || {};
+      const names = (tableInfo.columns || []).map(column => String(column?.name || column || ""))
+        .filter(column => column && !isSensitiveFieldName(column));
+      const preferred = names.filter(column => /(?:^|_)(?:id|name|title|label|display|code|project|meeting)(?:_|$)/i.test(column));
+      return Array.from(new Set([
+        ...(Array.isArray(tableInfo.primary_keys) ? tableInfo.primary_keys : []),
+        node.column,
+        incoming?.to_column,
+        outgoing?.from_column,
+        ...preferred.slice(0, 8)
+      ].filter(Boolean))).slice(0, 12);
+    };
+    const steps = selected.nodes.map((node, index) => {
+      const incoming = index > 0 ? bindings[index - 1] : null;
+      const outgoing = index < bindings.length ? bindings[index] : null;
+      const columns = safeProjection(node, incoming, outgoing);
+      return {
+        id: `s${index + 1}`,
+        type: index === selected.nodes.length - 1 ? "final_query" : "source_query",
+        source_id: node.source_id,
+        contract: {
+          question: text,
+          data_sources: ["postgresql"],
+          postgresql_sources: [node.source_id],
+          required_tables: [node.table],
+          required_columns: columns.map(column => `${node.table}.${column}`),
+          relationships: [], filters: [], operations: ["lookup"], limit: 50, sorting: [], entities: []
+        },
+        depends_on: index === 0 ? [] : [`s${index}`], inputs: [],
+        input_bindings: index === 0 ? [] : [{ from_step: `s${index}`, from_column: incoming.from_column, to_table: node.table, to_column: incoming.to_column, operator: "in" }],
+        output_columns: columns.map(column => `${node.table}.${column}`),
+        purpose: `Retrieve the verified relationship graph step for ${node.source_id}.${node.table}.`
+      };
+    });
+    const recent = this._is_recent_records_question(text);
+    const recentCandidate = recent
+      ? this._build_recent_record_candidates().find(candidate => candidate.source_id === selected.nodes[0].source_id && candidate.table === selected.nodes[0].table)
+      : null;
+    if (recent && !recentCandidate?.time_column) return null;
+    const operations = recent ? ["ranking"] : ["lookup"];
+    const sorting = recent ? [{ field: `${selected.nodes[0].table}.${recentCandidate.time_column}`, direction: "desc" }] : [];
+    if (recent) {
+      steps[0].contract.operations = operations;
+      steps[0].contract.sorting = sorting;
+      steps[0].contract.limit = 10;
+    }
+    return {
+      question: text, data_sources: ["postgresql"],
+      postgresql_sources: [...new Set(selected.nodes.map(node => node.source_id))].sort(),
+      required_tables: [], required_columns: [], relationships: [], filters: [], operations, sorting, limit: recent ? 10 : 50,
+      execution_plan: { mode: "multi_step", steps, final_step: `s${steps.length}` },
+      semantic_path: semanticPath, semantic_path_evidence: selected.evidence,
+      named_relationship_lookup: true, relationship_plan_kind: "verified_graph", ambiguous_context_candidates: [],
+      confidence: 0.95, reasoning: "A complete authorized relationship graph was composed from validated semantic paths."
+    };
+  }
+
+  _build_named_relationship_plan(question) {
+    // This is deliberately a narrow deterministic grammar.  It covers a
+    // common possessive form ("Umar Daraz company ...") only when the schema
+    // can prove the complete same-source path.  Other wording still follows
+    // the existing semantic/LLM planning flow.
+    const originalSubject = String(question || "")
+      .replace(/^\s*(?:show|find|list|display|give)(?:\s+me)?\s+/i, "")
+      .trim();
+    // Without a possessive marker, a single-token "X Company" is a company
+    // display name (the established company→users path), not a person's
+    // first name.  A multi-token person name remains supported.
+    if (/^[a-z][a-z'-]*\s+company\b/i.test(originalSubject) && !/['\u2019]s\b/i.test(originalSubject)) return null;
+    const subject = originalSubject
+      .replace(/^\s*(?:show|find|list|display|give)(?:\s+me)?\s+/i, "")
+      .replace(/['\u2019]s\b/gi, "")
+      .trim();
+    if (/^(?:which|what|who|where|when|does|do|is|are)\b/i.test(subject)) return null;
+    const match = subject.match(/^([a-z][a-z'-]*)(?:\s+([a-z][a-z'-]*))?\s+company\b([\s\S]*)$/i);
+    if (!match) return null;
+
+    const [, firstName, lastName, suffix = ""] = match;
+    // "Rahim Company users" names a company; do not reinterpret its entity
+    // noun as a person's family name.
+    if (String(lastName).toLowerCase() === "company") return null;
+    const wantsCompanyUsers = /\busers?\b/i.test(suffix);
+    const wantsProjectTasks = /\bprojects?\s+tasks?\b|\bproject\s+tasks?\b/i.test(suffix);
+    const nodes = wantsProjectTasks
+      ? ["users", "companies", "users", "project_tasks"]
+      : wantsCompanyUsers
+        ? ["users", "companies", "users"]
+        : ["users", "companies"];
+    const relationshipPairs = wantsProjectTasks
+      ? [["users", "companies"], ["companies", "users"], ["users", "project_tasks"]]
+      : wantsCompanyUsers
+        ? [["users", "companies"], ["companies", "users"]]
+        : [["users", "companies"]];
+
+    const sourceIds = Object.keys(this.contexts || {}).filter(sourceId => {
+      const context = this.contexts[sourceId] || {};
+      const userColumns = new Set((context.tables?.users?.columns || []).map(column => String(column?.name || column).toLowerCase()));
+      if (!userColumns.has("first_name") || (lastName && !userColumns.has("last_name"))) return false;
+      if (!nodes.every(table => context.tables?.[table])) return false;
+      return relationshipPairs.every(([left, right]) => (context.relationships || []).some(relationship =>
+        (relationship.source_table === left && relationship.target_table === right) ||
+        (relationship.source_table === right && relationship.target_table === left)
+      ));
+    });
+    if (sourceIds.length !== 1) return null;
+
+    const sourceId = sourceIds[0];
+    const context = this.contexts[sourceId];
+    const preferredRelationship = {
+      "companies:users": { source_table: "users", source_column: "company_id", target_table: "companies", target_column: "id" },
+      "companies:project_details": { source_table: "project_details", source_column: "company_id", target_table: "companies", target_column: "id" },
+      "project_details:project_tasks": { source_table: "project_tasks", source_column: "project_id", target_table: "project_details", target_column: "id" },
+      "project_tasks:users": { source_table: "project_tasks", source_column: "assignee_id", target_table: "users", target_column: "id" }
+    };
+    const findRelationship = (left, right) => {
+      const candidates = (context.relationships || []).filter(relationship =>
+        (relationship.source_table === left && relationship.target_table === right) ||
+        (relationship.source_table === right && relationship.target_table === left)
+      );
+      const preference = preferredRelationship[[left, right].sort().join(":")];
+      return candidates.find(relationship => preference && Object.entries(preference).every(([key, value]) => relationship[key] === value)) || candidates[0];
+    };
+    const safeColumns = table => (context.tables?.[table]?.columns || [])
+      .map(column => String(column?.name || column || ""))
+      .filter(column => column && !isSensitiveFieldName(column))
+      .slice(0, 20);
+    const edgeBindings = relationshipPairs.map(([left, right]) => {
+      const relationship = findRelationship(left, right);
+      if (!relationship) return null;
+      return relationship.source_table === left
+        ? { relationship, from_column: relationship.source_column, to_column: relationship.target_column }
+        : { relationship, from_column: relationship.target_column, to_column: relationship.source_column };
+    });
+    if (edgeBindings.some(binding => !binding)) return null;
+
+    const steps = nodes.map((table, index) => {
+      const incoming = index > 0 ? edgeBindings[index - 1] : null;
+      const outgoing = index < edgeBindings.length ? edgeBindings[index] : null;
+      const columns = Array.from(new Set([
+        ...(context.tables?.[table]?.primary_keys || []),
+        incoming?.to_column,
+        outgoing?.from_column,
+        ...safeColumns(table)
+      ].filter(Boolean)));
+      return {
+        id: `s${index + 1}`,
+        type: index === nodes.length - 1 ? "final_query" : "source_query",
+        source_id: sourceId,
+        contract: {
+          question,
+          data_sources: ["postgresql"],
+          postgresql_sources: [sourceId],
+          required_tables: [table],
+          required_columns: columns.map(column => `${table}.${column}`),
+          relationships: [],
+          filters: index === 0 ? [
+            { table: "users", field: "first_name", operator: "case_insensitive_equals", value: firstName },
+            ...(lastName ? [{ table: "users", field: "last_name", operator: "case_insensitive_equals", value: lastName }] : [])
+          ] : [],
+          operations: ["lookup"],
+          limit: 50,
+          sorting: [],
+          entities: []
+        },
+        depends_on: index === 0 ? [] : [`s${index}`],
+        inputs: [],
+        input_bindings: index === 0 ? [] : [{ from_step: `s${index}`, from_column: incoming.from_column, to_table: table, to_column: incoming.to_column, operator: "in" }],
+        output_columns: columns,
+        purpose: index === 0
+          ? "Find the named user before traversing declared company relationships."
+          : `Traverse the declared relationship to ${sourceId}.${table}.`
+      };
+    });
+    const semanticPath = nodes.map((table, index) => {
+      const incoming = index > 0 ? edgeBindings[index - 1] : null;
+      const outgoing = index < edgeBindings.length ? edgeBindings[index] : null;
+      const primaryKey = (context.tables?.[table]?.primary_keys || [])[0] || null;
+      const column = index === 0
+        ? (outgoing?.from_column || primaryKey)
+        : (incoming?.to_column || primaryKey);
+      return { source_id: sourceId, table, column };
+    });
+    return {
+      data_sources: ["postgresql"],
+      postgresql_sources: [sourceId],
+      required_tables: [],
+      required_columns: [],
+      relationships: [],
+      filters: [],
+      operations: ["lookup"],
+      limit: 50,
+      confidence: 0.9,
+      named_relationship_lookup: true,
+      execution_plan: { mode: "multi_step", steps, final_step: steps.at(-1).id },
+      semantic_path: semanticPath,
+      semantic_path_evidence: edgeBindings.map(binding => `${sourceId}.${binding.relationship.source_table}.${binding.relationship.source_column} -> ${sourceId}.${binding.relationship.target_table}.${binding.relationship.target_column}`),
+      entity_target: { source_id: sourceId, table: nodes.at(-1) },
+      reasoning: "A named user was resolved first, then only declared same-source foreign-key relationships were traversed."
+    };
+  }
+
+  _build_possessive_task_assignment_plan(question) {
+    // Normalize a relationship phrasing into the same bounded, FK-backed
+    // plan used for the equivalent imperative form.  This is intentionally
+    // structural (task assignment + users + possessive company), not a
+    // free-form name guess.
+    const text = String(question || "");
+    const normalizedText = text.replace(/^\s*(?:show|find|list|display|give)(?:\s+me)?\s+/i, "");
+    const match = text.match(/\btasks?\s+(?:assigned\s+to\s+users?\s+belonging\s+to|belong(?:ing)?\s+to\s+employees?\s+at|of\s+employees?\s+at|for\s+users?\s+of|for\s+employees?\s+of)\s+([a-z][a-z'-]*)(?:\s+([a-z][a-z'-]*))?['\u2019]s\s+company\b/i) ||
+      normalizedText.match(/\b([a-z][a-z'-]*)(?:\s+([a-z][a-z'-]*))?['\u2019]s\s+company\s+(?:users?|employees?)\b[\s\S]*\btask/i);
+    if (!match) return null;
+    const [, firstName, lastName] = match;
+    return this._build_named_relationship_plan(`Show me ${firstName}${lastName ? ` ${lastName}` : ""}'s company users and their project task`);
+  }
+
+  _build_named_company_users_plan(question) {
+    const match = String(question || "").match(/^\s*(?:show|find|list|display|give)\s+(?:me\s+)?(.+?\bcompany)\s+users?\b/i);
+    if (!match) return null;
+    const companyName = match[1].trim();
+    if (tokenWords(companyName).length < 2) return null;
+    const sourceIds = Object.keys(this.contexts || {}).filter(sourceId => {
+      const context = this.contexts[sourceId] || {};
+      const columns = new Set((context.tables?.companies?.columns || []).map(column => String(column?.name || column).toLowerCase()));
+      return columns.has("name") && context.tables?.users && (context.relationships || []).some(relationship =>
+        relationship.source_table === "users" && relationship.source_column === "company_id" &&
+        relationship.target_table === "companies" && relationship.target_column === "id"
+      );
+    });
+    if (sourceIds.length !== 1) return null;
+
+    const sourceId = sourceIds[0];
+    const context = this.contexts[sourceId];
+    const safeColumns = table => (context.tables?.[table]?.columns || [])
+      .map(column => String(column?.name || column || ""))
+      .filter(column => column && !isSensitiveFieldName(column)).slice(0, 20);
+    const companyColumns = Array.from(new Set(["id", ...safeColumns("companies")]));
+    const userColumns = Array.from(new Set(["company_id", ...(context.tables?.users?.primary_keys || []), ...safeColumns("users")]));
+    const steps = [
+      {
+        id: "s1", type: "source_query", source_id: sourceId,
+        contract: { question, data_sources: ["postgresql"], postgresql_sources: [sourceId], required_tables: ["companies"], required_columns: companyColumns.map(column => `companies.${column}`), relationships: [], filters: [{ table: "companies", field: "name", operator: "contains", value: companyName }], operations: ["lookup"], limit: 50, sorting: [], entities: [] },
+        depends_on: [], inputs: [], input_bindings: [], output_columns: companyColumns,
+        purpose: "Find the named company before retrieving only its users."
+      },
+      {
+        id: "s2", type: "final_query", source_id: sourceId,
+        contract: { question, data_sources: ["postgresql"], postgresql_sources: [sourceId], required_tables: ["users"], required_columns: userColumns.map(column => `users.${column}`), relationships: [], filters: [], operations: ["lookup"], limit: 50, sorting: [], entities: [] },
+        depends_on: ["s1"], inputs: [], input_bindings: [{ from_step: "s1", from_column: "id", to_table: "users", to_column: "company_id", operator: "in" }], output_columns: userColumns,
+        purpose: "Retrieve only users linked to the matched company."
+      }
+    ];
+    return {
+      data_sources: ["postgresql"], postgresql_sources: [sourceId], required_tables: [], required_columns: [], relationships: [], filters: [], operations: ["lookup"], limit: 50, confidence: 0.9,
+      named_relationship_lookup: true, execution_plan: { mode: "multi_step", steps, final_step: "s2" },
+      semantic_path: [{ source_id: sourceId, table: "companies", column: "id" }, { source_id: sourceId, table: "users", column: "company_id" }],
+      semantic_path_evidence: [`${sourceId}.users.company_id -> ${sourceId}.companies.id`], entity_target: { source_id: sourceId, table: "users" },
+      reasoning: "A named company was resolved first, then only its declared users relationship was traversed."
+    };
+  }
+
   _conversation_reference(conversationContext) {
-    return conversationContext?.active_context || conversationContext?.pending_reference || null;
+    const active = conversationContext?.active_context || conversationContext?.pending_reference || null;
+    if (!active) return null;
+    const question = String(conversationContext?._reference_question || "");
+    const pluralReference = /\b(?:those|these|previous|prior|above)\b/i.test(question);
+    const related = Array.isArray(active.related_references) ? active.related_references : [];
+    if (!pluralReference || related.length === 0) return active;
+    const candidates = [active, ...related];
+    const match = candidates.find(reference => {
+      const sourceId = String(reference?.source_id || "").toLowerCase();
+      const table = String(reference?.table || "");
+      const entity = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table] || {};
+      const aliases = [table, entity.entity_type, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
+        .map(value => String(value || "").replace(/_/g, " ").trim().toLowerCase())
+        .filter(Boolean);
+      return aliases.some(alias => {
+        const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`\\b${escaped}(?:s)?\\b`, "i").test(question);
+      });
+    });
+    return match || active;
   }
 
   _record_set_reference_mode(question, active = null) {
@@ -657,6 +1115,137 @@ export class QuestionPlanner {
     }).filter(item => item.score > 0).sort((left, right) => right.score - left.score || left.column.localeCompare(right.column));
     if (!scored.length || (scored[1] && scored[1].score === scored[0].score)) return null;
     return { table: candidate.table, field: scored[0].column, operator: "=", value };
+  }
+
+  // Email and other approved identity qualifiers are stronger than display
+  // text.  Keep them attached to the schema-grounded identity entity before
+  // source selection or relationship traversal.  The column is accepted only
+  // when discovered on the candidate and follows the existing identity-field
+  // semantics; arbitrary column-name similarity is not enough.
+  _explicit_identity_filter(question, candidate) {
+    if (!candidate || typeof candidate !== "object") return null;
+    const value = extractEntitySearchText(question);
+    if (!value) return null;
+    const normalized = String(value).trim();
+    const columns = Array.isArray(candidate.columns) ? candidate.columns.map(String) : [];
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(normalized)) {
+      const identityColumn = columns.find(column => /^(?:email|email_address|login_email|username)$/i.test(column));
+      if (!identityColumn) return null;
+      return {
+        table: candidate.table,
+        field: identityColumn,
+        operator: "case_insensitive_equals",
+        value: normalized,
+        provenance: "authorized_discovered_identity_column"
+      };
+    }
+    return this._explicit_identifier_filter(question, candidate);
+  }
+
+  _question_has_explicit_identity_constraint(question) {
+    const value = extractEntitySearchText(question);
+    return Boolean(value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(String(value).trim()));
+  }
+
+  _identity_column_for_table(sourceId, table) {
+    const columns = (this.contexts?.[sourceId]?.tables?.[table]?.columns || [])
+      .map(column => String(column?.name || column || ""))
+      .filter(Boolean);
+    return columns.find(column => /^(?:email|email_address|login_email|username)$/i.test(column)) || null;
+  }
+
+  _is_identity_entity_table(sourceId, table) {
+    const info = this.contexts?.[sourceId]?.tables?.[table] || {};
+    const entity = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table] || {};
+    const text = [table, entity.entity_type, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])].join(" ");
+    if (/(?:^|\W)(?:user|person|member|account|profile|contact)(?:s|\W|$)/i.test(text)) return true;
+    const columns = (info.columns || []).map(column => String(column?.name || column || ""));
+    return columns.some(column => /^(?:first_name|last_name|full_name|email|email_address|username)$/i.test(column));
+  }
+
+  // Provider plans are still required to preserve an explicit identity
+  // predicate.  Add it only to authorized, discovered identity entities in
+  // the proposed plan; if none are present, leave the plan unchanged so the
+  // existing completeness/clarification path can fail closed.
+  _preserve_explicit_identity_filters(plan, question) {
+    if (!plan || !this._question_has_explicit_identity_constraint(question)) return;
+    const value = String(extractEntitySearchText(question) || "").trim();
+    const candidates = [];
+    const addCandidate = (container, sourceId, table, root = false) => {
+      if (!container || !sourceId || !table || !this._is_identity_entity_table(sourceId, table)) return;
+      const field = this._identity_column_for_table(sourceId, table);
+      if (!field) return;
+      candidates.push({ container, sourceId, table, field, root });
+    };
+    const steps = Array.isArray(plan.execution_plan?.steps) ? plan.execution_plan.steps : [];
+    for (const step of steps) {
+      const sourceId = String(step?.source_id || "").toLowerCase();
+      for (const table of step?.contract?.required_tables || []) addCandidate(step.contract, sourceId, table, !Array.isArray(step?.depends_on) || step.depends_on.length === 0);
+    }
+    if (candidates.length === 0) {
+      for (const sourceId of plan.postgresql_sources || []) {
+        for (const table of plan.required_tables || []) addCandidate(plan, String(sourceId).toLowerCase(), table);
+      }
+    }
+    const rootsBySource = new Set(candidates.filter(item => item.root).map(item => item.sourceId));
+    const scopedCandidates = rootsBySource.size > 0
+      ? candidates.filter(item => item.root || !rootsBySource.has(item.sourceId))
+      : candidates;
+    const unique = [...new Map(scopedCandidates.map(item => [`${item.sourceId}:${item.table}`, item])).values()];
+    for (const target of unique) {
+      const filter = {
+        table: target.table,
+        field: target.field,
+        operator: "case_insensitive_equals",
+        value,
+        provenance: "authorized_discovered_identity_column"
+      };
+      const filters = Array.isArray(target.container.filters) ? target.container.filters : [];
+      const alreadyBound = filters.some(existing =>
+        String(existing?.field || existing?.column || "").split(".").at(-1).toLowerCase() === target.field.toLowerCase() &&
+        String(existing?.value || "").toLowerCase() === value.toLowerCase()
+      );
+      if (!alreadyBound) target.container.filters = [...filters, filter];
+      if (target.container !== plan && Array.isArray(plan.required_tables) && plan.required_tables.includes(target.table)) {
+        const planFilters = Array.isArray(plan.filters) ? plan.filters : [];
+        if (!planFilters.some(existing => String(existing?.table || "").toLowerCase() === target.table.toLowerCase() && String(existing?.field || existing?.column || "").toLowerCase() === target.field.toLowerCase())) {
+          plan.filters = [...planFilters, filter];
+        }
+      }
+    }
+  }
+
+  // Apply an explicit identity qualifier only inside an already verified,
+  // source-qualified conversation record set.  This deliberately uses the
+  // discovered schema rather than a business-table name: an email-like
+  // qualifier is valid only when the active entity exposes an authorized
+  // email/username identity column, and a UUID-like value is valid only when
+  // it is one of the bounded record-set identities.
+  _active_record_set_identity_filter(question, active, tableInfo) {
+    const recordSet = active?.record_set;
+    if (!recordSet || !tableInfo) return null;
+    const value = extractEntitySearchText(question);
+    if (!value) return null;
+    const columns = (tableInfo.columns || []).map(column => String(column?.name || column || "")).filter(Boolean);
+    const normalizedValue = String(value).trim();
+    const isEmail = /\S+@\S+/.test(normalizedValue);
+    if (isEmail) {
+      const identityColumn = columns.find(column => /^(?:email|email_address|login_email|username)$/i.test(column));
+      if (!identityColumn) return { unsupported: true, value: normalizedValue };
+      return {
+        table: active.table,
+        field: identityColumn,
+        operator: "case_insensitive_equals",
+        value: normalizedValue
+      };
+    }
+    const values = Array.isArray(recordSet.values) ? recordSet.values.map(item => String(item)) : [];
+    const keyColumn = String(recordSet.key_column || "").trim();
+    const looksLikeStableId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalizedValue);
+    if (looksLikeStableId && keyColumn && values.includes(normalizedValue)) {
+      return { table: active.table, field: keyColumn, operator: "=", value: normalizedValue };
+    }
+    return null;
   }
 
   _named_record_value(question, candidate) {
@@ -858,8 +1447,13 @@ export class QuestionPlanner {
 
   _build_independent_candidate_plan(question, candidates, isCount, semanticCandidates = []) {
     const uniqueCandidates = [...new Map(candidates.map(candidate => [`${candidate.source_id}:${candidate.table}`, candidate])).values()];
-    const statusFilters = uniqueCandidates.map(candidate => this._verified_status_filter(candidate, question) ||
-      (this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null));
+    const candidateFilters = uniqueCandidates.map(candidate => {
+      const identity = this._explicit_identity_filter(question, candidate);
+      const status = this._verified_status_filter(candidate, question) ||
+        (this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null);
+      return [identity, status].filter(Boolean);
+    });
+    const statusFilters = candidateFilters.map(filters => filters.find(filter => filter.field && /status|state|workflow|lifecycle/i.test(String(filter.field))) || null);
     const statusIntent = uniqueCandidates.some(candidate => this._has_unverified_status_intent(candidate, question));
     const statusMeanings = new Set(statusFilters.filter(Boolean).map(filter => `${String(filter.operator || "").toLowerCase()}:${normalizedSemanticPhrase(filter.value)}`));
     if (statusIntent && (statusFilters.some(filter => !filter) || statusMeanings.size > 1)) {
@@ -893,7 +1487,7 @@ export class QuestionPlanner {
           required_tables: [candidate.table],
           required_columns: columns,
           relationships: [],
-          filters: statusFilters[index] ? [statusFilters[index]] : [],
+          filters: candidateFilters[index],
           operations,
           limit: isCount ? (canDeduplicate ? 50000 : null) : 50,
           sorting: [],
@@ -1871,6 +2465,196 @@ The final execution plan step objects must use:
     return this._build_context_for_llm();
   }
 
+  _semantic_role_key(candidate) {
+    const aliases = Array.isArray(candidate?.matched_aliases) ? candidate.matched_aliases : [];
+    const entityType = String(candidate?.entity_type || "").replace(/^technical:/i, "");
+    const roleText = aliases[0] || entityType || candidate?.table || "entity";
+    const tokens = tokenWords(roleText).filter(token => !["technical"].includes(token));
+    return tokens.join("_") || "entity";
+  }
+
+  semantic_intent(question) {
+    const text = String(question || "");
+    const candidates = findSemanticCandidates(text, this.contexts);
+    const lexicalCandidates = Object.entries(this.contexts || {}).flatMap(([source_id, context]) => Object.keys(context?.tables || {})
+      .filter(table => text.toLowerCase().includes(String(table).replace(/_/g, " ").toLowerCase()))
+      .map(table => ({ source_id, table, entity_type: context.semantic_catalog?.entities?.[table]?.entity_type || `technical:${table}`, matched_aliases: [table] })));
+    const requested = [...candidates.filter(candidate => (candidate.matched_aliases || []).length > 0), ...lexicalCandidates]
+      .map(candidate => ({ source_id: candidate.source_id, table: candidate.table, entity_type: candidate.entity_type, matched_aliases: candidate.matched_aliases || [] }));
+    const assignment = /\b(?:assigned|assignee|assignment|belong|belonging|belongs|associated)\b/i.test(text);
+    const taskRequested = /\b(?:task|tasks)\b/i.test(text);
+    // A clear anchor plus relational pronouns/conjunctions expresses a
+    // related-entity request even when the user does not use a formal
+    // "belongs to" verb (for example, "meetings with their projects").
+    const relationshipCue = /\b(?:with|alongside|their|its)\b/i.test(text) ||
+      /\b(?:each|every)\s+[a-z][a-z'-]*['\u2019]s\b/i.test(text);
+    const taskTargets = Object.entries(this.contexts || {}).flatMap(([source_id, context]) => Object.entries(context?.tables || {})
+      .filter(([table, info]) => {
+        const entity = context?.semantic_catalog?.entities?.[table] || {};
+        const semanticTask = [entity.entity_type, ...(entity.synonyms || [])].some(value => /\btask\b/i.test(String(value || "")));
+        const taskTable = /(?:^|_)tasks?(?:_|$)/i.test(table);
+        const assignmentColumn = (info?.columns || []).some(column => /(?:^|_)(?:assignee|assigned(?:_to)?|assigned_user)(?:_|$)/i.test(String(column?.name || column)));
+        const userAssignmentEdge = (context.relationships || []).some(relationship => {
+          const tables = [relationship?.source_table, relationship?.target_table].map(value => String(value || "").toLowerCase());
+          const columns = [relationship?.source_column, relationship?.target_column].map(value => String(value || "").toLowerCase());
+          const hasUserEndpoint = tables.some(value => /(?:^|_)users?(?:_|$)/i.test(value));
+          const hasTaskEndpoint = tables.includes(String(table).toLowerCase());
+          const assignmentKey = columns.some(value => /(?:assignee|assigned|user|owner)/i.test(value));
+          return hasTaskEndpoint && hasUserEndpoint && assignmentKey;
+        });
+        return (semanticTask && (assignmentColumn || userAssignmentEdge)) || (taskTable && assignmentColumn);
+      })
+      .map(([table]) => ({ source_id, table })));
+    // Select the last relationship marker so nested wording such as
+    // "assigned to users belonging to Alex Smith" resolves the named
+    // identity after the final marker, not the intermediate noun phrase.
+    const identityMatches = [...text.matchAll(/\b(?:belonging\s+to|associated\s+with|assigned\s+to|to|for|of)\s+([A-Za-z][A-Za-z'-]*)\s+([A-Za-z][A-Za-z'-]*)(?:['\u2019]s)?\b/gi)];
+    const identityMatch = identityMatches.at(-1) || text.match(/\b([A-Za-z][A-Za-z'-]*)\s+([A-Za-z][A-Za-z'-]*)['\u2019]s\s+company\b/i);
+    const genericIdentityWords = new Set(["which", "what", "who", "where", "when", "that", "this", "these", "those"]);
+    const namedAnchor = identityMatch && !genericIdentityWords.has(String(identityMatch[1]).toLowerCase()) && !genericIdentityWords.has(String(identityMatch[2]).toLowerCase())
+      ? { kind: "named_identity", value: `${identityMatch[1]} ${String(identityMatch[2]).replace(/['\u2019]s$/i, "")}` }
+      : null;
+    const operations = [];
+    if (this._is_count_question(text, candidates)) operations.push("count");
+    if (this._is_recent_records_question(text)) operations.push("ranking");
+    if (/\b(?:exists?|any|whether|are there)\b/i.test(text)) operations.push("existence");
+    const negated = /\b(?:not|without|never|no)\b/i.test(text);
+    const branchEntities = [...new Map(requested.map(item => [`${item.source_id}:${item.table}`, item])).values()];
+    const relationshipIntent = assignment ||
+      (relationshipCue && new Set(branchEntities.map(item => this._semantic_role_key(item))).size > 1);
+    const branchGroups = new Map();
+    for (const item of branchEntities) {
+      const role = this._semantic_role_key(item);
+      if (!branchGroups.has(role)) branchGroups.set(role, []);
+      branchGroups.get(role).push({ source_id: item.source_id, table: item.table });
+    }
+    const requestedAttributes = [];
+    if (/\bnames?\b/i.test(text)) requestedAttributes.push("name");
+    if (/\btitles?\b/i.test(text)) requestedAttributes.push("title");
+    const requestedBranches = relationshipIntent && branchGroups.size > 1
+      ? [...branchGroups.entries()].map(([role, entities]) => ({ id: `branch_${role}`, required_entities: entities }))
+      : branchEntities.length > 1 && /\band\b/i.test(text)
+        ? branchEntities.map((item, index) => ({ id: `branch_${index + 1}`, required_entities: [{ source_id: item.source_id, table: item.table }] }))
+      : (taskRequested ? [{ id: "task_assignment", required_entities: [] }] : []);
+    const anchorCandidate = relationshipIntent
+      ? branchEntities
+        .map(candidate => ({ candidate, position: Math.min(...(candidate.matched_aliases || []).map(alias => text.toLowerCase().indexOf(String(alias).toLowerCase())).filter(position => position >= 0)) }))
+        .filter(item => Number.isFinite(item.position))
+        .sort((left, right) => left.position - right.position)[0]?.candidate
+      : null;
+    const anchorEntities = namedAnchor
+      ? [namedAnchor]
+      : (anchorCandidate ? [{ kind: "entity_anchor", source_id: anchorCandidate.source_id, table: anchorCandidate.table, role: this._semantic_role_key(anchorCandidate) }] : []);
+    const explicitIdentityValue = extractEntitySearchText(text);
+    const identityConstraints = explicitIdentityValue && /^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(String(explicitIdentityValue).trim())
+      ? [{ kind: "email", value: String(explicitIdentityValue).trim() }]
+      : [];
+    return {
+      version: 1,
+      anchor_entities: anchorEntities,
+      requested_entities: requested,
+      requested_branches: requestedBranches,
+      requested_attributes: requestedAttributes,
+      filters: identityConstraints,
+      identity_constraints: identityConstraints,
+      operations,
+      relationship_intent: relationshipIntent,
+      task_assignment: taskRequested && assignment,
+      required_final_candidates: taskRequested && assignment ? taskTargets : [],
+      aggregate: operations.includes("count"),
+      temporal: operations.includes("ranking"),
+      negation: negated,
+      source_constraints: []
+    };
+  }
+
+  assess_semantic_completeness(plan, question) {
+    const intent = this.semantic_intent(question);
+    const steps = Array.isArray(plan?.execution_plan?.steps) ? plan.execution_plan.steps : [];
+    const targets = steps.flatMap(step => (step?.contract?.required_tables || []).map(table => ({ source_id: step.source_id, table: String(table) })));
+    const tables = new Set([...(plan?.required_tables || []), ...targets.map(target => target.table)]);
+    const planOperations = new Set((Array.isArray(plan?.operations) ? plan.operations : [])
+      .map(operation => String(operation || "").trim().toLowerCase())
+      .filter(Boolean));
+    if (Array.isArray(intent.identity_constraints) && intent.identity_constraints.length > 0) {
+      const plannedFilters = [
+        ...(Array.isArray(plan?.filters) ? plan.filters : []),
+        ...steps.flatMap(step => Array.isArray(step?.contract?.filters) ? step.contract.filters : [])
+      ];
+      const identityPreserved = intent.identity_constraints.every(constraint => plannedFilters.some(filter =>
+        /email|username|login/i.test(String(filter?.field || filter?.column || "")) &&
+        String(filter?.value || "").toLowerCase() === String(constraint.value || "").toLowerCase()
+      ));
+      if (!identityPreserved) return { complete: false, intent, reason: "missing_explicit_identity_predicate" };
+    }
+    const missingOperations = intent.operations.filter(operation => {
+      const normalized = String(operation || "").trim().toLowerCase();
+      if (normalized === "existence") return !(planOperations.has("existence") || planOperations.has("exists"));
+      return !planOperations.has(normalized);
+    });
+    if (missingOperations.length > 0) {
+      return { complete: false, intent, reason: `missing_requested_operation:${missingOperations[0]}` };
+    }
+    if (intent.aggregate && plan?.candidate_resolution?.mode === "independent") return { complete: true, intent, reason: null };
+    if (intent.relationship_intent && !intent.task_assignment) {
+      const bindings = steps.flatMap(step => Array.isArray(step?.input_bindings) ? step.input_bindings : []);
+      const independentMode = plan?.candidate_resolution?.mode === "independent";
+      const independentSteps = steps.length > 1 && steps.every(step =>
+        (!Array.isArray(step?.depends_on) || step.depends_on.length === 0) &&
+        (!Array.isArray(step?.input_bindings) || step.input_bindings.length === 0)
+      );
+      const independent = independentSteps || (independentMode && !steps.some(step =>
+        (Array.isArray(step?.depends_on) && step.depends_on.length > 0) ||
+        (Array.isArray(step?.input_bindings) && step.input_bindings.length > 0)
+      ));
+      const path = Array.isArray(plan?.semantic_path) ? plan.semantic_path : [];
+      const pathSources = path.map(step => `${step?.source_id || ""}:${step?.table || ""}`);
+      const stepSources = steps.flatMap(step => (step?.contract?.required_tables || []).map(table => `${step?.source_id || ""}:${table}`));
+      const pathMatchesSteps = path.length > 1 && pathSources.every(key => stepSources.includes(key));
+      const declaredVerifiedEdges = (Array.isArray(plan?.relationships) && plan.relationships.length > 0) ||
+        (Array.isArray(plan?.semantic_path_evidence) && plan.semantic_path_evidence.length > 0);
+      const completeDependencyChain = steps.length > 1 && bindings.length >= steps.length - 1 && steps.slice(1).every((step, index) =>
+        (Array.isArray(step.depends_on) && step.depends_on.includes(steps[index].id)) ||
+        bindings.some(binding => binding.from_step === steps[index].id)
+      );
+      const contextualDependencyChain = Boolean(plan?.needs_conversation_context) && completeDependencyChain;
+      const directVerifiedRelationshipFilter = declaredVerifiedEdges &&
+        Array.isArray(plan?.filters) &&
+        plan.filters.some(filter => {
+          const filterTable = String(filter?.table || "").toLowerCase();
+          const filterColumn = String(filter?.field || filter?.column || "").split(".").at(-1).toLowerCase();
+          return Array.isArray(plan?.relationships) && plan.relationships.some(relationship => {
+            const sourceTable = String(relationship?.source_table || "").toLowerCase();
+            const targetTable = String(relationship?.target_table || "").toLowerCase();
+            const sourceColumn = String(relationship?.source_column || "").toLowerCase();
+            const targetColumn = String(relationship?.target_column || "").toLowerCase();
+            return ((filterTable === sourceTable && filterColumn === sourceColumn) ||
+              (filterTable === targetTable && filterColumn === targetColumn)) &&
+              tables.has(relationship.source_table) && tables.has(relationship.target_table);
+          });
+        });
+      if (independent || ((!pathMatchesSteps && !declaredVerifiedEdges) && !contextualDependencyChain) || (!completeDependencyChain && !directVerifiedRelationshipFilter)) {
+        return { complete: false, intent, reason: "incomplete_verified_relationship_path" };
+      }
+    }
+    if (intent.task_assignment) {
+      const finalTask = intent.required_final_candidates.some(target => targets.some(actual => actual.source_id === target.source_id && actual.table === target.table));
+      const finalStep = steps.at(-1);
+      const finalIsTask = finalStep && intent.required_final_candidates.some(target => target.source_id === finalStep.source_id && target.table === finalStep.contract?.required_tables?.[0]);
+      const hasAssignmentBinding = steps.some(step => (step.input_bindings || []).some(binding => /assignee|assigned|user/i.test(`${binding.from_column} ${binding.to_column}`)));
+      const hasNamedIdentity = !intent.anchor_entities.length || steps.some(step => (step.contract?.filters || []).some(filter => /first_name|last_name|name|email/i.test(String(filter.field || ""))));
+      if (!finalTask || !finalIsTask || !hasAssignmentBinding || !hasNamedIdentity) return { complete: false, intent, reason: "incomplete_task_assignment_path" };
+    }
+    const executableBranches = intent.requested_branches.filter(branch => branch.required_entities.length > 0);
+    const missingBranch = executableBranches.find(branch => !branch.required_entities.some(required =>
+      [...targets, ...(plan?.required_tables || []).map(table => ({ source_id: null, table: String(table) }))].some(actual =>
+        actual.table === required.table && (!required.source_id || !actual.source_id || actual.source_id === required.source_id)
+      )
+    ));
+    if (missingBranch) return { complete: false, intent, reason: `missing_requested_branch:${missingBranch.id}` };
+    return { complete: true, intent, reason: null };
+  }
+
   _build_resolved_entity_context(conversationContext) {
     if (!conversationContext || typeof conversationContext !== "object" || Array.isArray(conversationContext)) {
       return [];
@@ -2279,7 +3063,8 @@ The final execution plan step objects must use:
       Array.isArray(normalized.ambiguous_context_candidates) &&
       normalized.ambiguous_context_candidates.length > 1 &&
       normalized.candidate_resolution?.mode !== "independent" &&
-      !this._conversation_reference(conversationContext)
+      !this._conversation_reference(conversationContext) &&
+      !this._question_has_explicit_identity_constraint(question)
     ) {
       return normalized;
     }
@@ -2359,6 +3144,7 @@ The final execution plan step objects must use:
       completed.filters ?? []
     );
     completed.filters = this._complete_filter_references(completed);
+    this._preserve_explicit_identity_filters(completed, question);
     completed.filters = this._normalize_verified_status_filters(
       completed.filters,
       completed.postgresql_sources ?? [],
@@ -2425,6 +3211,13 @@ The final execution plan step objects must use:
     completed.entities = this._normalize_entities(
       completed.entities ?? []
     );
+
+    if (!Array.isArray(completed.identity_constraints)) completed.identity_constraints = [];
+    const explicitIdentityValue = extractEntitySearchText(question);
+    if (explicitIdentityValue && /^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(String(explicitIdentityValue).trim()) &&
+      !completed.identity_constraints.some(item => String(item?.value || "").toLowerCase() === String(explicitIdentityValue).trim().toLowerCase())) {
+      completed.identity_constraints.push({ kind: "email", value: String(explicitIdentityValue).trim() });
+    }
 
     completed.needs_conversation_context = Boolean(
       completed.needs_conversation_context ?? false
@@ -2565,6 +3358,7 @@ The final execution plan step objects must use:
       limit: plan.limit ?? null,
       required_relationships: Array.isArray(plan.relationships) ? deepcopy(plan.relationships) : [],
       requested_fields: Array.isArray(plan.required_columns) ? [...plan.required_columns] : [],
+      identity_constraints: Array.isArray(plan.identity_constraints) ? deepcopy(plan.identity_constraints) : [],
       conversation_reference: plan.needs_conversation_context ? (active ? deepcopy(active) : null) : null,
       unresolved_ambiguities: Array.isArray(plan.ambiguous_context_candidates) ? deepcopy(plan.ambiguous_context_candidates) : [],
       source_ids: Array.isArray(plan.postgresql_sources) ? [...plan.postgresql_sources] : []
@@ -2745,7 +3539,23 @@ The final execution plan step objects must use:
       return aliases.some(mentionsEntityPhrase);
     });
     const asksAcrossSources = /\b(?:both|combine|across|sources?)\b/i.test(questionText);
-    if (hasExplicitTarget || asksAcrossSources) return plan;
+    if (hasExplicitTarget || asksAcrossSources) {
+      // A relationship follow-up may name the target explicitly ("which
+      // company") while still depending on the bounded prior record set.
+      // Preserve the final dependency endpoint as the new conversation
+      // target; do not leave the parent user table as the active referent.
+      if (hasExplicitTarget && plan.execution_plan && !asksAcrossSources) {
+        const finalStep = Array.isArray(plan.execution_plan.steps)
+          ? plan.execution_plan.steps.find(step => step.id === plan.execution_plan.final_step) || plan.execution_plan.steps.at(-1)
+          : null;
+        const finalTable = finalStep?.contract?.required_tables?.[0];
+        if (finalTable && String(finalTable).toLowerCase() !== table.toLowerCase()) {
+          plan.needs_conversation_context = true;
+          plan.entity_target = { source_id: sourceId, table: finalTable };
+        }
+      }
+      return plan;
+    }
 
     // A plural conversational reference is executable only when its
     // source-qualified key and bounded values still match the active schema.
@@ -2764,6 +3574,11 @@ The final execution plan step objects must use:
     const executionPlan = plan.execution_plan;
     if (executionPlan) {
       plan.needs_conversation_context = true;
+      const finalStep = Array.isArray(executionPlan.steps)
+        ? executionPlan.steps.find(step => step.id === executionPlan.final_step) || executionPlan.steps.at(-1)
+        : null;
+      const finalTable = finalStep?.contract?.required_tables?.[0];
+      if (finalTable) plan.entity_target = { source_id: sourceId, table: finalTable };
       return plan;
     }
 
@@ -2812,6 +3627,17 @@ The final execution plan step objects must use:
     const recordSetValues = Array.isArray(recordSet?.values)
       ? [...new Set(recordSet.values.filter(value => value !== null && value !== undefined).map(String))]
       : [];
+    const activeTableInfo = this.contexts?.[sourceId]?.tables?.[activeTable] || null;
+    const activeIdentityFilter = this._active_record_set_identity_filter(question, active, activeTableInfo);
+    if (activeIdentityFilter?.unsupported) {
+      return {
+        ...plan,
+        clarification_required: {
+          type: "unsupported_identity_qualifier",
+          message: "I could not verify that identity qualifier for the referenced records, so I did not broaden the retrieval."
+        }
+      };
+    }
     const recordSetMode = this._record_set_reference_mode(question, active);
     const sourceMentionPattern = Object.keys(this.contexts || {}).map(source => source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).filter(Boolean).join("|");
     const explicitMultiSource = /\b(?:both|combine|across|sources?)\b/i.test(question) || (sourceMentionPattern ? new RegExp(`\\b(?:${sourceMentionPattern})\\b`, "i").test(question) : false);
@@ -2825,6 +3651,32 @@ The final execution plan step objects must use:
     const strongestRequestedCandidate = sourceCandidates
       .filter(candidate => Array.isArray(candidate.matched_aliases) && candidate.matched_aliases.length > 0)
       .sort((left, right) => right.score - left.score)[0];
+    const requestedNonActiveCandidates = sourceCandidates.filter(candidate =>
+      candidate.table !== activeTable &&
+      Array.isArray(candidate.matched_aliases) &&
+      candidate.matched_aliases.length > 0
+    );
+    const vagueRelationshipRole = /\b(?:associated|related|linked|with)\b/i.test(question) &&
+      !/\b(?:belongs?|owns?|created|assigned|member|managed|reported|stakeholder|client|consultant)\b/i.test(question);
+    if (vagueRelationshipRole) {
+      const candidateTables = new Set(requestedNonActiveCandidates.map(candidate => String(candidate.table)));
+      const roleEdges = (this.contexts?.[sourceId]?.relationships || []).filter(relationship => {
+        const sourceTable = String(relationship?.source_table || "");
+        const targetTable = String(relationship?.target_table || "");
+        return (sourceTable === activeTable && candidateTables.has(targetTable)) ||
+          (targetTable === activeTable && candidateTables.has(sourceTable));
+      });
+      const edgeSignatures = new Set(roleEdges.map(relationship => `${relationship.source_table}.${relationship.source_column}->${relationship.target_table}.${relationship.target_column}`));
+      if (edgeSignatures.size > 1) {
+        return {
+          ...plan,
+          clarification_required: {
+            type: "relationship_role_ambiguous",
+            message: "I found multiple verified relationship roles for that request. Please specify whether you mean ownership, creation, assignment, membership, or another role."
+          }
+        };
+      }
+    }
     // Prefer the shortest verified same-source relationship unless the user
     // explicitly asks to combine sources. If provider/fallback candidate
     // selection chose another entity, repair only the target table and bind
@@ -2837,8 +3689,17 @@ The final execution plan step objects must use:
           (rel.target_table === activeTable && rel.source_table === candidate.table)
         ))
         .sort((left, right) => right.score - left.score)[0];
-      const directTargetWasRequested = directTarget && strongestRequestedCandidate &&
-        String(strongestRequestedCandidate.table).toLowerCase() === String(directTarget.table).toLowerCase();
+      // When the question names exactly one non-anchor entity, that entity is
+      // the requested endpoint even if the anchor noun receives the same
+      // lexical score (for example, "users belonging to that company").
+      // Keep the normal score-based choice only when several non-anchor
+      // candidates remain genuinely viable.
+      const directTargetWasRequested = directTarget && (
+        (requestedNonActiveCandidates.length === 1 &&
+          String(requestedNonActiveCandidates[0].table).toLowerCase() === String(directTarget.table).toLowerCase()) ||
+        (requestedNonActiveCandidates.length !== 1 && strongestRequestedCandidate &&
+          String(strongestRequestedCandidate.table).toLowerCase() === String(directTarget.table).toLowerCase())
+      );
       const directTargetIsDefaultProjectTarget = !strongestRequestedCandidate || strongestRequestedCandidate.entity_type === "project";
       if (!directTargetWasRequested && !directTargetIsDefaultProjectTarget) {
         // A different explicit target (for example company) must continue
@@ -2849,13 +3710,16 @@ The final execution plan step objects must use:
         String(plan.required_tables[0]).toLowerCase() === String(directTarget.table).toLowerCase() &&
         (plan.postgresql_sources || []).length === 1 && String(plan.postgresql_sources[0]).toLowerCase() === sourceId;
       if (alreadyTargetsDirectEntity) return plan;
-        const relationship = (this.contexts?.[sourceId]?.relationships || []).find(rel =>
-          (rel.source_table === activeTable && rel.target_table === directTarget.table) ||
-          (rel.target_table === activeTable && rel.source_table === directTarget.table)
-        );
-        const sourceColumn = relationship?.source_table === activeTable ? relationship.source_column : relationship?.target_column;
+        const relationship = (this.contexts?.[sourceId]?.relationships || []).find(rel => {
+          const connects = (rel.source_table === activeTable && rel.target_table === directTarget.table) ||
+            (rel.target_table === activeTable && rel.source_table === directTarget.table);
+          if (!connects) return false;
+          const activeColumn = rel.source_table === activeTable ? rel.source_column : rel.target_column;
+          return stableKeys[activeColumn] !== undefined && stableKeys[activeColumn] !== null;
+        });
+        const activeColumn = relationship?.source_table === activeTable ? relationship.source_column : relationship?.target_column;
         const targetColumn = relationship?.source_table === activeTable ? relationship.target_column : relationship?.source_column;
-        const boundValue = sourceColumn ? stableKeys[sourceColumn] : undefined;
+        const boundValue = activeColumn ? stableKeys[activeColumn] : undefined;
         if (relationship && boundValue !== undefined && boundValue !== null) {
           const targetInfo = this.contexts[sourceId]?.tables?.[directTarget.table] || {};
           const safeColumns = (targetInfo.columns || []).map(column => String(column?.name || column || ""))
@@ -2870,6 +3734,7 @@ The final execution plan step objects must use:
             relationships: [relationship],
             filters: [{ table: directTarget.table, field: targetColumn, operator: "=", value: boundValue }],
             operations: ["lookup"],
+            entity_target: { source_id: sourceId, table: directTarget.table },
             needs_conversation_context: true,
             ambiguous_context_candidates: []
           };
@@ -2944,7 +3809,14 @@ The final execution plan step objects must use:
         ...(tableInfo.primary_keys || []),
         ...safeColumns
       ])).filter(Boolean);
-       const filters = index === 0 ? [{ table: node.table, field: bindingColumn, operator: bindingOperator, value: bindingValue }] : [];
+       const filters = index === 0
+         ? [
+           { table: node.table, field: bindingColumn, operator: bindingOperator, value: bindingValue },
+           ...(activeIdentityFilter && String(node.table).toLowerCase() === activeTable.toLowerCase()
+             ? [activeIdentityFilter]
+             : [])
+         ]
+         : [];
       return {
         id: `s${index + 1}`,
         type: index === path.steps.length - 1 ? "final_query" : "source_query",

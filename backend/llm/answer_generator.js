@@ -142,7 +142,12 @@ ANSWERING RULES:
 24. If the evidence was truncated, answer only from the evidence actually
     provided. Do not reconstruct or guess the missing information.
 
-25. Preserve important exact values such as:
+25. If the evidence contains retrieval_completeness with complete=false or
+    status="partial", explicitly disclose that the retrieved coverage is
+    bounded or incomplete. Do not claim that all/every/none/total records
+    were established from partial, truncated, or unavailable source data.
+
+26. Preserve important exact values such as:
     - names
     - IDs
     - dates
@@ -152,17 +157,17 @@ ANSWERING RULES:
     - statuses
     when they are present in the evidence.
 
-26. Never claim that a record, entity, event, relationship, or value exists
+27. Never claim that a record, entity, event, relationship, or value exists
     unless it appears in the retrieved evidence.
 
-27. Do not say "there are no records" merely because the retrieved result is
+28. Do not say "there are no records" merely because the retrieved result is
     empty. Instead, say that no matching records were found in the retrieved
     data, unless the evidence explicitly establishes absence.
 
-28. The final response should feel like a polished answer to the user,
+29. The final response should feel like a polished answer to the user,
     not a description of the retrieval system.
 
-29. Before finishing, internally check:
+30. Before finishing, internally check:
     - Did I answer the actual question?
     - Is every factual claim supported by the evidence?
     - Did I avoid guessing?
@@ -326,7 +331,11 @@ Return ONLY the final answer to the user.
     };
 
     const boundedRows = rows.slice(0, 10).map(formatRow).filter(Boolean);
-    const suffix = rows.length > boundedRows.length ? ` Showing ${boundedRows.length} of ${rows.length} retrieved records.` : "";
+    const coverage = evidence?.retrieval_completeness;
+    const coverageSuffix = coverage?.complete === false
+      ? " Coverage is partial or bounded; this is not a complete result set."
+      : "";
+    const suffix = `${rows.length > boundedRows.length ? ` Showing ${boundedRows.length} of ${rows.length} retrieved records.` : ""}${coverageSuffix}`;
     if (boundedRows.length === 1) return `I found one matching record: ${boundedRows[0]}.${suffix}`;
     return `I found ${rows.length} matching records in the retrieved data:${suffix}\n${boundedRows.map(item => `- ${item}`).join("\n")}`;
   }

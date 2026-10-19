@@ -185,6 +185,12 @@ export class RAGPipeline {
     if (active && !validReference(active)) {
       if (typeof this.context_manager.clearActiveContext === "function") this.context_manager.clearActiveContext();
       conversationContext.active_context = null;
+    } else if (active && Array.isArray(active.related_references)) {
+      const related = active.related_references.filter(validReference);
+      active.related_references = related;
+      if (typeof this.context_manager.setActiveContext === "function") {
+        this.context_manager.setActiveContext(active);
+      }
     }
     const pending = conversationContext?.pending_reference;
     if (pending && !validReference(pending)) {
@@ -274,6 +280,31 @@ export class RAGPipeline {
   }
 
   _updateActiveEntityFromExecution(question, plan, results) {
+    const previousActive = typeof this.context_manager.getActiveContext === "function"
+      ? this.context_manager.getActiveContext()
+      : null;
+    const withRelatedReferences = (reference, sourceId, table) => {
+      const inherited = Array.isArray(reference?.related_references) ? reference.related_references : [];
+      const priorIsDistinct = reference && (String(reference.source_id || "").toLowerCase() !== String(sourceId || "").toLowerCase() || String(reference.table || "") !== String(table || ""));
+      const candidates = priorIsDistinct ? [reference, ...inherited] : inherited;
+      const compact = item => ({
+        source_id: item.source_id,
+        table: item.table,
+        ...(item.record_set ? { record_set: item.record_set } : {}),
+        ...(item.stable_keys ? { stable_keys: item.stable_keys } : {}),
+        ...(item.relationship_keys ? { relationship_keys: item.relationship_keys } : {}),
+        ...(item.validation_status ? { validation_status: item.validation_status } : {}),
+        ...(item.provenance ? { provenance: item.provenance } : {})
+      });
+      const seen = new Set();
+      const bounded = candidates.filter(item => item && typeof item === "object").map(compact).filter(item => {
+        const key = `${String(item.source_id || "").toLowerCase()}:${String(item.table || "")}:${JSON.stringify(item.record_set || item.stable_keys || {})}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, 4);
+      return bounded.length ? bounded : undefined;
+    };
     const allRows = (results || []).flatMap(item => Array.isArray(item?.retrieval?.rows) ? item.retrieval.rows.map(row => ({ row, source_id: item.source_id, result: item })) : []);
     const finalStep = plan?.execution_plan?.final_step;
     // For a dependency plan, only the final retrieval is the answer entity.
@@ -302,7 +333,7 @@ export class RAGPipeline {
           column,
           [...new Set(rows.map(item => item.row[column]).filter(value => value !== null && value !== undefined).map(String))]
         ]));
-        const priorActive = typeof this.context_manager.getActiveContext === "function" ? this.context_manager.getActiveContext() : null;
+        const priorActive = previousActive;
         const inherited = priorActive?.source_id === sourceIds[0] && priorActive?.table === table ? priorActive : {};
         this.context_manager.setActiveContext({
           ...inherited,
@@ -311,7 +342,8 @@ export class RAGPipeline {
           record_set: { key_column: keyColumn, values, count: values.length },
           relationship_keys: relationshipKeys,
           validation_status: "retrieval_evidence_confirmed",
-          provenance: "successful_source_retrieval"
+          provenance: "successful_source_retrieval",
+          ...(withRelatedReferences(priorActive, sourceIds[0], table) ? { related_references: withRelatedReferences(priorActive, sourceIds[0], table) } : {})
         });
         if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
         return;
@@ -341,7 +373,7 @@ export class RAGPipeline {
     const resolvedTable = target?.source_id === source_id && target?.table
       ? target.table
       : (result?.sources?.[0]?.tables?.[0] || finalContract?.required_tables?.[0] || (Array.isArray(plan?.required_tables) ? plan.required_tables[0] : undefined));
-    const prior = (typeof this.context_manager.getActiveContext === "function" ? this.context_manager.getActiveContext() : null) || (typeof this.context_manager.getPendingReference === "function" ? this.context_manager.getPendingReference() : null);
+    const prior = previousActive || (typeof this.context_manager.getPendingReference === "function" ? this.context_manager.getPendingReference() : null);
     const priorKeys = prior?.stable_keys && typeof prior.stable_keys === "object" ? Object.entries(prior.stable_keys) : [];
     // A related child record (for example a transcript) must not replace the
     // meeting/project that the user established. Keep the parent anchor when
@@ -351,7 +383,14 @@ export class RAGPipeline {
       if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
       return;
     }
-    this.context_manager.setActiveContext({ ...Object.fromEntries(invariantFields), source_id, table: resolvedTable, stable_keys: Object.fromEntries(stableEntries) });
+    const relatedReferences = withRelatedReferences(prior, source_id, resolvedTable);
+    this.context_manager.setActiveContext({
+      ...Object.fromEntries(invariantFields),
+      source_id,
+      table: resolvedTable,
+      stable_keys: Object.fromEntries(stableEntries),
+      ...(relatedReferences ? { related_references: relatedReferences } : {})
+    });
     if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
   }
 
@@ -1305,6 +1344,44 @@ export class RAGPipeline {
     return sourceStatus;
   }
 
+  _buildRetrievalCompleteness(question, plan, sourceStatus, evidence, overallStatus) {
+    const text = String(question || "");
+    const requestsExhaustiveCoverage = /\b(?:all|every|each|none|without|never)\b/i.test(text);
+    const boundedLimit = Number.isInteger(plan?.limit) && plan.limit > 0;
+    const hasTruncatedEvidence = value => {
+      if (!value || typeof value !== "object") return false;
+      if (value.truncated === true) return true;
+      if (value.postgresql?.truncated === true || value.security_logs?.retrieval?.truncated === true) return true;
+      if (Array.isArray(value.items) && value.items.some(item => item?.truncated === true)) return true;
+      if (Array.isArray(value.complex_execution?.steps) && value.complex_execution.steps.some(step =>
+        step?.evidence?.truncated === true || (Array.isArray(step?.evidence?.items) && step.evidence.items.some(item => item?.truncated === true))
+      )) return true;
+      return false;
+    };
+
+    const reasons = [];
+    if (requestsExhaustiveCoverage && boundedLimit) reasons.push(`bounded_limit:${plan.limit}`);
+    if (hasTruncatedEvidence(evidence)) reasons.push("retrieval_truncated");
+    if (["partial_source_failure", "source_unavailable"].includes(String(overallStatus || ""))) {
+      reasons.push(String(overallStatus));
+    }
+
+    const sources = Object.values(sourceStatus || {}).map(source => ({
+      source_id: source.source_id || null,
+      retrieval_status: source.retrieval_status || "unknown",
+      data_available: Boolean(source.data_available)
+    }));
+
+    return {
+      status: reasons.length > 0 ? "partial" : "complete",
+      complete: reasons.length === 0,
+      requested_exhaustive_coverage: requestsExhaustiveCoverage,
+      bounded_by_plan_limit: boundedLimit,
+      reasons,
+      sources
+    };
+  }
+
   async _executeComplexPostgresql(question, validatedPlan) {
     const complexPlan = await this.complex_query_planner.build(question, validatedPlan);
 
@@ -1454,6 +1531,9 @@ export class RAGPipeline {
     try {
       rawPlan = await this.planner.plan(planningQuestion, conversationContext, this.llm_usage_tracker);
     } catch (error) {
+      if (error?.isReadOnlyMutationViolation || error?.code === "READ_ONLY_MUTATION_REJECTED") {
+        return this._planningFailure(cleanQuestion, "read_only_source", "Connected authoritative data sources are read-only, so I cannot perform that INSERT, UPDATE, DELETE, or schema modification request.");
+      }
       return this._planningFailure(cleanQuestion, "PLAN_SCHEMA_INVALID", "I could not identify one verified, authorized data path for that request. Please specify the record or data area you want to inspect.");
     }
     if (rawPlan.clarification_required && typeof rawPlan.clarification_required.message === "string") {
@@ -1532,6 +1612,14 @@ export class RAGPipeline {
     }
 
     const validatedPlan = validation.plan;
+
+    const completenessFn = this.planner?.assess_semantic_completeness || this.planner?.assessSemanticCompleteness;
+    if (typeof completenessFn === "function") {
+      const completeness = completenessFn.call(this.planner, validatedPlan, cleanQuestion);
+      if (!completeness?.complete) {
+        return this._planningFailure(cleanQuestion, "PLAN_SEMANTICALLY_INCOMPLETE", "I could not verify a complete authorized data path for every requested result, so I did not run a broad retrieval.");
+      }
+    }
 
     const dataSources = this._getDataSources(validatedPlan);
     const securityResource = this._getSecurityResource(validatedPlan, dataSources);
@@ -1689,11 +1777,25 @@ export class RAGPipeline {
       postgresResults.filter(result => result.source_type === "postgresql")
     );
     const rawEvidence = this._prepareEvidence(postgresResults, securityResult, complexExecution);
+    rawEvidence.retrieval_completeness = this._buildRetrievalCompleteness(
+      cleanQuestion,
+      validatedPlan,
+      sourceStatus,
+      rawEvidence,
+      overallRetrievalStatus
+    );
     if (validatedPlan.candidate_resolution) rawEvidence.candidate_resolution = validatedPlan.candidate_resolution;
     if (candidateResolutionResult) rawEvidence.candidate_resolution_result = candidateResolutionResult;
     if (followupIdentityResolution) rawEvidence.relationship_resolution = followupIdentityResolution;
     const evidence = sanitizeEvidence(rawEvidence);
     const internalEvidenceMetrics = measureAnswerEvidenceStructure(evidence);
+    const executionSteps = Array.isArray(validatedPlan?.execution_plan?.steps)
+      ? validatedPlan.execution_plan.steps
+      : [];
+    const finalExecutionStepId = validatedPlan?.candidate_resolution?.mode !== "independent" &&
+      validatedPlan?.execution_plan?.mode === "multi_step" && executionSteps.length > 1
+      ? validatedPlan.execution_plan.final_step
+      : null;
     const relationshipAnswerOptions = followupIdentityResolution
       ? {
         relationship: {
@@ -1704,7 +1806,19 @@ export class RAGPipeline {
           evidence_relationships: followupIdentityResolution.evidence_relationships
         }
       }
-      : {};
+      : (finalExecutionStepId
+        ? {
+          relationship: {
+            final_step_id: finalExecutionStepId,
+            source_ids: postgresqlSources,
+            path: validatedPlan.semantic_path || [],
+            evidence_relationships: validatedPlan.semantic_path_evidence || [],
+            step_ids: validatedPlan.relationship_plan_kind === "verified_graph"
+              ? executionSteps.map(step => step.id)
+              : undefined
+          }
+        }
+        : {});
     const answerEvidence = typeof this.evidence_manager.prepareAnswerEvidence === "function"
       ? this.evidence_manager.prepareAnswerEvidence(evidence, relationshipAnswerOptions)
       : evidence;

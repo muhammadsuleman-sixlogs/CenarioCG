@@ -48,6 +48,49 @@ test("ordinary aggregate wording reaches SQL, mocked execution, and answer synth
   assert.equal(result.answer.includes("DB1 has 11"), true);
 });
 
+test("meeting-project-company retrieval uses the approved dependent path and compact graph evidence", async () => {
+  const pipeline = offlinePipeline();
+  const calls = [];
+  let answerEvidence = null;
+  pipeline.executor = {
+    async execute(sql, sourceId, parameters = []) {
+      validateReadOnlyQuery(sql);
+      calls.push({ sql, sourceId, parameters });
+      if (/FROM "sessions"/i.test(sql)) return { rows: [{ project_id: "p1", meeting_title: "Planning" }], row_count: 1, columns: ["project_id", "meeting_title"] };
+      if (/FROM "projects"/i.test(sql)) return { rows: [{ project_id: "p1", project_title: "Launch" }], row_count: 1, columns: ["project_id", "project_title"] };
+      if (/FROM "project_details"/i.test(sql)) return { rows: [{ id: "p1", company_id: "c1", project_name: "Launch" }], row_count: 1, columns: ["id", "company_id", "project_name"] };
+      return { rows: [{ id: "c1", name: "Acme" }], row_count: 1, columns: ["id", "name"] };
+    }
+  };
+  pipeline.answer_generator = { async generate(_question, evidence) { answerEvidence = evidence; return "Planning belongs to Launch at Acme."; } };
+
+  const result = await pipeline.ask("Which meeting belongs to which project and company?", bothSources);
+  assert.equal(result.retrieval_status, "success_with_data");
+  assert.deepEqual(calls.map(call => `${call.sourceId || call.source_id}:${/FROM "sessions"/i.test(call.sql) ? "sessions" : /FROM "projects"/i.test(call.sql) ? "projects" : /FROM "project_details"/i.test(call.sql) ? "project_details" : "companies"}`), [
+    "db2:sessions", "db2:projects", "db1:project_details", "db1:companies"
+  ]);
+  assert.equal(calls.some(call => call.sourceId === "db2" && /FROM "companies"/i.test(call.sql)), false);
+  assert.deepEqual(answerEvidence.items.map(item => item.execution_step_id), ["s1", "s2", "s3", "s4"]);
+  assert.equal(result.evidence.complex_execution.steps.length, 4);
+});
+
+test("semantic relationship rejection prevents retrieval and answer generation", async () => {
+  const pipeline = offlinePipeline();
+  const validPlan = await pipeline.planner.plan("Show me recent meetings.");
+  pipeline.planner.plan = async () => validPlan;
+  pipeline.planner.assess_semantic_completeness = () => ({ complete: false, reason: "incomplete_verified_relationship_path" });
+  let retrievalCalled = false;
+  let answerCalled = false;
+  pipeline.executor = { async execute() { retrievalCalled = true; throw new Error("must not execute"); } };
+  pipeline.answer_generator = { async generate() { answerCalled = true; return "must not run"; } };
+
+  const result = await pipeline.ask("Which meeting belongs to which project and company?", bothSources);
+  assert.equal(result.retrieval_status, "planning_failed");
+  assert.equal(result.error.type, "PLAN_SEMANTICALLY_INCOMPLETE");
+  assert.equal(retrievalCalled, false);
+  assert.equal(answerCalled, false);
+});
+
 test("recent meeting and latest transcript plans reach ordered read-only SQL and answers", async () => {
   for (const [question, expectedTable, expectedOrder] of [
     ["Show me recent meetings.", "sessions", /ORDER BY "sessions"\."created_at" DESC/i],

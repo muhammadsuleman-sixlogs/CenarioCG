@@ -59,12 +59,23 @@ function emptyStage() {
 export function createLlmUsageTracker(requestId = null) {
   return {
     request_id: requestId || null,
+    planner_context: null,
     answer_evidence: null,
     stages: {
       planner: emptyStage(),
       answer: emptyStage()
     }
   };
+}
+
+/**
+ * Attach privacy-safe structural measurements for the planner context.  The
+ * context itself is deliberately not retained; only bounded counts and
+ * character lengths are exposed for offline/provider-efficiency analysis.
+ */
+export function recordPlannerContextMetrics(tracker, metrics = {}) {
+  if (!tracker || typeof tracker !== "object") return;
+  tracker.planner_context = { ...metrics };
 }
 
 function safeJsonLength(value) {
@@ -220,6 +231,7 @@ export function snapshotLlmUsage(tracker) {
     request_id: tracker?.request_id || null,
     call_count: allCalls.length,
     fallback_attempts: planner.fallback_attempts + answer.fallback_attempts,
+    planner_context: tracker?.planner_context || null,
     answer_evidence: tracker?.answer_evidence || null,
     stages: { planner, answer },
     totals: {
@@ -258,6 +270,7 @@ export default {
   extractProviderUsage,
   logLlmUsage,
   recordLlmAttempt,
+  recordPlannerContextMetrics,
   measureAnswerEvidenceStructure,
   recordAnswerEvidenceMetrics,
   snapshotLlmUsage

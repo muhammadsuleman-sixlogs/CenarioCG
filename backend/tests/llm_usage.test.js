@@ -145,4 +145,38 @@ test("planner records provider usage at its existing model boundary", async () =
   assert.equal(usage.stages.planner.calls[0].model, "mock-planner-model");
   assert.deepEqual(usage.stages.planner.totals.input_tokens, { value: 41, status: "provider_reported" });
   assert.deepEqual(usage.stages.planner.totals.output_tokens, { value: 12, status: "provider_reported" });
+  assert.equal(usage.planner_context.mode, "provider");
+  assert.ok(usage.planner_context.context_characters > 0);
+  assert.ok(usage.planner_context.prompt_characters > 0);
+  assert.ok(usage.planner_context.focused_table_count >= 1);
+  assert.ok(usage.planner_context.candidate_count >= 0);
+});
+
+test("deterministic planning records zero provider-context cost", async () => {
+  const planner = new QuestionPlanner(loadTestContexts());
+  let providerCalls = 0;
+  planner.client = {
+    responses: {
+      async create() {
+        providerCalls += 1;
+        return { output_text: "{}" };
+      }
+    }
+  };
+  const tracker = createLlmUsageTracker("request-deterministic");
+  const plan = await planner.plan("show me user umar daraz status", null, tracker);
+  const usage = snapshotLlmUsage(tracker);
+
+  assert.equal(plan.named_entity_lookup, true);
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(usage.planner_context, {
+    mode: "deterministic",
+    context_characters: 0,
+    prompt_characters: 0,
+    focused_table_count: 0,
+    focused_relationship_count: 0,
+    verified_path_count: 0,
+    candidate_count: 0
+  });
+  assert.equal(usage.stages.planner.call_count, 0);
 });

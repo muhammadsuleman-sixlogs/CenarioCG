@@ -49,6 +49,20 @@ export const SENSITIVE_INTENT_PATTERNS = [
   /\b(user|admin|account|db|database|system)\s+(password|passwords|token|tokens|secret|secrets)\b/i,
 ];
 
+// Mutation intent is kept separate from SQL validation.  This is a bounded
+// semantic gate for natural-language requests so a write request cannot be
+// reinterpreted as an unrelated read plan.  Inflected words such as
+// "updated" or "deleted" are intentionally not matched: they commonly
+// describe read-only history/status questions.
+export const MUTATION_INTENT_PATTERNS = [
+  /^\s*(?:please\s+)?(?:insert|add|create)\b[\s\S]*(?:\b(?:record|row|data|user|company|ticket|task|project|entry|into)\b)/i,
+  /^\s*(?:please\s+)?(?:delete|remove|erase|destroy)\b[\s\S]*(?:\b(?:all|from|record|row|data|user|company|ticket|task|project|entry)\b)/i,
+  /^\s*(?:please\s+)?(?:update|change|modify|rename|set)\b[\s\S]*(?:\b(?:to|as|=|record|row|data|field|name|value)\b)/i,
+  /\b(?:drop|alter|truncate)\b\s+(?:table|schema|database|view|index|column|all|the)\b/i,
+  /\b(?:run|execute|perform)\b[\s\S]{0,40}\b(?:write|mutation|modification)\b\s+(?:query|operation|command)\b/i,
+  /\b(?:make|apply)\b\s+(?:a\s+)?(?:write|data|record|source)?\s*(?:change|changes|modification|modifications)\b/i,
+];
+
 /**
  * Return true when a field/column name matches a generic
  * sensitive-data or credential pattern.
@@ -225,6 +239,18 @@ export function is_sensitive_question_intent(question) {
 
 export const isSensitiveQuestionIntent = is_sensitive_question_intent;
 
+/**
+ * Return true when a question explicitly asks the connected source to
+ * mutate data or schema.  Read-only questions about historical changes,
+ * deleted/status records, or closed items do not match these command forms.
+ */
+export function is_mutation_question_intent(question) {
+  if (typeof question !== "string" || !question.trim()) return false;
+  return MUTATION_INTENT_PATTERNS.some(pattern => pattern.test(question.trim()));
+}
+
+export const isMutationQuestionIntent = is_mutation_question_intent;
+
 export default {
   SENSITIVE_FIELD_PATTERNS,
   SENSITIVE_INTENT_PATTERNS,
@@ -240,4 +266,7 @@ export default {
   sanitizeSchemaContext,
   is_sensitive_question_intent,
   isSensitiveQuestionIntent,
+  MUTATION_INTENT_PATTERNS,
+  is_mutation_question_intent,
+  isMutationQuestionIntent,
 };

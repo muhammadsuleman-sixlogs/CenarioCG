@@ -97,6 +97,38 @@ test("bounded evidence lineage does not expand large read-only list results", ()
   assert.equal(evidence.postgresql.truncated, true);
 });
 
+test("exhaustive bounded retrieval is explicitly marked partial even at the row boundary", () => {
+  const pipeline = new RAGPipeline(new ContextManager());
+  const completeness = pipeline._buildRetrievalCompleteness(
+    "List all projects.",
+    { limit: 50 },
+    { db1: { source_id: "db1", retrieval_status: "success_with_data", data_available: true } },
+    { postgresql: { rows: Array.from({ length: 50 }, (_, index) => ({ id: index })), truncated: false } },
+    "success_with_data"
+  );
+
+  assert.equal(completeness.complete, false);
+  assert.equal(completeness.status, "partial");
+  assert.deepEqual(completeness.reasons, ["bounded_limit:50"]);
+});
+
+test("partial source failure prevents complete-coverage claims for aggregate requests", () => {
+  const pipeline = new RAGPipeline(new ContextManager());
+  const completeness = pipeline._buildRetrievalCompleteness(
+    "What is the total number of projects?",
+    { limit: null },
+    {
+      db1: { source_id: "db1", retrieval_status: "success_with_data", data_available: true },
+      db2: { source_id: "db2", retrieval_status: "retrieval_failed", data_available: false }
+    },
+    {},
+    "partial_source_failure"
+  );
+
+  assert.equal(completeness.complete, false);
+  assert.deepEqual(completeness.reasons, ["partial_source_failure"]);
+});
+
 test("multi-step DB1 to DB2 execution preserves explicit source IDs through bindings", async () => {
   const calls = [];
   const pipeline = new RAGPipeline(new ContextManager());

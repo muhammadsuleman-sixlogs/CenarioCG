@@ -77,6 +77,29 @@ test("singular and plural follow-ups use the existing verified relationship path
   }
 });
 
+test("an explicit email qualifier narrows the bounded user set before relationship resolution", async () => {
+  const contexts = loadTestContexts();
+  const planner = new QuestionPlanner(contexts);
+  planner.client = OFFLINE_PROVIDER;
+  const conversation = { active_context: activeUserSet(Array.from({ length: 11 }, (_, index) => `u-${index + 1}`)), history: [], entities: [], pending_reference: null };
+  const plan = await planner.plan("Which company does this user belong to? umar.daraz@sixlogs.com", conversation);
+  const firstStep = plan.execution_plan.steps[0];
+  const filters = firstStep.contract.filters;
+  assert.deepEqual(filters[0], { table: "users", field: "id", operator: "in", value: conversation.active_context.record_set.values });
+  assert.deepEqual(filters[1], { table: "users", field: "email", operator: "case_insensitive_equals", value: "umar.daraz@sixlogs.com" });
+  assert.deepEqual(plan.semantic_path.map(step => `${step.source_id}.${step.table}`), ["db1.users", "db1.companies"]);
+});
+
+test("vague project association does not guess among multiple verified user roles", async () => {
+  const contexts = loadTestContexts();
+  const planner = new QuestionPlanner(contexts);
+  planner.client = OFFLINE_PROVIDER;
+  const conversation = { active_context: activeUserSet(), history: [], entities: [], pending_reference: null };
+  const plan = await planner.plan("Show me the projects associated with those users", conversation);
+  assert.equal(plan.clarification_required?.type, "relationship_role_ambiguous");
+  assert.equal(plan.execution_plan, undefined);
+});
+
 test("singular multi-identity follow-ups permit only a verified common result", async () => {
   const contexts = loadTestContexts();
   const planner = new QuestionPlanner(contexts);
@@ -287,6 +310,57 @@ test("pipeline preserves the multi-row user set and sends only final relationshi
   assert.equal(captured[1].relationship_resolution.scope, "common_across_matching_records");
   assert.equal(second.evidence.items.length, 12);
   assert.equal(second.evidence.sources.length, 2);
+});
+
+test("pipeline applies an explicit email to the prior user set before selecting the company", async () => {
+  const contexts = loadTestContexts();
+  const manager = new ContextManager();
+  const pipeline = new RAGPipeline(manager);
+  pipeline.plan_validator = new QuestionPlanValidator(contexts);
+  pipeline.planValidator = pipeline.plan_validator;
+  pipeline.planner = new QuestionPlanner(contexts);
+  pipeline.planner.client = OFFLINE_PROVIDER;
+  pipeline.source_router = new SourceRouter(contexts);
+  pipeline.entity_resolver = { async resolve() { return []; } };
+  const allUsers = Array.from({ length: 11 }, (_, index) => ({
+    id: `u-${index + 1}`,
+    email: index === 0 ? "umar.daraz@sixlogs.com" : `other-${index + 1}@example.test`,
+    company_id: "c1",
+    first_name: "Umar",
+    last_name: "Daraz",
+    consultant_status: "active"
+  }));
+  const capturedSql = [];
+  let queryCount = 0;
+  pipeline.executor = {
+    async execute(sql) {
+      validateReadOnlyQuery(sql);
+      capturedSql.push(sql);
+      queryCount += 1;
+      if (/FROM\s+"users"|JOIN\s+"users"/i.test(sql)) {
+        const rows = /LOWER\("users"\."email"\)/i.test(sql) ? [allUsers[0]] : allUsers;
+        return { rows, row_count: rows.length, columns: ["id", "email", "company_id", "first_name", "last_name", "consultant_status"] };
+      }
+      return { rows: [{ id: "c1", name: "Cenario" }], row_count: 1, columns: ["id", "name"] };
+    }
+  };
+  pipeline.answer_generator = { async generate() { return "Cenario"; } };
+  const auth = { workspace_id: "offline", authorization: { postgresql_sources: ["db1"], security_resources: [] } };
+
+  await pipeline.ask("Show me user Umar Daraz status", auth);
+  const result = await pipeline.ask("Which company does this user belong to? umar.daraz@sixlogs.com", auth);
+
+  assert.equal(result.retrieval_status, "success_with_data");
+  assert.equal(queryCount, 3);
+  assert.ok(capturedSql.some(sql => /"users"\."email"\s+ILIKE\s+%s/i.test(sql)));
+  assert.equal(manager.getActiveContext().table, "companies");
+  assert.equal(manager.getActiveContext().stable_keys.id, "c1");
+  assert.equal(manager.getActiveContext().related_references[0].table, "users");
+
+  const companyUsers = await pipeline.ask("Show me all users belonging to that company", auth);
+  assert.equal(companyUsers.retrieval_status, "success_with_data");
+  assert.ok(capturedSql.some(sql => /JOIN\s+"users"/i.test(sql) && /"users"\."company_id"\s*=\s+%s/i.test(sql)));
+  assert.equal(manager.getActiveContext().table, "users");
 });
 
 test("answer-generation metrics remain structural and provider usage remains separate", async () => {

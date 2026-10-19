@@ -187,6 +187,21 @@ test("fallback answers continue to use complete internal evidence", () => {
   assert.equal(internalEvidence.sources[0].rows.length, 10);
 });
 
+test("answer instructions and fallback disclose bounded retrieval coverage", () => {
+  const answerGenerator = new AnswerGenerator({});
+  const evidence = {
+    rows: [{ id: "p1", name: "Alpha" }],
+    retrieval_completeness: {
+      status: "partial",
+      complete: false,
+      reasons: ["bounded_limit:50"]
+    }
+  };
+
+  assert.match(answerGenerator.buildPrompt("List all projects", evidence), /complete=false|partial|bounded/i);
+  assert.match(answerGenerator.buildFallbackAnswer("List all projects", evidence), /partial|bounded/i);
+});
+
 test("answer evidence preparation does not mutate its input", () => {
   const { internalEvidence } = prepareAnswerEvidence([
     makeResult("db1", makeRows("db1", 10))
@@ -240,4 +255,21 @@ test("complex relationship evidence keeps canonical rows and strips wrapper copi
   assert.equal(answerEvidence.final_result.sources[0].rows, undefined);
   assert.deepEqual(internalEvidence.complex_execution.steps[0].evidence.rows, [{ id: "p1" }]);
   assert.deepEqual(internalEvidence.sources[0].rows, [{ id: "p1" }]);
+});
+
+test("verified graph answer evidence retains bounded rows from every relationship step", () => {
+  const evidence = {
+    items: [
+      { evidence_id: "e1", source_id: "db2", execution_step_id: "s1", table: "sessions", row: { project_id: "p1" } },
+      { evidence_id: "e2", source_id: "db2", execution_step_id: "s2", table: "projects", row: { project_id: "p1" } },
+      { evidence_id: "e3", source_id: "db1", execution_step_id: "s3", table: "project_details", row: { id: "p1", company_id: "c1" } },
+      { evidence_id: "e4", source_id: "db1", execution_step_id: "s4", table: "companies", row: { id: "c1", name: "Acme" } }
+    ],
+    sources: []
+  };
+  const compact = new EvidenceManager().prepareAnswerEvidence(evidence, {
+    relationship: { final_step_id: "s4", step_ids: ["s1", "s2", "s3", "s4"], path: [], evidence_relationships: [] }
+  });
+  assert.deepEqual(compact.items.map(item => item.execution_step_id), ["s1", "s2", "s3", "s4"]);
+  assert.deepEqual(compact.items.at(-1).row, { id: "c1", name: "Acme" });
 });

@@ -363,7 +363,10 @@ export class EvidenceManager {
   _prepareRelationshipAnswerEvidence(answerEvidence, relationship = {}) {
     const allItems = Array.isArray(answerEvidence?.items) ? answerEvidence.items : [];
     const finalStepId = relationship.final_step_id || null;
-    const finalItems = finalStepId
+    const requestedStepIds = new Set(Array.isArray(relationship.step_ids) ? relationship.step_ids.map(String) : []);
+    const finalItems = requestedStepIds.size > 0
+      ? allItems.filter(item => requestedStepIds.has(String(item?.execution_step_id || "")))
+      : finalStepId
       ? allItems.filter(item => String(item?.execution_step_id || "") === String(finalStepId))
       : allItems;
 
