@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import fs from "fs";
 import os from "os";
 import { join } from "path";
-import { attachSemanticCatalog, deriveTechnicalEntities, findSemanticCandidates } from "../context/semantic_catalog.js";
+import { attachSemanticCatalog, catalogFingerprint, deriveTechnicalEntities, findSemanticCandidates, getSemanticCatalogStatus, reconcileSemanticCatalog } from "../context/semantic_catalog.js";
 import { contextFingerprint, publishContextGeneration, rollbackContextGeneration } from "../context/context_store.js";
 import { findCrossSourceCandidates } from "../context/cross_source_inference.js";
 import { QuestionPlanner } from "../planning/question_planner.js";
+import { OFFLINE_PROVIDER } from "./test_context.js";
 
 function context(source_id, tables, relationships = []) {
   return { source_id, tables, relationships };
@@ -25,6 +26,24 @@ function fixtureContexts() {
   };
 }
 
+function approvedCatalog() {
+  return {
+    catalog_version: 1,
+    provenance: { kind: "application_owned_semantic_overlay", business_approval_required_for_new_mappings: true },
+    sources: {
+      db1: { entities: { project_details: { entity_type: "project", synonyms: ["project", "projects"], provenance: ["approved fixture"] } } },
+      db2: { entities: { projects: { entity_type: "project", synonyms: ["project", "projects"], provenance: ["approved fixture"] } } }
+    },
+    verified_paths: [{
+      id: "project-uuid",
+      steps: [{ source_id: "db1", table: "project_details", column: "id" }, { source_id: "db2", table: "projects", column: "project_id" }],
+      evidence_relationships: [],
+      validation_status: "validated",
+      provenance: ["approved fixture"]
+    }]
+  };
+}
+
 test("new technical tables are planner-visible without an approved semantic mapping", async () => {
   const raw = fixtureContexts();
   const catalog = { provenance: { kind: "application_owned_semantic_overlay", business_approval_required_for_new_mappings: true }, sources: {}, verified_paths: [] };
@@ -33,7 +52,7 @@ test("new technical tables are planner-visible without an approved semantic mapp
   assert.equal(candidates[0].table, "risk_signals");
   assert.equal(contexts.db2.semantic_catalog.entities.risk_signals.technical_entity, true);
   const planner = new QuestionPlanner(contexts);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const plan = await planner.plan("show risk signals");
   assert.deepEqual(plan.postgresql_sources, ["db2"]);
   assert.deepEqual(plan.required_tables, ["risk_signals"]);
@@ -81,3 +100,59 @@ test("generation publication is fingerprinted, skips unchanged schemas, retains 
   }
 });
 
+test("schema generation automatically reconciles compatible approved semantics and rollback restores the matching snapshot", () => {
+  const directory = fs.mkdtempSync(join(os.tmpdir(), "cenariocg-semantic-generation-"));
+  try {
+    const catalog = approvedCatalog();
+    const firstContexts = fixtureContexts();
+    const first = publishContextGeneration(firstContexts, { directory, now: new Date("2026-01-01T00:00:00.000Z"), retention: 3, semanticCatalog: catalog });
+    const unchanged = publishContextGeneration(firstContexts, { directory, now: new Date("2026-01-01T00:01:00.000Z"), retention: 3, semanticCatalog: catalog });
+    assert.equal(unchanged.published, false);
+
+    const changedContexts = fixtureContexts();
+    changedContexts.db1.tables.field_assets.columns.push({ name: "serial_code", type: "text" });
+    const second = publishContextGeneration(changedContexts, { directory, now: new Date("2026-01-01T00:02:00.000Z"), retention: 3, semanticCatalog: catalog });
+    const secondCatalog = JSON.parse(fs.readFileSync(join(directory, "generations", second.generation, "semantic_catalog.json"), "utf8"));
+    assert.equal(secondCatalog.technical_fingerprint, catalogFingerprint(changedContexts));
+    assert.equal(secondCatalog.provenance.reconciliation.schema_generation, second.generation);
+    assert.deepEqual(secondCatalog.provenance.reconciliation.invalidated_references, []);
+    const secondStatus = getSemanticCatalogStatus(changedContexts, secondCatalog, Date.parse(secondCatalog.generated_at) + 1);
+    assert.equal(secondStatus.freshness_status, "fresh");
+    assert.equal(secondStatus.fingerprint_status, "verified");
+
+    const rollback = rollbackContextGeneration(first.generation, { directory });
+    assert.equal(rollback.generation, first.generation);
+    const rollbackCatalog = JSON.parse(fs.readFileSync(join(directory, "generations", first.generation, "semantic_catalog.json"), "utf8"));
+    assert.equal(rollbackCatalog.provenance.reconciliation.schema_generation, first.generation);
+    assert.equal(rollbackCatalog.technical_fingerprint, catalogFingerprint(firstContexts));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("incompatible approved relationship paths are invalidated without approving replacements", () => {
+  const broken = fixtureContexts();
+  broken.db2.tables.projects.columns = [{ name: "project_code", type: "text" }];
+  const reconciled = reconcileSemanticCatalog(broken, approvedCatalog(), { generation: "fixture-generation", validatedAt: new Date("2026-01-01T00:00:00.000Z") });
+  assert.equal(reconciled.verified_paths.length, 0);
+  assert.ok(reconciled.provenance.reconciliation.invalidated_references.some(item => item.kind === "relationship_path" && item.reason === "step_unavailable"));
+  assert.equal(reconciled.sources.db2.entities.projects.entity_type, "project");
+});
+
+test("semantic incompatibility prevents publication and retains the active generation", () => {
+  const directory = fs.mkdtempSync(join(os.tmpdir(), "cenariocg-semantic-failure-"));
+  try {
+    const contexts = fixtureContexts();
+    const first = publishContextGeneration(contexts, { directory, now: new Date("2026-01-01T00:00:00.000Z"), retention: 3, semanticCatalog: approvedCatalog() });
+    assert.throws(() => publishContextGeneration(contexts, {
+      directory,
+      now: new Date("2026-01-01T00:01:00.000Z"),
+      retention: 3,
+      semanticCatalog: { sources: {}, verified_paths: [] }
+    }), /provenance|incompatible/i);
+    const active = JSON.parse(fs.readFileSync(join(directory, "active_generation.json"), "utf8"));
+    assert.equal(active.generation, first.generation);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

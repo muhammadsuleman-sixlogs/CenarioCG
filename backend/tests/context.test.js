@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { ContextManager } from "../context/context_manager.js";
-import { loadContext, loadAllContexts } from "../context/context_store.js";
+import { loadContext } from "../context/context_store.js";
+import { loadTestContexts } from "./test_context.js";
 import {
   MultiDiGraph,
   buildMultiSourceContextGraph,
@@ -62,7 +63,7 @@ test("ContextManager bounds conversation turns, text length, and manages entitie
 });
 
 test("ContextStore loads both db1 and db2 contexts correctly", () => {
-  const allContexts = loadAllContexts();
+  const allContexts = loadTestContexts();
   assert.ok(allContexts.db1);
   assert.ok(allContexts.db2);
   assert.strictEqual(allContexts.db1.source_id, "db1");

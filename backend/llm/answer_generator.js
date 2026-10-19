@@ -1,5 +1,10 @@
 import { getOpenAIClient, OPENAI_MODEL } from "./openai_client.js";
 import { EvidenceManager } from "./evidence_manager.js";
+import {
+  measureAnswerEvidenceStructure,
+  recordAnswerEvidenceMetrics,
+  recordLlmAttempt
+} from "./usage_tracker.js";
 import { sanitizeOutputText } from "../security/output_security_policy.js";
 
 /**
@@ -168,7 +173,7 @@ Return ONLY the final answer to the user.
 `.trim();
   }
 
-  async generate(questionOrOptions, evidence = null, retrieval = null, sources = null) {
+  async generate(questionOrOptions, evidence = null, retrieval = null, sources = null, usageTracker = null) {
     let cleanQuestion;
     let cleanEvidence;
 
@@ -192,6 +197,13 @@ Return ONLY the final answer to the user.
     }
 
     const prompt = this.buildPrompt(cleanQuestion, cleanEvidence);
+    if (usageTracker) {
+      const structure = measureAnswerEvidenceStructure(cleanEvidence);
+      recordAnswerEvidenceMetrics(usageTracker, {
+        ...structure,
+        prompt_characters: prompt.length
+      });
+    }
     const modelToUse = this.model || OPENAI_MODEL;
 
     let answer = "";
@@ -204,12 +216,27 @@ Return ONLY the final answer to the user.
           input: prompt
         });
 
+        recordLlmAttempt(usageTracker, {
+          stage: "answer",
+          transport: "responses",
+          model: modelToUse,
+          response,
+          status: response?.output_text || response?.output?.[0]?.content?.[0]?.text ? "success" : "empty"
+        });
+
         if (response?.output_text) {
           answer = response.output_text.trim();
         } else if (response?.output?.[0]?.content?.[0]?.text) {
           answer = response.output[0].content[0].text.trim();
         }
       } catch (err) {
+        recordLlmAttempt(usageTracker, {
+          stage: "answer",
+          transport: "responses",
+          model: modelToUse,
+          status: "error",
+          error: err
+        });
         // Fall back to chat completions if responses API is not supported by endpoint
         answer = "";
       }
@@ -217,14 +244,33 @@ Return ONLY the final answer to the user.
 
     // 2. Fall back to Chat Completions API
     if (!answer && this.client?.chat?.completions?.create) {
-      const response = await this.client.chat.completions.create({
-        model: modelToUse,
-        messages: [{ role: "user", content: prompt }]
-      });
+      try {
+        const response = await this.client.chat.completions.create({
+          model: modelToUse,
+          messages: [{ role: "user", content: prompt }]
+        });
 
-      const content = response.choices?.[0]?.message?.content;
-      if (typeof content === "string") {
-        answer = content.trim();
+        recordLlmAttempt(usageTracker, {
+          stage: "answer",
+          transport: "chat_completions",
+          model: modelToUse,
+          response,
+          status: typeof response.choices?.[0]?.message?.content === "string" ? "success" : "empty"
+        });
+
+        const content = response.choices?.[0]?.message?.content;
+        if (typeof content === "string") {
+          answer = content.trim();
+        }
+      } catch (err) {
+        recordLlmAttempt(usageTracker, {
+          stage: "answer",
+          transport: "chat_completions",
+          model: modelToUse,
+          status: "error",
+          error: err
+        });
+        throw err;
       }
     }
 
@@ -239,9 +285,55 @@ Return ONLY the final answer to the user.
 
     return answer;
   }
+
+  /**
+   * Produce a bounded answer directly from already-sanitized evidence when
+   * the external answer provider is temporarily unavailable. This is not a
+   * second planner or retrieval path: it never queries a source and only
+   * renders fields that were already returned by the authorized retrieval.
+   */
+  buildFallbackAnswer(question, evidence) {
+    const rows = Array.isArray(evidence?.rows)
+      ? evidence.rows
+      : (Array.isArray(evidence?.postgresql?.rows) ? evidence.postgresql.rows : []);
+
+    if (!rows.length) {
+      return "I could not verify a matching record in the retrieved data.";
+    }
+
+    const blocked = /password|passwd|secret|token|api[_-]?key|credential/i;
+    const preferred = [
+      "ticket_number", "ticket_id", "invoice_number", "meeting_title", "project_name",
+      "name", "title", "subject", "status", "priority", "created_at", "updated_at", "id"
+    ];
+    const valueText = value => {
+      if (value === null || value === undefined) return "";
+      if (typeof value === "object") {
+        try { return JSON.stringify(value); } catch { return String(value); }
+      }
+      return String(value);
+    };
+    const formatRow = row => {
+      const keys = Object.keys(row || {}).filter(key => !blocked.test(key));
+      const selected = [
+        ...preferred.filter(key => keys.includes(key)),
+        ...keys.filter(key => !preferred.includes(key))
+      ].slice(0, 8);
+      return selected
+        .map(key => `${key}: ${valueText(row[key])}`)
+        .filter(item => item.split(": ").slice(1).join(": ").length > 0)
+        .join("; ");
+    };
+
+    const boundedRows = rows.slice(0, 10).map(formatRow).filter(Boolean);
+    const suffix = rows.length > boundedRows.length ? ` Showing ${boundedRows.length} of ${rows.length} retrieved records.` : "";
+    if (boundedRows.length === 1) return `I found one matching record: ${boundedRows[0]}.${suffix}`;
+    return `I found ${rows.length} matching records in the retrieved data:${suffix}\n${boundedRows.map(item => `- ${item}`).join("\n")}`;
+  }
 }
 
 AnswerGenerator.prototype.build_prompt = AnswerGenerator.prototype.buildPrompt;
+AnswerGenerator.prototype.build_fallback_answer = AnswerGenerator.prototype.buildFallbackAnswer;
 
 export default {
   AnswerGenerator

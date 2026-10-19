@@ -1,5 +1,6 @@
 import { getConnection, getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
+import { mapSqlCode } from "../database/sql_lexer.js";
 import { validateSqlSyntax } from "./sql_validator.js";
 
 /**
@@ -41,14 +42,10 @@ export class RetrievalExecutor {
     const connection = await RetrievalExecutor.CONNECTION_FACTORY(source_id);
 
     try {
-      // Convert %s placeholders to $1, $2, ... for node-postgres if needed
-      let pgQuery = validQuery;
-      let finalParams = normalized_parameters;
-
-      if (pgQuery.includes("%s")) {
-        let paramIndex = 1;
-        pgQuery = pgQuery.replace(/%s/g, () => `$${paramIndex++}`);
-      }
+      const { query: pgQuery, parameters: finalParams } = this._normalize_placeholders(
+        validQuery,
+        normalized_parameters
+      );
 
       const result = await connection.query(pgQuery, finalParams);
       const rows = result.rows || [];
@@ -126,6 +123,62 @@ export class RetrievalExecutor {
     return [...parameters];
   }
 
+  _normalize_placeholders(query, parameters = []) {
+    let percentPlaceholderCount = 0;
+    const converted = mapSqlCode(query, code => code.replace(/%s/g, () => {
+      percentPlaceholderCount += 1;
+      return `$${percentPlaceholderCount}`;
+    }));
+
+    const positionalIndexes = [];
+    mapSqlCode(query, code => {
+      for (const match of code.matchAll(/\$(\d+)\b/g)) {
+        positionalIndexes.push(Number(match[1]));
+      }
+      return code;
+    });
+
+    if (percentPlaceholderCount > 0 && positionalIndexes.length > 0) {
+      const error = new Error("Cannot mix %s and PostgreSQL positional placeholders.");
+      error.code = "MIXED_PARAMETER_PLACEHOLDERS";
+      throw error;
+    }
+
+    if (percentPlaceholderCount > 0) {
+      if (percentPlaceholderCount !== parameters.length) {
+        const error = new Error(
+          `SQL placeholder count (${percentPlaceholderCount}) does not match parameter count (${parameters.length}).`
+        );
+        error.code = "PARAMETER_PLACEHOLDER_MISMATCH";
+        throw error;
+      }
+      return { query: converted, parameters: [...parameters] };
+    }
+
+    if (positionalIndexes.length > 0) {
+      const uniqueIndexes = [...new Set(positionalIndexes)].sort((a, b) => a - b);
+      const expectedIndexes = Array.from({ length: uniqueIndexes.at(-1) }, (_, index) => index + 1);
+      if (
+        uniqueIndexes.length !== expectedIndexes.length ||
+        uniqueIndexes.some((value, index) => value !== expectedIndexes[index]) ||
+        uniqueIndexes.at(-1) !== parameters.length
+      ) {
+        const error = new Error("SQL positional placeholders do not match the parameter count.");
+        error.code = "PARAMETER_PLACEHOLDER_MISMATCH";
+        throw error;
+      }
+      return { query: converted, parameters: [...parameters] };
+    }
+
+    if (parameters.length > 0) {
+      const error = new Error("SQL parameters were supplied without placeholders.");
+      error.code = "PARAMETER_PLACEHOLDER_MISMATCH";
+      throw error;
+    }
+
+    return { query: converted, parameters: [] };
+  }
+
   // CamelCase aliases
   validateSource(sourceId) {
     return this._validate_source(sourceId);
@@ -137,6 +190,10 @@ export class RetrievalExecutor {
 
   normalizeParameters(parameters) {
     return this._normalize_parameters(parameters);
+  }
+
+  normalizePlaceholders(query, parameters = []) {
+    return this._normalize_placeholders(query, parameters);
   }
 }
 

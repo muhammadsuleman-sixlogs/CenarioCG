@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadAllContexts } from "../context/context_store.js";
+import { loadTestContexts } from "./test_context.js";
 import { QuestionPlanValidator } from "../planning/question_plan_validator.js";
 import { ComplexQueryPlanner } from "../planning/complex_query_planner.js";
 import { RAGPipeline } from "../pipeline/rag_pipeline.js";
@@ -9,7 +9,7 @@ import { ContextManager } from "../context/context_manager.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { classifyRuntimeError, diagnosticRecord } from "../diagnostics/runtime_diagnostics.js";
 
-const contexts = loadAllContexts();
+const contexts = loadTestContexts();
 
 function basePlan(sourceId, table, columns) {
   return {
@@ -151,4 +151,48 @@ test("runtime diagnostics distinguish source, SQL, network, authentication, and 
 test("retrieval executor routes registered PostgreSQL sources at the connection boundary", () => {
   assert.match(RetrievalExecutor.CONNECTION_FACTORY.toString(), /getConnection\(sourceId\)/);
   assert.throws(() => new RetrievalExecutor()._validate_source(""), error => error.code === "MISSING_SOURCE_ID");
+});
+
+test("retrieval executor sends converted placeholders and original bound values to the driver", async () => {
+  const previousFactory = RetrievalExecutor.CONNECTION_FACTORY;
+  let observed = null;
+  RetrievalExecutor.CONNECTION_FACTORY = () => ({
+    async query(query, parameters) {
+      observed = { query, parameters };
+      return { rows: [], fields: [] };
+    },
+    release() {}
+  });
+
+  try {
+    await new RetrievalExecutor().execute(
+      "SELECT id FROM tickets WHERE title ILIKE '%sprint review%' AND status = %s",
+      "db1",
+      ["pending"]
+    );
+  } finally {
+    RetrievalExecutor.CONNECTION_FACTORY = previousFactory;
+  }
+
+  assert.deepEqual(observed, {
+    query: "SELECT id FROM tickets WHERE title ILIKE '%sprint review%' AND status = $1",
+    parameters: ["pending"]
+  });
+});
+
+test("PostgreSQL executor failures do not open the legacy direct-connection fallback", async () => {
+  const pipeline = new RAGPipeline();
+  const executor = new RetrievalExecutor();
+  let calls = 0;
+  executor.execute = async () => {
+    calls += 1;
+    throw new Error("primary executor failure");
+  };
+  pipeline.executor = executor;
+
+  await assert.rejects(
+    () => pipeline._executePostgresqlLive("SELECT 1", "db1", { parameters: ["value"] }),
+    /primary executor failure/
+  );
+  assert.equal(calls, 1);
 });

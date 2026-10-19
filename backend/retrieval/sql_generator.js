@@ -107,6 +107,10 @@ export class SQLGenerator {
   // ------------------------------------------------------------------
 
   generate(contract, source_id = null, runtime_bindings = null) {
+    return this.generatePrepared(contract, source_id, runtime_bindings).query;
+  }
+
+  generatePrepared(contract, source_id = null, runtime_bindings = null) {
     this._validate_contract(contract);
 
     const active_source_id = this._resolve_source_id(source_id, contract);
@@ -121,15 +125,17 @@ export class SQLGenerator {
     this._validate_contract_source(contract, active_source_id);
 
     const bindings = this._normalize_runtime_bindings(runtime_bindings);
+    const parameters = this._normalize_runtime_parameters(runtime_bindings, bindings);
     const schema_context = this._build_schema_context();
 
-    let sql = this._compile_query(contract, schema_context, bindings);
+    const compiled = this._compile_query(contract, schema_context, bindings, parameters);
+    let sql = compiled.query;
     sql = this._normalize_sql(sql);
 
     validateReadOnlyQuery(sql);
     validateSqlSyntax(sql);
 
-    return sql;
+    return { query: sql, parameters: compiled.parameters };
   }
 
   generateCategoricalExistence(table_name, column_name, value, source_id = null) {
@@ -169,6 +175,20 @@ export class SQLGenerator {
     this._validate_contract(contract);
 
     return this.generate(contract, source_id, runtime_bindings);
+  }
+
+  repairPrepared(query, database_error, contract, source_id = null, runtime_bindings = null) {
+    if (!query || typeof query !== "string" || !query.trim()) {
+      throw new Error("SQL query cannot be empty.");
+    }
+
+    if (!database_error || typeof database_error !== "string" || !database_error.trim()) {
+      throw new Error("Database error cannot be empty.");
+    }
+
+    this._validate_contract(contract);
+
+    return this.generatePrepared(contract, source_id, runtime_bindings);
   }
 
   // ------------------------------------------------------------------
@@ -435,7 +455,7 @@ export class SQLGenerator {
   // Contract compilation
   // ------------------------------------------------------------------
 
-  _compile_query(contract, schema_context, runtime_bindings) {
+  _compile_query(contract, schema_context, runtime_bindings, runtime_parameters = []) {
     const required_tables = this._normalize_required_tables(contract);
     if (!required_tables.length) {
       throw new Error("Retrieval contract requires at least one table.");
@@ -455,10 +475,12 @@ export class SQLGenerator {
       combined_relationships
     );
 
+    const filter_parameters = [];
     const where_clauses = this._compile_filters(
       contract.filters || [],
       selected_tables,
-      runtime_bindings
+      runtime_bindings,
+      filter_parameters
     );
 
     where_clauses.push(
@@ -483,6 +505,10 @@ export class SQLGenerator {
     const has_metrics =
       (Array.isArray(requested_metrics) && requested_metrics.length > 0) ||
       operations.some((op) => SQLGenerator.AGGREGATE_OPERATIONS.has(op));
+
+    if (has_metrics) {
+      this._validate_aggregate_sorting(sorting, grouping);
+    }
 
     let select_sql = "";
     let aggregate_query = false;
@@ -562,7 +588,10 @@ export class SQLGenerator {
         "\n) AS retrieval_result";
     }
 
-    return query;
+    return {
+      query,
+      parameters: [...filter_parameters, ...runtime_parameters]
+    };
   }
 
   _normalize_required_tables(contract) {
@@ -940,6 +969,20 @@ export class SQLGenerator {
     return [expressions.join(", "), true];
   }
 
+  _validate_aggregate_sorting(sorting, grouping) {
+    const grouped = new Set((grouping || []).map(value => String(value).trim().toLowerCase()));
+
+    for (const item of sorting || []) {
+      const expression = String(item).replace(/\s+(?:ASC|DESC)$/i, "").trim();
+      if (grouped.has(expression.toLowerCase())) continue;
+      if (/^(?:COUNT|SUM|AVG|MIN|MAX)\s*\(/i.test(expression)) continue;
+
+      throw new Error(
+        `Aggregate query cannot order by non-grouped raw column '${expression}'.`
+      );
+    }
+  }
+
   _compile_metric(metric, selected_tables) {
     if (!metric || typeof metric !== "object" || Array.isArray(metric)) {
       throw new Error("Each requested metric must be an object.");
@@ -1080,7 +1123,7 @@ export class SQLGenerator {
   // Filters
   // ------------------------------------------------------------------
 
-  _compile_filters(filters, selected_tables, runtime_bindings = null) {
+  _compile_filters(filters, selected_tables, runtime_bindings = null, parameters = []) {
     if (!Array.isArray(filters)) {
       throw new Error("filters must be a list.");
     }
@@ -1166,14 +1209,14 @@ export class SQLGenerator {
 
       const qualified = this._qualified_identifier(table_name, column_name);
       result.push(
-        this._compile_filter_expression(qualified, operator, raw_val, table_name, column_name)
+        this._compile_filter_expression(qualified, operator, raw_val, table_name, column_name, parameters)
       );
     }
 
     return result;
   }
 
-  _compile_filter_expression(qualified, operator, value, table_name = null, column_name = null) {
+  _compile_filter_expression(qualified, operator, value, table_name = null, column_name = null, parameters = []) {
     if (operator === "is_null") {
       return `${qualified} IS NULL`;
     }
@@ -1187,9 +1230,11 @@ export class SQLGenerator {
         ? this._case_insensitive_operand(table_name, column_name, qualified)
         : qualified;
       if (/[\s-]/.test(String(value))) {
-        return this._normalized_categorical_comparison(operand, this._sql_literal(String(value)));
+        parameters.push(String(value));
+        return this._normalized_categorical_comparison(operand, "%s");
       }
-      return `${operand} ILIKE ${this._sql_literal(String(value))}`;
+      parameters.push(String(value));
+      return `${operand} ILIKE %s`;
     }
 
     if (operator === "in") {
@@ -1214,7 +1259,8 @@ export class SQLGenerator {
         return "FALSE";
       }
 
-      return `${qualified} IN (${listVal.map((item) => this._sql_literal(item)).join(", ")})`;
+      parameters.push(listVal);
+      return `${qualified} = ANY(%s)`;
     }
 
     if (operator === "not_in") {
@@ -1239,22 +1285,27 @@ export class SQLGenerator {
         return "TRUE";
       }
 
-      return `${qualified} NOT IN (${listVal.map((item) => this._sql_literal(item)).join(", ")})`;
+      parameters.push(listVal);
+      return `${qualified} <> ALL(%s)`;
     }
 
     if (operator === "contains") {
-      return `${qualified} ILIKE ${this._sql_literal("%" + String(value) + "%")}`;
+      parameters.push("%" + String(value) + "%");
+      return `${qualified} ILIKE %s`;
     }
 
     if (operator === "starts_with") {
-      return `${qualified} ILIKE ${this._sql_literal(String(value) + "%")}`;
+      parameters.push(String(value) + "%");
+      return `${qualified} ILIKE %s`;
     }
 
     if (operator === "ends_with") {
-      return `${qualified} ILIKE ${this._sql_literal("%" + String(value))}`;
+      parameters.push("%" + String(value));
+      return `${qualified} ILIKE %s`;
     }
 
-    return `${qualified} ${operator} ${this._sql_literal(value)}`;
+    parameters.push(value);
+    return `${qualified} ${operator} %s`;
   }
 
   _case_insensitive_operand(table_name, column_name, qualified = null) {
@@ -1347,6 +1398,26 @@ export class SQLGenerator {
     }
 
     return normalized.sort((a, b) => a.index - b.index);
+  }
+
+  _normalize_runtime_parameters(runtime_bindings, bindings) {
+    if (runtime_bindings === null || runtime_bindings === undefined) {
+      return [];
+    }
+
+    const parameters = runtime_bindings.parameters;
+    if (parameters === undefined || parameters === null) {
+      if (bindings.length > 0) {
+        throw new Error("Runtime binding parameters are required.");
+      }
+      return [];
+    }
+
+    if (!Array.isArray(parameters) || parameters.length !== bindings.length) {
+      throw new Error("Runtime binding parameters must match the binding count.");
+    }
+
+    return [...parameters];
   }
 
   _compile_runtime_bindings(bindings, selected_tables) {

@@ -1,8 +1,11 @@
 import crypto from "crypto";
 import { build_context } from "./context_builder.js";
-import { publishContextGeneration, save_context } from "./context_store.js";
+import { getActiveSemanticCatalogFile, markActiveGenerationVerified, publishContextGeneration, save_context } from "./context_store.js";
+import { loadSemanticCatalog } from "./semantic_catalog.js";
 import { saveValidatedCrossSourceRelationships, validateCrossSourceRelationships } from "./cross_source_business_logic.js";
 import { getRegisteredPostgresqlSourceIds } from "../database/connection.js";
+import { settings } from "../config/settings.js";
+import { fetchAndDiscoverOpenApiContext } from "../external_api/openapi.js";
 
 /**
  * Explicit, local snapshot lifecycle. Callers must authorize the source before
@@ -36,20 +39,36 @@ export async function refreshContextSnapshot(sourceId, { buildContext = build_co
  * A discovery failure prevents publication and leaves the active generation
  * untouched.
  */
-export async function refreshContextGeneration({ sourceIds = getRegisteredPostgresqlSourceIds(), buildContext = build_context, retention = 5, now = new Date(), validateRelationships = validateCrossSourceRelationships } = {}) {
+export async function refreshContextGeneration({ sourceIds = null, buildContext = build_context, buildExternalApiContext = fetchAndDiscoverOpenApiContext, apiSourceConfigs = settings.externalApiSources, retention = 5, now = new Date(), directory = undefined, validateRelationships = validateCrossSourceRelationships } = {}) {
   const registered = new Set(getRegisteredPostgresqlSourceIds());
-  const requested = [...new Set((sourceIds || []).map(sourceId => String(sourceId || "").trim().toLowerCase()))].sort();
-  if (requested.length === 0 || requested.some(sourceId => !registered.has(sourceId))) throw new Error("Context refresh requires registered PostgreSQL sources.");
+  const apiSources = apiSourceConfigs || {};
+  const requested = [...new Set((sourceIds || [...registered, ...Object.keys(apiSources)]).map(sourceId => String(sourceId || "").trim().toLowerCase()))].sort();
+  if (requested.length === 0 || requested.some(sourceId => !registered.has(sourceId) && !apiSources[sourceId])) throw new Error("Context refresh requires registered sources.");
   // Build before publication.  The existing scheduler prevents overlap, and a
   // failure leaves the active generation untouched.
-  const contexts = Object.fromEntries(await Promise.all(requested.map(async sourceId => [sourceId, await buildContext(sourceId)])));
+  const contexts = Object.fromEntries(await Promise.all(requested.map(async sourceId => [sourceId, registered.has(sourceId)
+    ? await buildContext(sourceId)
+    : await buildExternalApiContext(apiSources[sourceId])
+  ])));
   for (const [sourceId, context] of Object.entries(contexts)) {
     if (!context?.tables || Object.keys(context.tables).length === 0) {
       throw new Error(`${sourceId} discovery returned no tables; active metadata was retained.`);
     }
   }
-  const publication = publishContextGeneration(contexts, { retention, now, requiredSourceIds: requested });
-  if (!publication.published) return publication;
+  let semanticCatalog;
+  try {
+    semanticCatalog = loadSemanticCatalog(getActiveSemanticCatalogFile(directory) || undefined);
+  } catch (error) {
+    throw new Error(`Semantic catalog could not be loaded; active metadata was retained: ${error.message || String(error)}`);
+  }
+  const publication = publishContextGeneration(contexts, { retention, now, directory, requiredSourceIds: requested, semanticCatalog });
+  if (!publication.published) {
+    // Discovery and compatibility validation succeeded, but the technical
+    // fingerprint did not change. Advance only the trusted verification time;
+    // never rewrite the generation or claim freshness after a failed refresh.
+    const verification = markActiveGenerationVerified({ now, directory });
+    return { ...publication, last_verified_at: verification.last_verified_at };
+  }
   // A changed schema may invalidate old cross-source edges. Revalidate using
   // independent, read-only evidence. Keep the prior artifact if collection
   // fails, rather than publishing an incomplete relationship set.

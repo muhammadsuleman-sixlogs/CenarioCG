@@ -1,14 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ContextManager } from "../context/context_manager.js";
-import { loadAllContexts } from "../context/context_store.js";
+import { loadTestContexts, OFFLINE_PROVIDER } from "./test_context.js";
 import { RAGPipeline } from "../pipeline/rag_pipeline.js";
 import { QuestionPlanner } from "../planning/question_planner.js";
 import { QuestionPlanValidator } from "../planning/question_plan_validator.js";
 import { SourceRouter } from "../planning/source_router.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
+import { AnswerGenerator } from "../llm/answer_generator.js";
 
-const contexts = loadAllContexts();
+const contexts = loadTestContexts();
 const bothSources = { workspace_id: "offline", authorization: { postgresql_sources: ["db1", "db2"], security_resources: [] } };
 
 function offlinePipeline(contextManager = new ContextManager()) {
@@ -18,7 +19,7 @@ function offlinePipeline(contextManager = new ContextManager()) {
   pipeline.planner = new QuestionPlanner(contexts);
   // A truthy non-provider deliberately exercises only deterministic fallback
   // planning; these tests never call OpenAI or a database.
-  pipeline.planner.client = {};
+  pipeline.planner.client = OFFLINE_PROVIDER;
   pipeline.source_router = new SourceRouter(contexts);
   pipeline.entity_resolver = { async resolve() { return []; } };
   return pipeline;
@@ -73,6 +74,122 @@ test("recent meeting and latest transcript plans reach ordered read-only SQL and
   }
 });
 
+test("provider answer failure keeps verified ticket context and renders bounded evidence fallback", async () => {
+  const manager = new ContextManager();
+  const pipeline = offlinePipeline(manager);
+  pipeline.executor = {
+    async execute(sql, sourceId) {
+      validateReadOnlyQuery(sql);
+      return {
+        rows: [
+          { id: "ticket-1", subject: "Payment review", status: "pending" },
+          { id: "ticket-2", subject: "Access request", status: "open" }
+        ],
+        row_count: 2,
+        columns: ["id", "subject", "status"]
+      };
+    }
+  };
+  pipeline.answer_generator = {
+    async generate() { throw Object.assign(new Error("provider unavailable"), { code: "ECONNRESET" }); },
+    buildFallbackAnswer(question, evidence) {
+      return new AnswerGenerator({}).buildFallbackAnswer(question, evidence);
+    }
+  };
+
+  const result = await pipeline.ask("Show me recent tickets", {
+    workspace_id: "offline",
+    authorization: { postgresql_sources: ["db1"], security_resources: [] }
+  });
+
+  assert.equal(result.retrieval_status, "success_with_data");
+  assert.equal(result.answer_generation_status, "failed");
+  assert.match(result.answer, /Payment review/);
+  assert.match(result.answer, /ticket-2/);
+  assert.equal(manager.get_history().length, 1);
+  assert.equal(manager.getActiveContext().record_set.key_column, "id");
+  assert.deepEqual(manager.getActiveContext().record_set.values, ["ticket-1", "ticket-2"]);
+});
+
+test("ticket status follow-up removes deictic context words before categorical verification", async () => {
+  const planner = new QuestionPlanner(contexts);
+  planner.client = OFFLINE_PROVIDER;
+  const activeContext = {
+    active_context: {
+      source_id: "db1",
+      table: "tickets",
+      record_set: { key_column: "id", values: ["ticket-1", "ticket-2"], count: 2 },
+      validation_status: "retrieval_evidence_confirmed"
+    }
+  };
+
+  for (const [question, expectedStatus] of [
+    ["Show only those pending.", "pending"],
+    ["Which of these tickets are completed?", "completed"]
+  ]) {
+    const plan = await planner.plan(question, activeContext);
+    assert.deepEqual(plan.filters, [
+      { table: "tickets", field: "id", operator: "in", value: ["ticket-1", "ticket-2"] },
+      {
+        table: "tickets",
+        field: "status",
+        operator: "case_insensitive_equals",
+        value: expectedStatus,
+        verification: "runtime_distinct_required",
+        provenance: "authorized_discovered_categorical_column"
+      }
+    ], question);
+    assert.equal(plan.clarification_required, undefined, question);
+  }
+});
+
+test("recent-first invoice follow-up retrieves the related company by the verified company_id", async () => {
+  const manager = new ContextManager();
+  const pipeline = offlinePipeline(manager);
+  const calls = [];
+  const answerEvidence = [];
+  pipeline.executor = {
+    async execute(sql, sourceId, parameters = []) {
+      validateReadOnlyQuery(sql);
+      calls.push({ sql, sourceId, parameters });
+      if (calls.length === 1) {
+        return {
+          rows: [{ id: "invoice-1", company_id: "company-1", invoice_number: "INV-1", created_at: "2026-10-14T01:47:17Z" }],
+          row_count: 1,
+          columns: ["id", "company_id", "invoice_number", "created_at"]
+        };
+      }
+      return {
+        rows: [{ id: "company-1", name: "Example Company" }],
+        row_count: 1,
+        columns: ["id", "name"]
+      };
+    }
+  };
+  pipeline.answer_generator = {
+    async generate(_question, evidence) {
+      answerEvidence.push(evidence);
+      return "Example Company is associated with the invoice.";
+    }
+  };
+  const auth = { workspace_id: "offline", authorization: { postgresql_sources: ["db1"], security_resources: [] } };
+
+  const invoice = await pipeline.ask("show me recent first invoice", auth);
+  const company = await pipeline.ask("what is the company name of that invoice", auth);
+
+  assert.equal(invoice.retrieval_status, "success_with_data");
+  assert.equal(company.retrieval_status, "success_with_data");
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].sql, /FROM "invoices"/i);
+  assert.match(calls[1].sql, /FROM "companies"/i);
+  assert.match(calls[1].sql, /"companies"\."id"\s*=\s*%s/i);
+  assert.deepEqual(calls[1].parameters, ["company-1"]);
+  assert.doesNotMatch(calls[1].sql, /invoice-1/i);
+  assert.equal(company.answer, "Example Company is associated with the invoice.");
+  assert.ok(answerEvidence[1].items.some(item => item.row?.name === "Example Company"));
+  assert.deepEqual(manager.getActiveContext().stable_keys, { id: "company-1" });
+});
+
 test("source-qualified meeting details and project-to-meeting bindings reach mocked execution", async () => {
   const manager = new ContextManager();
   const pipeline = offlinePipeline(manager);
@@ -93,7 +210,8 @@ test("source-qualified meeting details and project-to-meeting bindings reach moc
   manager.setActiveContext({ source_id: "db2", table: "sessions", stable_keys: { session_id: "session-1" } });
   const detail = await pipeline.ask("Show me all details about that meeting.", { workspace_id: "offline", authorization: { postgresql_sources: ["db2"], security_resources: [] } });
   assert.equal(detail.retrieval_status, "success_with_data");
-  assert.match(calls[0].sql, /"sessions"\."session_id" = 'session-1'/i);
+  assert.match(calls[0].sql, /"sessions"\."session_id" = %s/i);
+  assert.deepEqual(calls[0].parameters, ["session-1"]);
 
   calls.length = 0;
   db2Call = 0;
@@ -140,9 +258,9 @@ test("an explicit schema-qualified identifier survives source failure and constr
 
   const calls = [];
   pipeline.executor = {
-    async execute(sql, sourceId) {
+    async execute(sql, sourceId, parameters = []) {
       validateReadOnlyQuery(sql);
-      calls.push({ sql, sourceId });
+      calls.push({ sql, sourceId, parameters });
       return { rows: [{ meeting_id: "ukm-jueo-dha", session_id: "session-7", transcript_data: "grounded" }], row_count: 1, columns: ["meeting_id", "session_id", "transcript_data"] };
     }
   };
@@ -150,14 +268,15 @@ test("an explicit schema-qualified identifier survives source failure and constr
   const followup = await pipeline.ask("Show me its transcript.", { workspace_id: "offline", authorization: { postgresql_sources: ["db2"], security_resources: [] } });
   assert.equal(followup.retrieval_status, "success_with_data");
   assert.equal(calls[0].sourceId, "db2");
-  assert.match(calls[0].sql, /"transcripts"\."meeting_id" = 'ukm-jueo-dha'/i);
+  assert.match(calls[0].sql, /"transcripts"\."meeting_id" = %s/i);
+  assert.deepEqual(calls[0].parameters, ["ukm-jueo-dha"]);
   assert.equal(manager.getActiveContext().table, "sessions");
   assert.deepEqual(manager.getActiveContext().stable_keys, { meeting_id: "ukm-jueo-dha" });
 });
 
 test("meeting-to-project and explicit DB1/DB2 combination use only direct or approved paths", async () => {
   const planner = new QuestionPlanner(contexts);
-  planner.client = null;
+  planner.client = OFFLINE_PROVIDER;
   const meeting = { active_context: { source_id: "db2", table: "sessions", stable_keys: { meeting_id: "ukm-jueo-dha" } } };
   const project = await planner.plan("Which project is this meeting associated with?", meeting);
   assert.deepEqual(project.postgresql_sources, ["db2"]);
@@ -170,7 +289,7 @@ test("meeting-to-project and explicit DB1/DB2 combination use only direct or app
   });
   assert.equal(new QuestionPlanValidator(contexts).validate(combined).valid, true);
   assert.deepEqual(combined.execution_plan.steps.map(step => step.source_id), ["db2", "db1"]);
-  assert.deepEqual(combined.execution_plan.steps[1].input_bindings, [{ from_step: "s1", from_column: "project_code", to_table: "project_details", to_column: "project_id_display", operator: "in" }]);
+  assert.deepEqual(combined.execution_plan.steps[1].input_bindings, [{ from_step: "s1", from_column: "project_id", to_table: "project_details", to_column: "id", operator: "in" }]);
 });
 
 test("recent-list to explicit ID/title detail lookup bypasses malformed provider relationships and reaches answer synthesis", async () => {
@@ -178,9 +297,9 @@ test("recent-list to explicit ID/title detail lookup bypasses malformed provider
   const pipeline = offlinePipeline(manager);
   const calls = [];
   pipeline.executor = {
-    async execute(sql, sourceId) {
+    async execute(sql, sourceId, parameters = []) {
       validateReadOnlyQuery(sql);
-      calls.push({ sql, sourceId });
+      calls.push({ sql, sourceId, parameters });
       if (/FROM "sessions"[\s\S]*ORDER BY/i.test(sql)) {
         return { rows: [{ meeting_id: "ukm-jueo-dha", session_id: "s-1", meeting_title: "meta briefing" }], row_count: 1, columns: [] };
       }
@@ -213,7 +332,9 @@ test("recent-list to explicit ID/title detail lookup bypasses malformed provider
   const detailCalls = calls.slice(1);
   assert.ok(detailCalls.every(call => call.sourceId === "db2"));
   assert.match(detailCalls[0].sql, /FROM "sessions"/i);
-  assert.match(detailCalls[0].sql, /"sessions"\."meeting_id" = 'ukm-jueo-dha'/i);
-  assert.match(detailCalls[1].sql, /"sessions"\."meeting_title" ILIKE '%meta briefing%'/i);
+  assert.match(detailCalls[0].sql, /"sessions"\."meeting_id" = %s/i);
+  assert.deepEqual(detailCalls[0].parameters, ["ukm-jueo-dha"]);
+  assert.match(detailCalls[1].sql, /"sessions"\."meeting_title" ILIKE %s/i);
+  assert.deepEqual(detailCalls[1].parameters, ["%meta briefing%"]);
   assert.ok(detailCalls.every(call => !/usage_llm_events|usage_recall_sessions/i.test(call.sql)));
 });

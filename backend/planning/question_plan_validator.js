@@ -23,6 +23,7 @@ export class QuestionPlanValidator {
   static ALLOWED_DATA_SOURCES = new Set([
     "postgresql",
     "security_logs",
+    "external_api",
   ]);
 
   static ALLOWED_OPERATIONS = new Set([
@@ -136,7 +137,11 @@ export class QuestionPlanValidator {
   // ------------------------------------------------------------------
 
   _available_postgresql_sources() {
-    return Object.keys(this.contexts).map(sourceId => String(sourceId).trim().toLowerCase());
+    return Object.entries(this.contexts).filter(([, context]) => (context?.source_type || "postgresql") === "postgresql").map(([sourceId]) => String(sourceId).trim().toLowerCase());
+  }
+
+  _available_external_api_sources() {
+    return Object.entries(this.contexts).filter(([, context]) => context?.source_type === "external_api").map(([sourceId]) => String(sourceId).trim().toLowerCase());
   }
 
   _availablePostgresqlSources() {
@@ -369,6 +374,8 @@ export class QuestionPlanValidator {
     normalized.postgresql_sources = this._canonical_string_list(
       normalized.postgresql_sources ?? []
     );
+    normalized.api_sources = this._canonical_string_list(normalized.api_sources ?? []);
+    normalized.api_operation = normalized.api_operation === null || normalized.api_operation === undefined ? null : String(normalized.api_operation).trim();
     normalized.required_tables = this._canonical_string_list(
       normalized.required_tables ?? []
     );
@@ -412,8 +419,8 @@ export class QuestionPlanValidator {
         normalized
       );
     } else if (executionPlan === null || executionPlan === undefined) {
-      if (Array.isArray(normalized.postgresql_sources) && normalized.postgresql_sources.length > 0) {
-        const sourceId = String(normalized.postgresql_sources[0]).trim().toLowerCase() || "db1";
+      if ((Array.isArray(normalized.postgresql_sources) && normalized.postgresql_sources.length > 0) || (Array.isArray(normalized.api_sources) && normalized.api_sources.length > 0)) {
+        const sourceId = String(normalized.postgresql_sources[0] || normalized.api_sources[0]).trim().toLowerCase();
         normalized.execution_plan = {
           mode: "single",
           steps: [
@@ -482,6 +489,8 @@ export class QuestionPlanValidator {
       "question",
       "data_sources",
       "postgresql_sources",
+      "api_sources",
+      "api_operation",
       "required_tables",
       "required_columns",
       "relationships",
@@ -1493,6 +1502,17 @@ export class QuestionPlanValidator {
     return errors;
   }
 
+  _validate_api_sources(apiSources, operationId, dataSources) {
+    if (!Array.isArray(apiSources)) return ["api_sources must be a list."];
+    if (!dataSources.includes("external_api")) return apiSources.length ? ["api_sources must be empty when external_api is not selected."] : [];
+    if (apiSources.length !== 1) return ["external_api requires exactly one api_sources entry."];
+    const sourceId = String(apiSources[0] || "").trim().toLowerCase();
+    const context = this.contexts?.[sourceId];
+    if (!this._available_external_api_sources().includes(sourceId) || !context) return [`Unknown external API source: ${sourceId}`];
+    if (typeof operationId !== "string" || !operationId || !context.api_operations?.[operationId]) return ["external_api requires one discovered approved api_operation."];
+    return [];
+  }
+
   _validate_entities(entities) {
     if (!Array.isArray(entities)) {
       return ["entities must be a list."];
@@ -2405,6 +2425,7 @@ export class QuestionPlanValidator {
     const question = normalizedPlan.question;
     const dataSources = normalizedPlan.data_sources ?? ["postgresql"];
     const postgresqlSources = normalizedPlan.postgresql_sources ?? [];
+    const apiSources = normalizedPlan.api_sources ?? [];
     const requiredTables = normalizedPlan.required_tables ?? [];
     const requiredColumns = normalizedPlan.required_columns ?? [];
     const relationships = normalizedPlan.relationships ?? [];
@@ -2427,6 +2448,7 @@ export class QuestionPlanValidator {
         normalizedSources,
         dataSources.filter(s => typeof s === "string").map(s => s.trim().toLowerCase())
       ));
+      errors.push(...this._validate_api_sources(apiSources, normalizedPlan.api_operation, dataSources.filter(s => typeof s === "string").map(s => s.trim().toLowerCase())));
     }
 
     errors.push(...this._validate_security_resource(

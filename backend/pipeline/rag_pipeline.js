@@ -11,16 +11,23 @@ import { RetrievalExecutor } from "../retrieval/retrieval_executor.js";
 import { SQLGenerator } from "../retrieval/sql_generator.js";
 import { SourceTracker } from "../tracing/source_tracker.js";
 import { SecurityLogRetriever } from "../security_logs/retriever.js";
+import { ExternalApiClient } from "../external_api/client.js";
+import { settings } from "../config/settings.js";
 import { EvidenceManager } from "../llm/evidence_manager.js";
 import { AnswerGenerator } from "../llm/answer_generator.js";
 import { sanitizeApiResponse, sanitizeEvidence } from "../security/output_security_policy.js";
 import { isSensitiveQuestionIntent } from "../security/sensitive_data_policy.js";
-import { validateReadOnlyQuery } from "../database/readonly_guard.js";
-import { validateSqlSyntax } from "../retrieval/sql_validator.js";
-import { getConnection, getRegisteredPostgresqlSourceIds } from "../database/connection.js";
+import { getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { SourceRouter } from "../planning/source_router.js";
-import { assertAuthorizedSecurityResource, assertAuthorizedSources } from "../auth/authorization.js";
+import { assertAuthorizedSecurityResource, assertAuthorizedSources, assertAuthorizedExternalApiOperation } from "../auth/authorization.js";
 import { logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
+import {
+  createLlmUsageTracker,
+  logLlmUsage,
+  measureAnswerEvidenceStructure,
+  recordAnswerEvidenceMetrics,
+  snapshotLlmUsage
+} from "../llm/usage_tracker.js";
 
 // Optional dynamic loaders for planning/retrieval components that may be migrated later
 let ComplexQueryPlanner = class {
@@ -75,7 +82,7 @@ function isSqlRepairableError(err) {
 }
 
 export class RAGPipeline {
-  static ALLOWED_DATA_SOURCES = new Set(["postgresql", "security_logs"]);
+  static ALLOWED_DATA_SOURCES = new Set(["postgresql", "security_logs", "external_api"]);
 
   static ALLOWED_SECURITY_RESOURCES = new Set([
     "security_logs",
@@ -125,6 +132,7 @@ export class RAGPipeline {
 
     this.answer_generator = new AnswerGenerator();
     this.answerGenerator = this.answer_generator;
+    this.llm_usage_logger = options.llm_usage_logger || console.info;
   }
 
   _validateQuestion(question) {
@@ -192,8 +200,15 @@ export class RAGPipeline {
 
   _restrictToAuthorizedSources(authorization) {
     if (!authorization) return;
-    const allowed = new Set((authorization.postgresql_sources || []).map(source => String(source).toLowerCase()));
-    const filter = contexts => Object.fromEntries(Object.entries(contexts || {}).filter(([sourceId]) => allowed.has(String(sourceId).toLowerCase())));
+    const allowedPostgresql = new Set((authorization.postgresql_sources || []).map(source => String(source).toLowerCase()));
+    const allowedApiSources = new Set((authorization.external_api_sources || []).map(source => String(source).toLowerCase()));
+    const filter = contexts => Object.fromEntries(Object.entries(contexts || {}).filter(([sourceId, context]) => {
+      const source = String(sourceId).toLowerCase();
+      if (context?.source_type === "external_api") {
+        return allowedApiSources.has(source) && (authorization.external_api_operations?.[source] || []).length > 0;
+      }
+      return allowedPostgresql.has(source);
+    }));
     // A pipeline can be reused by a conversation or test harness.  Always
     // filter the original local metadata snapshot for this request, never the
     // subset left by a prior DB1-only/DB2-only request.
@@ -202,7 +217,7 @@ export class RAGPipeline {
     }
     const contexts = filter(this._unrestricted_contexts);
     if (Object.keys(contexts).length === 0) {
-      const error = new Error("No authorized PostgreSQL Context Layer sources are available.");
+      const error = new Error("No authorized Context Layer sources are available.");
       error.code = "SOURCE_NOT_AUTHORIZED";
       throw error;
     }
@@ -213,11 +228,21 @@ export class RAGPipeline {
   }
 
   _planningFailure(question, type, answer, details = []) {
-    return sanitizeApiResponse({
+    return this._attachLlmUsage(sanitizeApiResponse({
       question, plan: null, plan_repaired: false, data_sources: [], postgresql_source_ids: [],
       retrieval_status: "planning_failed", source_status: {}, evidence: {}, sources: [], answer,
       error: { type, details }
-    });
+    }));
+  }
+
+  _attachLlmUsage(result) {
+    if (!result || !this.llm_usage_tracker) return result;
+    if (!this.llm_usage_logged) {
+      logLlmUsage(this.llm_usage_tracker, this.llm_usage_logger);
+      this.llm_usage_logged = true;
+    }
+    result.llm_usage = snapshotLlmUsage(this.llm_usage_tracker);
+    return result;
   }
 
   _rewriteFollowupQuestion(question, conversationContext) {
@@ -225,10 +250,27 @@ export class RAGPipeline {
     const deicticFollowup = /\b(?:it|its|that|this|those|these|above|previous|prior|related)\b|\ball\s+\d+\b/i.test(question);
     const namedDetailRequest = /\b(?:details?|about|information)\b/i.test(question);
     if (!active || (namedDetailRequest && !deicticFollowup) || /\b(?:[A-Za-z0-9]+-[A-Za-z0-9]+|[\w.+-]+@[\w.-]+)\b/.test(question)) return question;
-    const stable = Object.entries(active).find(([key, value]) =>
+    const stableEntries = active.stable_keys && typeof active.stable_keys === "object"
+      ? Object.entries(active.stable_keys)
+      : Object.entries(active);
+    const escapePattern = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const requestedStable = stableEntries.find(([key, value]) => {
+      if (key === "source_id" || key === "workspace_id" || value === null || value === undefined || /^(?:id|key)$/i.test(key)) return false;
+      const stem = String(key).replace(/(?:_id|_key)$/i, "").replace(/_/g, " ").trim();
+      return stem && new RegExp(`\\b${stem.split(/\s+/).map(escapePattern).join("\\s+")}s?\\b`, "i").test(question);
+    });
+    const activeEntityToken = String(active.table || "").split("_")[0].replace(/s$/i, "").toLowerCase();
+    const requestedEntityToken = requestedStable
+      ? String(requestedStable[0]).replace(/(?:_id|_key)$/i, "").split("_")[0].replace(/s$/i, "").toLowerCase()
+      : "";
+    // A relationship key is already represented in source-qualified context.
+    // Appending its UUID to the question can make semantic candidate ranking
+    // select an unrelated table; keep the natural wording for that case.
+    if (requestedStable && requestedEntityToken && requestedEntityToken !== activeEntityToken) return question;
+    const stable = requestedStable || stableEntries.find(([key, value]) =>
       key !== "source_id" && key !== "workspace_id" && /(?:^|_)id$/.test(key) && value !== null && value !== undefined
     );
-    return stable ? `${question} [resolved ${stable[0]}: ${stable[1]}]` : question;
+    return stable ? `${question} [context ${stable[0]}: ${stable[1]}]` : question;
   }
 
   _updateActiveEntityFromExecution(question, plan, results) {
@@ -245,12 +287,21 @@ export class RAGPipeline {
       : allRows;
     const table = plan?.entity_target?.table || plan?.required_tables?.[0];
     const sourceIds = [...new Set(rows.map(item => String(item.source_id || "").toLowerCase()).filter(Boolean))];
+    const isBoundedSingleRecord = rows.length === 1 && (
+      Number(plan?.limit) === 1 ||
+      /\b(?:first|latest|newest|most recent|single|one)\b/i.test(question)
+    );
     const isPluralReference = /\b(?:recent|latest|newest|most recent|all|list|which)\b/i.test(question);
-    if (rows.length > 1 && isPluralReference && sourceIds.length === 1 && table) {
+    const isNamedRecordSet = plan?.named_entity_lookup === true;
+    if (rows.length > 1 && (isPluralReference || isNamedRecordSet) && sourceIds.length === 1 && table) {
       const candidateKeys = Object.keys(rows[0].row).filter(key => /(?:^|_)id$/i.test(key) && rows.every(item => Object.prototype.hasOwnProperty.call(item.row, key) && item.row[key] !== null && item.row[key] !== undefined));
       const keyColumn = candidateKeys[0];
       const values = keyColumn ? [...new Set(rows.map(item => item.row[keyColumn]).filter(value => value !== null && value !== undefined).map(String))] : [];
       if (keyColumn && values.length === rows.length) {
+        const relationshipKeys = Object.fromEntries(candidateKeys.map(column => [
+          column,
+          [...new Set(rows.map(item => item.row[column]).filter(value => value !== null && value !== undefined).map(String))]
+        ]));
         const priorActive = typeof this.context_manager.getActiveContext === "function" ? this.context_manager.getActiveContext() : null;
         const inherited = priorActive?.source_id === sourceIds[0] && priorActive?.table === table ? priorActive : {};
         this.context_manager.setActiveContext({
@@ -258,6 +309,7 @@ export class RAGPipeline {
           source_id: sourceIds[0],
           table,
           record_set: { key_column: keyColumn, values, count: values.length },
+          relationship_keys: relationshipKeys,
           validation_status: "retrieval_evidence_confirmed",
           provenance: "successful_source_retrieval"
         });
@@ -269,7 +321,9 @@ export class RAGPipeline {
     // entity-reference question can safely establish a follow-up anchor.
     const hasBoundReference = Boolean(plan?.needs_conversation_context) || (plan?.filters || []).some(filter => ["=", "contains"].includes(String(filter?.operator || "").toLowerCase()) && filter?.value !== undefined && filter?.value !== null);
     const ungroundedCatalogFallback = Array.isArray(plan?.semantic_candidates) && plan.semantic_candidates.length > 0 && !hasBoundReference;
-    if (ungroundedCatalogFallback || !rows.length || !/\b(?:details?|about|show|meeting|project|company|ticket|document|transcript)\b/i.test(question) || /\b(recent|all|list)\b/i.test(question)) return;
+    const isBroadRetrieval = /\b(?:all|list)\b/i.test(question) ||
+      (/\b(?:recent)\b/i.test(question) && !isBoundedSingleRecord);
+    if ((ungroundedCatalogFallback && !isBoundedSingleRecord) || !rows.length || !/\b(?:details?|about|show|meeting|project|company|ticket|document|transcript|invoice)\b/i.test(question) || isBroadRetrieval) return;
     const { row, source_id, result } = rows[0];
     const sharedIdentifiers = Object.entries(row).filter(([key, value]) => {
       if (!/(?:^|_)id$/.test(key) || value === null || value === undefined) return false;
@@ -299,6 +353,155 @@ export class RAGPipeline {
     }
     this.context_manager.setActiveContext({ ...Object.fromEntries(invariantFields), source_id, table: resolvedTable, stable_keys: Object.fromEntries(stableEntries) });
     if (typeof this.context_manager.clearPendingReference === "function") this.context_manager.clearPendingReference();
+  }
+
+  _recordSetReferenceMode(question, active) {
+    const text = String(question || "");
+    if (/\b(?:above|those|these|previous|prior)\b|\ball\s+\d+\b/i.test(text)) return "plural";
+    if (!active?.record_set || !active?.source_id || !active?.table) return null;
+    const context = this.plan_validator.contexts?.[active.source_id] || {};
+    const entity = context.semantic_catalog?.entities?.[active.table] || {};
+    const aliases = [active.table, entity.entity_type, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
+      .map(value => String(value || "").replace(/_/g, " ").trim())
+      .filter(Boolean);
+    const mentionsActiveEntity = aliases.some(alias => {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\b${escaped}(?:s)?\\b`, "i").test(text);
+    });
+    return mentionsActiveEntity && /\b(?:this|that)\b/i.test(text) ? "singular" : null;
+  }
+
+  _resolveFollowupIdentityResolution(question, conversationContext, plan, postgresResults) {
+    const active = conversationContext?.active_context || conversationContext?.pending_reference || null;
+    const recordSet = active?.record_set;
+    const mode = this._recordSetReferenceMode(question, active);
+    const values = Array.isArray(recordSet?.values)
+      ? [...new Set(recordSet.values.filter(value => value !== null && value !== undefined).map(String))]
+      : [];
+    if (!active || !recordSet || !mode || !values.length) return null;
+
+    const executionPlan = plan?.execution_plan;
+    const definitions = Array.isArray(executionPlan?.steps) ? executionPlan.steps : [];
+    const stepId = step => step?.id || step?.step_id || null;
+    const resultByStep = new Map((postgresResults || [])
+      .filter(result => result?.execution_step_id)
+      .map(result => [String(result.execution_step_id), result]));
+    const firstDefinition = definitions[0] || null;
+    const finalDefinition = definitions.at(-1) || null;
+    const firstStepId = stepId(firstDefinition);
+    const finalStepId = stepId(finalDefinition);
+    const firstResult = (firstStepId && resultByStep.get(String(firstStepId))) || postgresResults?.[0] || null;
+    const firstRows = Array.isArray(firstResult?.retrieval?.rows) ? firstResult.retrieval.rows : [];
+    const keyColumn = String(recordSet.key_column || "").split(".").at(-1);
+    const firstRowsByIdentity = new Map();
+    for (const row of firstRows) {
+      const identity = row?.[keyColumn];
+      if (identity === null || identity === undefined) continue;
+      const normalized = String(identity);
+      if (!firstRowsByIdentity.has(normalized)) firstRowsByIdentity.set(normalized, []);
+      firstRowsByIdentity.get(normalized).push(row);
+    }
+
+    const states = new Map(values.map(value => [value, firstRowsByIdentity.get(value) || []]));
+    let relationshipComplete = definitions.length > 1;
+    for (let index = 1; index < definitions.length; index += 1) {
+      const definition = definitions[index];
+      const previousDefinition = definitions[index - 1];
+      const binding = Array.isArray(definition?.input_bindings) ? definition.input_bindings[0] : null;
+      const currentResult = resultByStep.get(String(stepId(definition)));
+      const currentRows = Array.isArray(currentResult?.retrieval?.rows) ? currentResult.retrieval.rows : [];
+      const fromColumn = String(binding?.from_column || "").split(".").at(-1);
+      const toColumn = String(binding?.to_column || "").split(".").at(-1);
+      if (!binding || !fromColumn || !toColumn) {
+        relationshipComplete = false;
+        break;
+      }
+
+      for (const [identity, parentRows] of states.entries()) {
+        const joinedRows = [];
+        for (const parent of parentRows) {
+          const value = parent?.[fromColumn];
+          if (value === null || value === undefined) continue;
+          joinedRows.push(...currentRows.filter(row => row?.[toColumn] !== null && row?.[toColumn] !== undefined && String(row[toColumn]) === String(value)));
+        }
+        states.set(identity, joinedRows);
+      }
+      if (!previousDefinition) relationshipComplete = false;
+    }
+
+    const finalTable = finalDefinition?.contract?.required_tables?.[0] || finalDefinition?.required_tables?.[0] || null;
+    const finalSourceId = finalDefinition?.source_id || null;
+    const finalContext = finalSourceId && finalTable
+      ? this.plan_validator.contexts?.[finalSourceId]?.tables?.[finalTable] || {}
+      : {};
+    const finalKeyColumn = String(
+      plan?.semantic_path?.at(-1)?.column || finalContext.primary_keys?.[0] || "id"
+    ).split(".").at(-1);
+
+    const mappings = [];
+    const missingIdentities = [];
+    const conflictIdentities = [];
+    const targetValues = new Set();
+    for (const identity of values) {
+      const rows = states.get(identity) || [];
+      const targets = [...new Set(rows
+        .map(row => row?.[finalKeyColumn])
+        .filter(value => value !== null && value !== undefined)
+        .map(String))];
+      for (const target of targets) targetValues.add(target);
+      if (!rows.length || !targets.length) missingIdentities.push(identity);
+      if (targets.length > 1) conflictIdentities.push(identity);
+      mappings.push({
+        from_source_id: active.source_id,
+        from_table: active.table,
+        from_key: keyColumn,
+        from_value: identity,
+        to_source_id: finalSourceId,
+        to_table: finalTable,
+        to_key: finalKeyColumn,
+        to_values: targets,
+        status: targets.length ? (targets.length > 1 ? "conflict" : "verified") : "missing"
+      });
+    }
+
+    const matchedIdentityCount = mappings.filter(mapping => mapping.to_values.length > 0).length;
+    const associationCount = mappings.reduce((total, mapping) => total + mapping.to_values.length, 0);
+    const complete = relationshipComplete && missingIdentities.length === 0 && matchedIdentityCount === values.length;
+    const identicalTarget = complete && conflictIdentities.length === 0 && targetValues.size === 1;
+    let status = "incomplete";
+    if (identicalTarget) status = "complete";
+    else if (complete && (targetValues.size > 1 || conflictIdentities.length > 0)) status = "conflict";
+
+    const resolution = {
+      mode,
+      scope: mode === "singular" && values.length > 1 && identicalTarget
+        ? "common_across_matching_records"
+        : (values.length > 1 ? "record_set" : "single_identity"),
+      status,
+      requested_count: values.length,
+      matched_identity_count: matchedIdentityCount,
+      association_count: associationCount,
+      missing_count: missingIdentities.length,
+      conflict_count: conflictIdentities.length,
+      missing_identities: missingIdentities,
+      conflict_identities: conflictIdentities,
+      mappings,
+      path: Array.isArray(plan?.semantic_path) ? plan.semantic_path : [],
+      evidence_relationships: Array.isArray(plan?.semantic_path_evidence) ? plan.semantic_path_evidence : []
+    };
+
+    if (mode === "singular" && values.length > 1 && !identicalTarget) {
+      resolution.requires_clarification = true;
+      resolution.message = status === "conflict"
+        ? "I found multiple matching records with different related results. Please identify which record you mean."
+        : "I found multiple matching records, so I could not safely identify one record for this follow-up. Please specify the record you mean.";
+    }
+
+    return {
+      ...resolution,
+      final_step_id: finalStepId,
+      source_ids: [...new Set(mappings.flatMap(mapping => [mapping.from_source_id, mapping.to_source_id]).filter(Boolean))]
+    };
   }
 
   _rememberPendingReference(question, plan, authorizedSources) {
@@ -388,6 +591,16 @@ export class RAGPipeline {
     }
 
     return resource;
+  }
+
+  _getExternalApiSource(plan, dataSources, authorization) {
+    if (!dataSources.includes("external_api")) return null;
+    const sources = Array.isArray(plan.api_sources) ? plan.api_sources : [];
+    if (sources.length !== 1 || typeof plan.api_operation !== "string") throw new Error("External API plans require one source and one approved operation.");
+    const sourceId = String(sources[0]).trim().toLowerCase();
+    if (!settings.externalApiSources?.[sourceId]) throw new Error("External API source is not registered.");
+    if (authorization) assertAuthorizedExternalApiOperation(authorization, sourceId, plan.api_operation);
+    return sourceId;
   }
 
   _getPostgresqlSources(plan, conversationContext = null, authorization = null) {
@@ -629,25 +842,34 @@ export class RAGPipeline {
         }
       }
 
-      let sql = sqlGenerator.generate(contractDict, sourceId, runtimeBindings);
+      const generated = sqlGenerator.generatePrepared(contractDict, sourceId, runtimeBindings);
+      let sql = generated.query;
+      let executionBindings = {
+        ...(runtimeBindings || {}),
+        parameters: generated.parameters
+      };
       let repaired = false;
       let retrieval;
 
       try {
-        retrieval = await this._executePostgresqlLive(sql, sourceId, runtimeBindings);
+        retrieval = await this._executePostgresqlLive(sql, sourceId, executionBindings);
       } catch (exc) {
-        if (isSqlRepairableError(exc) && typeof sqlGenerator.repair === "function") {
+        if (isSqlRepairableError(exc) && typeof sqlGenerator.repairPrepared === "function") {
           try {
-            const repairedSql = sqlGenerator.repair(
+            const repairedResult = sqlGenerator.repairPrepared(
               sql,
               String(exc.message || exc),
               contractDict,
               sourceId,
               runtimeBindings
             );
-            sql = repairedSql;
+            sql = repairedResult.query;
+            executionBindings = {
+              ...(runtimeBindings || {}),
+              parameters: repairedResult.parameters
+            };
             repaired = true;
-            retrieval = await this._executePostgresqlLive(sql, sourceId, runtimeBindings);
+            retrieval = await this._executePostgresqlLive(sql, sourceId, executionBindings);
           } catch {
             throw exc;
           }
@@ -705,41 +927,7 @@ export class RAGPipeline {
     if (!parameters || parameters.length === 0) {
       return await this.executor.execute(query, sourceId);
     }
-
-    try {
-      return await this.executor.execute(query, sourceId, parameters);
-    } catch (error) {
-      // Only the built-in executor may use the legacy direct-connection
-      // fallback. Injected/offline executors must surface their failure so a
-      // verification error cannot accidentally open a live connection.
-      if (!(this.executor instanceof RetrievalExecutor)) throw error;
-      // Fallback direct execution
-      validateReadOnlyQuery(query);
-      validateSqlSyntax(query);
-
-      const client = await getConnection(sourceId);
-      let queryError = null;
-      try {
-        const res = await client.query(query, parameters);
-        const rows = res.rows || [];
-        const columns = (res.fields || []).map(f => f.name);
-        return {
-          rows,
-          row_count: rows.length,
-          columns,
-          retrieval_status: rows.length > 0 ? "success_with_data" : "success_empty"
-        };
-      } catch (error) {
-        queryError = error;
-        throw error;
-      } finally {
-        if (typeof client.release === "function") {
-          client.release(queryError || undefined);
-        } else if (typeof client.close === "function") {
-          client.close();
-        }
-      }
-    }
+    return await this.executor.execute(query, sourceId, parameters);
   }
 
   async _retrieveSecurityLogs(plan, workspaceId = null) {
@@ -850,6 +1038,20 @@ export class RAGPipeline {
           message: String(exc.message || exc)
         }
       };
+    }
+  }
+
+  async _retrieveExternalApi(plan, sourceId) {
+    const context = this.plan_validator.contexts?.[sourceId];
+    const config = settings.externalApiSources?.[sourceId];
+    if (!context || context.source_type !== "external_api" || !config) throw new Error("External API metadata is unavailable.");
+    const client = new ExternalApiClient(config, context);
+    try {
+      const retrieval = await client.retrieve(plan.api_operation);
+      const source = { source_type: "external_api", source_id: sourceId, source: sourceId, resource: plan.api_operation, entities: [plan.api_operation], tables: [plan.api_operation], columns: retrieval.columns || [] };
+      return { source_type: "external_api", source_id: sourceId, retrieval_status: retrieval.row_count ? "success_with_data" : "success_empty", retrieval: { ...retrieval, source_type: "external_api", resource: plan.api_operation }, sources: [source] };
+    } catch (error) {
+      return { source_type: "external_api", source_id: sourceId, retrieval_status: "retrieval_failed", retrieval: { rows: [], row_count: 0, columns: [], source_type: "external_api", resource: plan.api_operation }, sources: [], error: { type: error.name || "Error", message: String(error.message || error) } };
     }
   }
 
@@ -1057,7 +1259,7 @@ export class RAGPipeline {
       const rows = Array.isArray(retrieval.rows) ? retrieval.rows : [];
 
       sourceStatus[sourceId] = {
-        source_type: "postgresql",
+        source_type: postgresResult.source_type || "postgresql",
         source_id: sourceId,
         metadata_available: true,
         retrieval_status: postgresResult.retrieval_status || "retrieval_failed",
@@ -1218,9 +1420,11 @@ export class RAGPipeline {
       workspaceId = this._validateWorkspaceId(workspaceIdOrContext);
     }
 
+    this.llm_usage_tracker = createLlmUsageTracker(this.request_id);
+
     // Security Rule 4: Fail closed immediately if requesting confidential credentials or passwords
     if (isSensitiveQuestionIntent(cleanQuestion)) {
-      return sanitizeApiResponse({
+      return this._attachLlmUsage(sanitizeApiResponse({
         question: cleanQuestion,
         plan: null,
         plan_repaired: false,
@@ -1235,7 +1439,7 @@ export class RAGPipeline {
           type: "sensitive_question_blocked",
           message: "The question requests confidential credentials or secrets."
         }
-      });
+      }));
     }
 
     const conversationContext = explicitConversationContext || this._getConversationContext();
@@ -1248,7 +1452,7 @@ export class RAGPipeline {
     const planningQuestion = this._rewriteFollowupQuestion(cleanQuestion, conversationContext);
     let rawPlan;
     try {
-      rawPlan = await this.planner.plan(planningQuestion, conversationContext);
+      rawPlan = await this.planner.plan(planningQuestion, conversationContext, this.llm_usage_tracker);
     } catch (error) {
       return this._planningFailure(cleanQuestion, "PLAN_SCHEMA_INVALID", "I could not identify one verified, authorized data path for that request. Please specify the record or data area you want to inspect.");
     }
@@ -1287,7 +1491,7 @@ export class RAGPipeline {
         const repairedValidation = this.plan_validator.validate(repairedPlan);
 
         if (!repairedValidation.valid) {
-          return sanitizeApiResponse({
+          return this._attachLlmUsage(sanitizeApiResponse({
             question: cleanQuestion,
             plan: rawPlan,
             plan_repaired: false,
@@ -1302,13 +1506,13 @@ export class RAGPipeline {
               type: "planning_failed",
               details: repairedValidation.errors || []
             }
-          });
+          }));
         }
 
         validation = repairedValidation;
         planRepaired = true;
       } else {
-        return sanitizeApiResponse({
+        return this._attachLlmUsage(sanitizeApiResponse({
           question: cleanQuestion,
           plan: rawPlan,
           plan_repaired: false,
@@ -1323,7 +1527,7 @@ export class RAGPipeline {
             type: "planning_failed",
             details: validation.errors || []
           }
-        });
+        }));
       }
     }
 
@@ -1333,6 +1537,9 @@ export class RAGPipeline {
     const securityResource = this._getSecurityResource(validatedPlan, dataSources);
     if (authorization) assertAuthorizedSecurityResource(authorization, securityResource);
     validatedPlan.security_resource = securityResource;
+    let externalApiSource;
+    try { externalApiSource = this._getExternalApiSource(validatedPlan, dataSources, authorization); }
+    catch { return this._planningFailure(cleanQuestion, "SOURCE_NOT_AUTHORIZED", "The required authorized external API operation is unavailable for this question."); }
 
     let postgresqlSources;
     try {
@@ -1430,9 +1637,12 @@ export class RAGPipeline {
     if (dataSources.includes("security_logs")) {
       securityResult = await this._retrieveSecurityLogs(validatedPlan, workspaceId);
     }
+    if (externalApiSource) {
+      postgresResults.push(await this._retrieveExternalApi(validatedPlan, externalApiSource));
+    }
 
     const sourceStatus = this._buildSourceStatus(postgresResults, securityResult);
-    this._updateActiveEntityFromExecution(cleanQuestion, validatedPlan, postgresResults);
+    this._updateActiveEntityFromExecution(cleanQuestion, validatedPlan, postgresResults.filter(result => result.source_type === "postgresql"));
     const retrievalStates = Object.values(sourceStatus).map(item => item.retrieval_status);
 
     const successfulSources = retrievalStates.filter(state =>
@@ -1468,24 +1678,66 @@ export class RAGPipeline {
         source_status: sourceStatus,
         retrieval_status: overallRetrievalStatus
       };
-      return sanitizeApiResponse(result);
+      return this._attachLlmUsage(sanitizeApiResponse(result));
     }
 
     const candidateResolutionResult = this._resolveIndependentCandidateEvidence(validatedPlan, postgresResults);
+    const followupIdentityResolution = this._resolveFollowupIdentityResolution(
+      cleanQuestion,
+      conversationContext,
+      validatedPlan,
+      postgresResults.filter(result => result.source_type === "postgresql")
+    );
     const rawEvidence = this._prepareEvidence(postgresResults, securityResult, complexExecution);
     if (validatedPlan.candidate_resolution) rawEvidence.candidate_resolution = validatedPlan.candidate_resolution;
     if (candidateResolutionResult) rawEvidence.candidate_resolution_result = candidateResolutionResult;
+    if (followupIdentityResolution) rawEvidence.relationship_resolution = followupIdentityResolution;
     const evidence = sanitizeEvidence(rawEvidence);
+    const internalEvidenceMetrics = measureAnswerEvidenceStructure(evidence);
+    const relationshipAnswerOptions = followupIdentityResolution
+      ? {
+        relationship: {
+          final_step_id: followupIdentityResolution.final_step_id,
+          source_ids: followupIdentityResolution.source_ids,
+          resolution: followupIdentityResolution,
+          path: followupIdentityResolution.path,
+          evidence_relationships: followupIdentityResolution.evidence_relationships
+        }
+      }
+      : {};
+    const answerEvidence = typeof this.evidence_manager.prepareAnswerEvidence === "function"
+      ? this.evidence_manager.prepareAnswerEvidence(evidence, relationshipAnswerOptions)
+      : evidence;
+    const answerEvidenceMetrics = measureAnswerEvidenceStructure(answerEvidence);
+    recordAnswerEvidenceMetrics(this.llm_usage_tracker, {
+      before: internalEvidenceMetrics,
+      after: answerEvidenceMetrics
+    });
 
     // Generate answer
     let answer;
     let answerGenerationStatus = "success";
     let answerGenerationError = null;
 
-    try {
-      answer = await this.answer_generator.generate(cleanQuestion, evidence);
+    if (followupIdentityResolution?.requires_clarification) {
+      answer = followupIdentityResolution.message;
+      answerGenerationStatus = "skipped_identity_ambiguity";
+    } else try {
+      answer = await this.answer_generator.generate(cleanQuestion, answerEvidence, null, null, this.llm_usage_tracker);
     } catch (exc) {
-      answer = "I retrieved live evidence successfully, but I could not generate the final answer from that evidence.";
+      logRuntimeDiagnostic(exc, { requestId: this.request_id, phase: "answer_generation" });
+      const fallbackFn = typeof this.answer_generator.buildFallbackAnswer === "function"
+        ? this.answer_generator.buildFallbackAnswer.bind(this.answer_generator)
+        : (typeof this.answer_generator.build_fallback_answer === "function"
+          ? this.answer_generator.build_fallback_answer.bind(this.answer_generator)
+          : null);
+      try {
+        answer = fallbackFn
+          ? fallbackFn(cleanQuestion, evidence)
+          : "I retrieved live evidence successfully, but I could not generate the final answer from that evidence.";
+      } catch {
+        answer = "I retrieved live evidence successfully, but I could not generate the final answer from that evidence.";
+      }
       answerGenerationStatus = "failed";
       answerGenerationError = {
         type: exc.name || "Error",
@@ -1493,7 +1745,10 @@ export class RAGPipeline {
       };
     }
 
-    if (answerGenerationStatus === "success") {
+    // Retrieval evidence is authoritative for context even when the optional
+    // answer provider is unavailable. Keep the verified record/set anchor so
+    // the next turn can bind safely instead of losing conversation continuity.
+    if (answerGenerationStatus === "success" || hasData) {
       const addTurnFn = typeof this.context_manager.add_turn === "function"
         ? this.context_manager.add_turn.bind(this.context_manager)
         : this.context_manager.addTurn.bind(this.context_manager);
@@ -1568,7 +1823,7 @@ export class RAGPipeline {
       result.security_logs_error = securityResult.error || null;
     }
 
-    return sanitizeApiResponse(result);
+    return this._attachLlmUsage(sanitizeApiResponse(result));
   }
 
   _resolveIndependentCandidateEvidence(plan, postgresResults) {
@@ -1607,6 +1862,7 @@ export class RAGPipeline {
         if (value !== undefined && value !== null && String(value).trim()) identityValues.push(String(value).trim().toLowerCase());
       }
     }
+
     output.combined_total = new Set(identityValues).size;
     return output;
   }
