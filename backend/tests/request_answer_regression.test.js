@@ -66,7 +66,7 @@ test("meeting-project-company retrieval uses the approved dependent path and com
 
   const result = await pipeline.ask("Which meeting belongs to which project and company?", bothSources);
   assert.equal(result.retrieval_status, "success_with_data");
-  assert.deepEqual(calls.map(call => `${call.sourceId || call.source_id}:${/FROM "sessions"/i.test(call.sql) ? "sessions" : /FROM "projects"/i.test(call.sql) ? "projects" : /FROM "project_details"/i.test(call.sql) ? "project_details" : "companies"}`), [
+  assert.deepEqual(calls.filter(call => !/ANY\(\$1\)/i.test(call.sql)).map(call => `${call.sourceId || call.source_id}:${/FROM "sessions"/i.test(call.sql) ? "sessions" : /FROM "projects"/i.test(call.sql) ? "projects" : /FROM "project_details"/i.test(call.sql) ? "project_details" : "companies"}`), [
     "db2:sessions", "db2:projects", "db1:project_details", "db1:companies"
   ]);
   assert.equal(calls.some(call => call.sourceId === "db2" && /FROM "companies"/i.test(call.sql)), false);
@@ -222,12 +222,13 @@ test("recent-first invoice follow-up retrieves the related company by the verifi
 
   assert.equal(invoice.retrieval_status, "success_with_data");
   assert.equal(company.retrieval_status, "success_with_data");
-  assert.equal(calls.length, 2);
+  assert.equal(calls.filter(call => !/ANY\(\$1\)/i.test(call.sql)).length, 2);
   assert.match(calls[0].sql, /FROM "invoices"/i);
-  assert.match(calls[1].sql, /FROM "companies"/i);
-  assert.match(calls[1].sql, /"companies"\."id"\s*=\s*%s/i);
-  assert.deepEqual(calls[1].parameters, ["company-1"]);
-  assert.doesNotMatch(calls[1].sql, /invoice-1/i);
+  const primaryCalls = calls.filter(call => !/ANY\(\$1\)/i.test(call.sql));
+  assert.match(primaryCalls[1].sql, /FROM "companies"/i);
+  assert.match(primaryCalls[1].sql, /"companies"\."id"\s*=\s*%s/i);
+  assert.deepEqual(primaryCalls[1].parameters, ["company-1"]);
+  assert.doesNotMatch(primaryCalls[1].sql, /invoice-1/i);
   assert.equal(company.answer, "Example Company is associated with the invoice.");
   assert.ok(answerEvidence[1].items.some(item => item.row?.name === "Example Company"));
   assert.deepEqual(manager.getActiveContext().stable_keys, { id: "company-1" });
@@ -261,10 +262,11 @@ test("source-qualified meeting details and project-to-meeting bindings reach moc
   manager.setActiveContext({ source_id: "db1", table: "project_details", stable_keys: { project_id_display: "P-1" } });
   const related = await pipeline.ask("Show me that project's meetings.", bothSources);
   assert.equal(related.retrieval_status, "success_with_data");
-  assert.deepEqual(calls.map(call => call.sourceId), ["db1", "db2", "db2"]);
-  assert.match(calls[1].sql, /"projects"\."project_code"/i);
-  assert.match(calls[2].sql, /"sessions"\."project_id"/i);
-  assert.deepEqual(calls[2].parameters, [["db2-project-1"]]);
+  const primaryCalls = calls.filter(call => !/ANY\(\$1\)/i.test(call.sql));
+  assert.deepEqual(primaryCalls.map(call => call.sourceId), ["db1", "db2", "db2"]);
+  assert.match(primaryCalls[1].sql, /"projects"\."project_code"/i);
+  assert.match(primaryCalls[2].sql, /"sessions"\."project_id"/i);
+  assert.deepEqual(primaryCalls[2].parameters, [["db2-project-1"]]);
   assert.equal(related.answer, "Grounded answer");
   assert.deepEqual(manager.getActiveContext().stable_keys, { session_id: "session-1", project_id: "db2-project-1" });
   assert.equal(manager.getActiveContext().source_id, "db2");

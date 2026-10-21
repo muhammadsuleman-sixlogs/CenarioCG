@@ -301,7 +301,7 @@ test("pipeline preserves the multi-row user set and sends only final relationshi
 
   assert.equal(first.retrieval_status, "success_with_data");
   assert.equal(second.retrieval_status, "success_with_data");
-  assert.equal(queryCount, 3);
+  assert.equal(queryCount, 5);
   assert.equal(manager.getActiveContext().record_set, undefined);
   assert.equal(captured.length, 2);
   assert.equal(captured[1].evidence_scope, "verified_relationship");
@@ -351,7 +351,7 @@ test("pipeline applies an explicit email to the prior user set before selecting 
   const result = await pipeline.ask("Which company does this user belong to? umar.daraz@sixlogs.com", auth);
 
   assert.equal(result.retrieval_status, "success_with_data");
-  assert.equal(queryCount, 3);
+  assert.equal(queryCount, 5);
   assert.ok(capturedSql.some(sql => /"users"\."email"\s+ILIKE\s+%s/i.test(sql)));
   assert.equal(manager.getActiveContext().table, "companies");
   assert.equal(manager.getActiveContext().stable_keys.id, "c1");

@@ -234,7 +234,7 @@ export class EvidenceManager {
 
       const result = {};
       for (const [key, item] of Object.entries(value)) {
-        if (key === "rows") continue;
+        if (key === "rows" || key === "_internal") continue;
         result[key] = stripRows(item);
       }
       return result;
@@ -260,7 +260,7 @@ export class EvidenceManager {
             retrieval_status: "unknown",
             retrieved_at: null,
             truncated: false,
-            row
+            row: stripRows(row)
           });
         }
       };
@@ -295,6 +295,11 @@ export class EvidenceManager {
         });
       }
       answerEvidence.items = canonicalItems;
+    } else if (Array.isArray(answerEvidence.items)) {
+      answerEvidence.items = answerEvidence.items.map(item => ({
+        ...item,
+        row: stripRows(item?.row)
+      }));
     }
 
     if (Array.isArray(evidence.sources)) {

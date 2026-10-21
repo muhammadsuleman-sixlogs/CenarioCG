@@ -29,7 +29,7 @@ const GLOBAL_REPLACE_PATTERNS = [
   /-----BEGIN\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi,
 ];
 
-const PUBLIC_INTERNAL_KEYS = /(?:^|_)(?:sql|query|source_id|source_ids|table|tables|column|columns|sql_columns|primary_key|primary_keys|evidence|plan|retrieval_contract|parameters|raw_rows?)$/i;
+const PUBLIC_INTERNAL_KEYS = /(?:^|_)(?:sql|query|source_id|source_ids|table|tables|column|columns|sql_columns|primary_key|primary_keys|evidence|plan|retrieval_contract|parameters|raw_rows?|_internal)$/i;
 
 function public_hash(value) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 20);
@@ -191,7 +191,17 @@ export function sanitize_evidence(evidence) {
     return {};
   }
 
-  const sanitized = sanitize_sensitive_values(evidence);
+  const stripInternal = value => {
+    if (Array.isArray(value)) return value.map(stripInternal);
+    if (!value || typeof value !== "object") return value;
+    const result = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "_internal") continue;
+      result[key] = stripInternal(item);
+    }
+    return result;
+  };
+  const sanitized = stripInternal(sanitize_sensitive_values(evidence));
 
   if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
     return {};
@@ -214,6 +224,9 @@ export function sanitize_api_response(response) {
     return {};
   }
 
+  // Keep this compatibility sanitizer focused on credential values. The
+  // public chat projection is applied explicitly at the API boundary so
+  // internal pipeline callers and tracing retain their established shape.
   const sanitized = sanitize_sensitive_values(response);
 
   if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {

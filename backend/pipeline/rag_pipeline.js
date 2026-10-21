@@ -10,6 +10,7 @@ import { createRetrievalContract } from "../retrieval/retrieval_contract.js";
 import { RetrievalExecutor } from "../retrieval/retrieval_executor.js";
 import { SQLGenerator } from "../retrieval/sql_generator.js";
 import { getCategoricalValues, setCategoricalValues } from "../retrieval/categorical_value_cache.js";
+import { enrichRetrievedRows } from "../retrieval/label_enricher.js";
 import { SourceTracker } from "../tracing/source_tracker.js";
 import { SecurityLogRetriever } from "../security_logs/retriever.js";
 import { ExternalApiClient } from "../external_api/client.js";
@@ -976,6 +977,29 @@ export class RAGPipeline {
           }
         } else {
           throw exc;
+        }
+      }
+
+      const finalTable = Array.isArray(executionContract.required_tables)
+        ? executionContract.required_tables.at(-1)
+        : null;
+      const context = this.plan_validator.contexts?.[sourceId];
+      if (finalTable && context && Array.isArray(retrieval?.rows) && retrieval.rows.length) {
+        try {
+          retrieval = {
+            ...retrieval,
+            rows: await enrichRetrievedRows({
+              rows: retrieval.rows,
+              sourceId,
+              table: finalTable,
+              context,
+              maxRows: this.evidence_manager.maxRows,
+              execute: (lookupQuery, lookupSource, lookupBindings) =>
+                this._executePostgresqlLive(lookupQuery, lookupSource, lookupBindings)
+            })
+          };
+        } catch (labelError) {
+          logRuntimeDiagnostic(labelError, { requestId: this.request_id, sourceId, phase: "label_enrichment" });
         }
       }
 

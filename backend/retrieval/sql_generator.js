@@ -923,8 +923,20 @@ export class SQLGenerator {
       );
     }
 
+    // Label enrichment needs relationship-role foreign keys on the final
+    // record table. Add only schema-grounded, same-source, non-sensitive FKs.
+    const finalTable = (contract.required_tables || []).at(-1);
+    const roles = this.context?.semantic_catalog?.entities?.[finalTable]?.column_roles || {};
+    for (const [column, role] of Object.entries(roles)) {
+      if (role?.role !== "foreign_key" || !role.relationship_role || isSensitiveFieldName(column)) continue;
+      if (!this._tables()[finalTable] || !this._tables()[role.target_table]) continue;
+      const finalColumns = new Set((this._tables()[finalTable].columns || []).map(item => String(item?.name || item)));
+      if (!finalColumns.has(column)) continue;
+      expressions.push(this._qualified_identifier(finalTable, column));
+    }
+
     if (expressions.length > 0) {
-      return expressions.join(", ");
+      return [...new Set(expressions)].join(", ");
     }
 
     // Never fall back to SELECT * for an unconstrained retrieval.
