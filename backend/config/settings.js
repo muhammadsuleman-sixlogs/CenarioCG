@@ -107,6 +107,7 @@ export const settings = {
   contextRefreshOnStartup: cleanEnvStr(process.env.CONTEXT_REFRESH_ON_STARTUP, "true").toLowerCase() === "true",
   contextRefreshIntervalMs: parseInt(cleanEnvStr(process.env.CONTEXT_REFRESH_INTERVAL_MS, "900000"), 10),
   contextSnapshotRetention: parseInt(cleanEnvStr(process.env.CONTEXT_SNAPSHOT_RETENTION, "5"), 10),
+  categoricalValueCacheTtlMs: parseInt(cleanEnvStr(process.env.CATEGORICAL_VALUE_CACHE_TTL_MS, "30000"), 10),
 
   // Security SIEM API
   securityApiBaseUrl: cleanEnvStr(process.env.SECURITY_API_BASE_URL, ""),

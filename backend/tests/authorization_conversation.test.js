@@ -17,6 +17,8 @@ test("workspace authorization is server-owned and fails closed", () => {
 test("conversation state is isolated by principal and workspace", () => {
   const store = new ConversationStore();
   const first = store.getOrCreate({ principal: "alice", workspaceId: "workspace-a" });
+  assert.match(first.conversation.id, /^conv_[A-Za-z0-9_-]{24}$/);
+  assert.doesNotMatch(first.conversation.id, /^[0-9a-f-]{36}$/i);
   first.conversation.context_manager.setActiveContext({ entity_id: "one" });
   const same = store.getOrCreate({ conversationId: first.conversation.id, principal: "alice", workspaceId: "workspace-a" });
   assert.strictEqual(same.conversation.context_manager.getActiveContext().entity_id, "one");

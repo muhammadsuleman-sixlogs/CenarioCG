@@ -8,6 +8,7 @@ import { SourceRouter } from "../planning/source_router.js";
 import { SQLGenerator } from "../retrieval/sql_generator.js";
 import { validateReadOnlyQuery } from "../database/readonly_guard.js";
 import { OFFLINE_PROVIDER } from "./test_context.js";
+import { clearCategoricalValueCache, getCategoricalValues, setCategoricalValues } from "../retrieval/categorical_value_cache.js";
 
 function fixture() {
   return {
@@ -41,6 +42,7 @@ function fixture() {
 }
 
 function pipelineFor(contexts) {
+  clearCategoricalValueCache();
   const pipeline = new RAGPipeline(new ContextManager());
   const validator = new QuestionPlanValidator(contexts);
   pipeline.plan_validator = validator;
@@ -130,6 +132,9 @@ test("status capitalization variants reach mocked execution and one grounded ans
       async execute(sql, sourceId, parameters = []) {
         validateReadOnlyQuery(sql);
         calls.push({ sql, sourceId, parameters });
+        if (/SELECT "value" FROM/i.test(sql)) {
+          return { rows: [{ value: "PENDING" }], row_count: 1, columns: ["value"] };
+        }
         return { rows: [{ id: "T-Case-17", status: "PENDING" }], row_count: 1, columns: ["id", "status"] };
       }
     };
@@ -188,6 +193,9 @@ test("count requests never execute without the mandatory verified status filter"
       async execute(sql, sourceId, parameters = []) {
         validateReadOnlyQuery(sql);
         observedSql.push({ sql, sourceId, parameters });
+        if (/SELECT "value" FROM/i.test(sql)) {
+          return { rows: [{ value: "pending" }], row_count: 1, columns: ["value"] };
+        }
         return { rows: [{ count: "96" }], row_count: 1, columns: ["count"] };
       }
     };
@@ -198,7 +206,7 @@ test("count requests never execute without the mandatory verified status filter"
       authorization: { postgresql_sources: ["db1"], security_resources: [] }
     });
     assert.equal(result.retrieval_status, "success_with_data");
-    assert.equal(result.answer, "Total pending tickets: 96.");
+  assert.equal(result.answer, "There are 96 tickets.");
   }
 
   assert.equal(observedSql.length, 4);
@@ -215,7 +223,7 @@ test("discovered categorical columns require read-only value verification before
     async execute(sql, sourceId, parameters) {
       validateReadOnlyQuery(sql);
       calls.push({ sql, sourceId, parameters });
-      if (/SELECT 1 AS "exists"/i.test(sql)) return { rows: [{ exists: 1 }], row_count: 1, columns: ["exists"] };
+      if (/SELECT "value" FROM/i.test(sql)) return { rows: [{ value: "pending" }], row_count: 1, columns: ["value"] };
       return { rows: [{ count: "96" }], row_count: 1, columns: ["count"] };
     }
   };
@@ -227,9 +235,9 @@ test("discovered categorical columns require read-only value verification before
   });
   assert.equal(result.retrieval_status, "success_with_data");
   assert.equal(calls.length, 2);
-  assert.match(calls[0].sql, /SELECT 1 AS "exists"/i);
-  assert.match(calls[0].sql, /"tickets"\."status"\s+ILIKE\s+\$1/i);
-  assert.deepEqual(calls[0].parameters, ["pending"]);
+  assert.match(calls[0].sql, /SELECT "value" FROM/i);
+  assert.match(calls[0].sql, /SELECT DISTINCT CAST\("tickets"\."status" AS text\)/i);
+  assert.deepEqual(calls[0].parameters || [], []);
   assert.match(calls[1].sql, /COUNT\(\*\)/i);
   assert.match(calls[1].sql, /"status"\s+ILIKE\s+%s/i);
   assert.deepEqual(calls[1].parameters, ["pending"]);
@@ -243,19 +251,19 @@ test("unsupported categorical values fail closed before an aggregate query", asy
     async execute(sql) {
       validateReadOnlyQuery(sql);
       calls.push(sql);
-      return { rows: [], row_count: 0, columns: ["exists"] };
+      return { rows: [{ value: "open" }, { value: "closed" }], row_count: 2, columns: ["value"] };
     }
   };
   pipeline.answer_generator = { async generate() { answerCalled = true; return "must not run"; } };
 
-  const result = await pipeline.ask("show me total tickets banana", {
+  const result = await pipeline.ask("show me total tickets with status banana", {
     workspace_id: "offline",
     authorization: { postgresql_sources: ["db1"], security_resources: [] }
   });
-  assert.equal(result.retrieval_status, "source_unavailable");
+  assert.equal(result.retrieval_status, "categorical_value_unverified");
   assert.equal(calls.length, 1);
-  assert.match(calls[0], /SELECT 1 AS "exists"/i);
-  assert.match(calls[0], /ILIKE \$1/i);
+  assert.match(calls[0], /SELECT DISTINCT CAST/i);
+  assert.deepEqual(result.clarification_required.allowed_values, ["open", "closed"]);
   assert.equal(answerCalled, false);
 });
 
@@ -285,7 +293,7 @@ test("categorical verification database failures do not run the aggregate", asyn
   });
   assert.equal(result.retrieval_status, "source_unavailable");
   assert.equal(calls.length, 1);
-  assert.match(calls[0], /ILIKE \$1/i);
+  assert.match(calls[0], /SELECT DISTINCT CAST/i);
 });
 
 test("enum categorical filters cast to text before case-insensitive comparison", () => {
@@ -335,4 +343,25 @@ test("bounded categorical verification accepts verified separator variants", () 
   assert.deepEqual(prepared.parameters, ["in progress"]);
   assert.match(sql, /regexp_replace\(lower\(CAST\("projects"\."status" AS text\)\)/i);
   validateReadOnlyQuery(sql);
+});
+
+test("count intent does not invent a status filter from an entity name", () => {
+  const contexts = ticketFixture();
+  const planner = new QuestionPlanner(contexts);
+  const plan = planner._ensure_verified_status_filter({
+    data_sources: ["postgresql"],
+    postgresql_sources: ["db1"],
+    required_tables: ["tickets"],
+    filters: [{ table: "tickets", field: "status", operator: "=", value: "New Company" }],
+    operations: ["count"]
+  }, "show New Company total tickets");
+  assert.equal(plan.filters.some(filter => /status/i.test(filter.field || "")), false);
+});
+
+test("categorical cache deduplicates case-only values and clears", () => {
+  clearCategoricalValueCache();
+  setCategoricalValues("db1", "tickets", "status", ["Pending", "pending", "Open"], 10_000);
+  assert.deepEqual(getCategoricalValues("db1", "tickets", "status"), ["Pending", "Open"]);
+  clearCategoricalValueCache();
+  assert.equal(getCategoricalValues("db1", "tickets", "status"), null);
 });

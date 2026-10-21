@@ -118,7 +118,7 @@ test("pipeline sends compact evidence to the answer generator but returns full i
   assert.equal(answerEvidence.sources[0].rows, undefined);
   assert.equal(answerEvidence.postgresql.rows, undefined);
   assert.equal(answerEvidence.items.length, 10);
-  assert.equal(answerEvidence.items[0].row.id, "db1-task-0");
+  assert.equal(answerEvidence.items[0].row.id, undefined);
 });
 
 test("source provenance and graph/source tracing remain based on the original evidence", () => {

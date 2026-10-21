@@ -9,6 +9,7 @@
  *
  * This class does not access or modify any data source.
  */
+import { isSensitiveFieldName } from "../security/sensitive_data_policy.js";
 export class EvidenceManager {
   static EVENT_RESOURCES = new Set([
     "security_logs",
@@ -84,6 +85,7 @@ export class EvidenceManager {
       row_count: limitedRows.length,
       total_retrieved: rows.length,
       truncated: rows.length > this.maxRows,
+      sampled: Boolean(retrieval.sampled || retrieval.is_sampled),
       sources: limitedSources
     };
   }
@@ -119,6 +121,7 @@ export class EvidenceManager {
       event_count: limitedEvents.length,
       total_retrieved: events.length,
       truncated: events.length > this.maxEvents,
+      sampled: Boolean(retrieval.sampled || retrieval.is_sampled),
       sources: limitedSources
     };
   }
@@ -228,13 +231,36 @@ export class EvidenceManager {
     // but those copies remain available on the internal evidence object used
     // for API responses, source tracing, fallback answers, and conversation
     // continuity.  Strip only duplicate row arrays from this answer copy.
+    const shouldKeepBusinessDate = question => /\b(?:date|time|timestamp|when|created|creation|updated|meeting)\b/i.test(String(question || ""));
+    const projectRow = (row, sourceId, table) => {
+      if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+      const context = options?.contexts?.[sourceId];
+      if (!context) {
+        const copy = { ...row };
+        delete copy._internal;
+        return copy;
+      }
+      const roles = context?.semantic_catalog?.entities?.[table]?.column_roles || {};
+      const keepDates = shouldKeepBusinessDate(options?.question);
+      const result = {};
+      for (const [key, value] of Object.entries(row)) {
+        if (key === "_internal" || isSensitiveFieldName(key)) continue;
+        const role = roles[key]?.role;
+        if (role === "internal_id" || role === "foreign_key") continue;
+        if (/(?:^|_)(?:id|uuid|key)$|(?:^|_)(?:id|uuid|key)_/i.test(key) && !key.endsWith("_label")) continue;
+        if (/^(?:created_at|updated_at|deleted_at)$/i.test(key) && !keepDates) continue;
+        result[key] = value;
+      }
+      return result;
+    };
+
     const stripRows = value => {
       if (Array.isArray(value)) return value.map(stripRows);
       if (!value || typeof value !== "object") return value;
 
       const result = {};
       for (const [key, item] of Object.entries(value)) {
-        if (key === "rows") continue;
+        if (key === "rows" || key === "_internal") continue;
         result[key] = stripRows(item);
       }
       return result;
@@ -260,7 +286,7 @@ export class EvidenceManager {
             retrieval_status: "unknown",
             retrieved_at: null,
             truncated: false,
-            row
+            row: projectRow(stripRows(row), sourceId || source.source_id || null, source.tables?.[0] || null)
           });
         }
       };
@@ -295,6 +321,11 @@ export class EvidenceManager {
         });
       }
       answerEvidence.items = canonicalItems;
+    } else if (Array.isArray(answerEvidence.items)) {
+      answerEvidence.items = answerEvidence.items.map(item => ({
+        ...item,
+        row: projectRow(stripRows(item?.row), item?.source_id || null, item?.table || null)
+      }));
     }
 
     if (Array.isArray(evidence.sources)) {

@@ -9,6 +9,8 @@
  * This module does not access or modify any database.
  */
 
+import crypto from "node:crypto";
+
 // Generic patterns for values that should never be exposed.
 // These patterns intentionally target credential-like structures
 // rather than ordinary business values.
@@ -26,6 +28,73 @@ const GLOBAL_REPLACE_PATTERNS = [
   /\b(?:password|passwd|passcode|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|credential)\s*[:=]\s*[^\s,;]+/gi,
   /-----BEGIN\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi,
 ];
+
+export const UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
+
+const PUBLIC_INTERNAL_KEYS = /(?:^|_)(?:sql|query|source_id|source_ids|table|tables|column|columns|sql_columns|primary_key|primary_keys|evidence|plan|retrieval_contract|parameters|raw_rows?|_internal)$/i;
+
+function public_hash(value) {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 20);
+}
+
+export function opaque_public_ref(kind, value) {
+  return `${String(kind || "ref").replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_${public_hash(value)}`;
+}
+
+export const opaquePublicRef = opaque_public_ref;
+
+export function public_source_descriptor(sourceId, sourceType = "postgresql", details = {}) {
+  const normalized = String(sourceId || "").trim().toLowerCase();
+  const type = String(sourceType || "postgresql").trim().toLowerCase();
+  const known = {
+    db1: { key: "base", label: "Base DB" },
+    db2: { key: "companion", label: "Companion DB" },
+    security_logs: { key: "security_logs", label: "Security Logs" },
+    security_logs_api: { key: "security_logs", label: "Security Logs" }
+  };
+  const fallback = type === "postgresql"
+    ? { key: "database", label: "Database" }
+    : { key: "external", label: "External source" };
+  const selected = known[normalized] || fallback;
+
+  return {
+    source_ref: opaque_public_ref("source", `${type}:${normalized || selected.key}`),
+    source_key: selected.key,
+    source_label: selected.label,
+    source_type: type,
+    ...(Number.isFinite(Number(details.row_count)) ? { row_count: Number(details.row_count) } : {}),
+    ...(Number.isFinite(Number(details.event_count)) ? { event_count: Number(details.event_count) } : {}),
+    ...(details.retrieval_status ? { retrieval_status: String(details.retrieval_status) } : {}),
+    ...(details.truncated !== undefined ? { truncated: Boolean(details.truncated) } : {})
+  };
+}
+
+export const publicSourceDescriptor = public_source_descriptor;
+
+export function project_public_response(response) {
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    return {};
+  }
+
+  const project = (value, key = "") => {
+    if (Array.isArray(value)) return value.map(item => project(item, key)).filter(item => item !== undefined);
+    if (value && typeof value === "object" && !(value instanceof Date) && !(value instanceof RegExp)) {
+      const output = {};
+      for (const [childKey, childValue] of Object.entries(value)) {
+        if (PUBLIC_INTERNAL_KEYS.test(childKey)) continue;
+        const projected = project(childValue, childKey);
+        if (projected !== undefined) output[childKey] = projected;
+      }
+      return output;
+    }
+    if (typeof value === "string" && PUBLIC_INTERNAL_KEYS.test(key)) return undefined;
+    return value;
+  };
+
+  return sanitize_sensitive_values(project(response));
+}
+
+export const projectPublicResponse = project_public_response;
 
 /**
  * Return true if a value contains a credential-like pattern.
@@ -64,6 +133,12 @@ export function sanitize_output_text(text) {
 }
 
 export const sanitizeOutputText = sanitize_output_text;
+
+export function sanitize_public_answer_text(text) {
+  return sanitize_output_text(text).replace(UUID_PATTERN, "[REDACTED ID]");
+}
+
+export const sanitizePublicAnswerText = sanitize_public_answer_text;
 
 /**
  * Reject output containing credential-like values.
@@ -124,7 +199,17 @@ export function sanitize_evidence(evidence) {
     return {};
   }
 
-  const sanitized = sanitize_sensitive_values(evidence);
+  const stripInternal = value => {
+    if (Array.isArray(value)) return value.map(stripInternal);
+    if (!value || typeof value !== "object") return value;
+    const result = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "_internal") continue;
+      result[key] = stripInternal(item);
+    }
+    return result;
+  };
+  const sanitized = stripInternal(sanitize_sensitive_values(evidence));
 
   if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
     return {};
@@ -147,6 +232,9 @@ export function sanitize_api_response(response) {
     return {};
   }
 
+  // Keep this compatibility sanitizer focused on credential values. The
+  // public chat projection is applied explicitly at the API boundary so
+  // internal pipeline callers and tracing retain their established shape.
   const sanitized = sanitize_sensitive_values(response);
 
   if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) {
@@ -164,6 +252,8 @@ export default {
   containsSensitiveValue,
   sanitize_output_text,
   sanitizeOutputText,
+  sanitize_public_answer_text,
+  sanitizePublicAnswerText,
   validate_output_text,
   validateOutputText,
   sanitize_sensitive_values,
