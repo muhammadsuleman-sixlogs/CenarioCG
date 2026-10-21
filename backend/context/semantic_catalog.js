@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import { resolve } from "path";
 import { fileURLToPath } from "url";
+import { isSensitiveFieldName } from "../security/sensitive_data_policy.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = resolve(__filename, "..");
@@ -21,6 +22,86 @@ function tableColumns(context, table) {
 
 function humanize(value) {
   return String(value || "").replace(/[_-]+/g, " ").trim();
+}
+
+function columnName(column) {
+  return String(column?.name || column || "").trim();
+}
+
+function isTimestampColumn(column) {
+  const name = columnName(column).toLowerCase();
+  const type = String(column?.type || "").toLowerCase();
+  return /(?:^|_)(?:at|date|time|timestamp)$/.test(name) || /date|time|timestamp/.test(type);
+}
+
+function isMetricColumn(column) {
+  const name = columnName(column).toLowerCase();
+  const type = String(column?.type || "").toLowerCase();
+  return /int|numeric|decimal|double|real|float|money/.test(type) && /(?:count|total|amount|cost|price|budget|duration|progress|score|quantity|rate|minutes?|hours?)/i.test(name);
+}
+
+function relationshipRole(column) {
+  return humanize(column).replace(/\b(?:id|uuid|key)\b/gi, "").replace(/\s+/g, " ").trim() || "related entity";
+}
+
+function buildColumnProfiles(context, table, info) {
+  const columns = Array.isArray(info?.columns) ? info.columns : [];
+  const primaryKeys = new Set((info?.primary_keys || []).map(String));
+  const relationships = (context?.relationships || []).filter(item =>
+    item?.source_table === table && item?.source_column && item?.target_table && item?.target_column &&
+    String(item.relationship_type || "").toUpperCase() === "FOREIGN_KEY"
+  );
+  const foreignKeys = new Map(relationships.map(item => [String(item.source_column), item]));
+  const displayCandidates = columns
+    .filter(column => !isSensitiveFieldName(columnName(column)))
+    .map(column => columnName(column))
+    .filter(Boolean);
+  const names = new Set(displayCandidates.map(value => value.toLowerCase()));
+  const displayColumns = [];
+  if (names.has("first_name") && names.has("last_name")) displayColumns.push("first_name", "last_name");
+  if (displayColumns.length === 0) {
+    const selected = displayCandidates.find(value => /^(?:name|title|subject|label)$|(?:_name|_title|_subject|_label)$/i.test(value));
+    if (selected) displayColumns.push(selected);
+  }
+  const secondary = displayCandidates.find(value =>
+    !displayColumns.includes(value) && /(?:code|reference|number|key)$/i.test(value) && !primaryKeys.has(value)
+  ) || null;
+  const columnRoles = {};
+  for (const column of columns) {
+    const name = columnName(column);
+    if (!name) continue;
+    const relationship = foreignKeys.get(name);
+    let role = "other";
+    const definition = { role };
+    if (relationship) {
+      role = "foreign_key";
+      definition.role = role;
+      definition.target_table = relationship.target_table;
+      definition.target_column = relationship.target_column;
+      definition.relationship_role = relationshipRole(name);
+    } else if (primaryKeys.has(name) || /^id$|(?:_id|_uuid)$/i.test(name) || /uuid/i.test(String(column?.type || ""))) {
+      role = "internal_id";
+      definition.role = role;
+    } else if (/^(?:status|state|workflow_state|lifecycle_state)(?:$|_)/i.test(name)) {
+      role = "status";
+      definition.role = role;
+    } else if (isTimestampColumn(column)) {
+      role = "timestamp";
+      definition.role = role;
+    } else if (isMetricColumn(column)) {
+      role = "metric";
+      definition.role = role;
+    } else if (displayColumns.includes(name) || secondary === name) {
+      role = "display";
+      definition.role = role;
+    }
+    columnRoles[name] = definition;
+  }
+  return {
+    display_template: displayColumns.length > 0 ? { columns: displayColumns, separator: " " } : null,
+    secondary_label: secondary,
+    column_roles: columnRoles
+  };
 }
 
 /**
@@ -47,7 +128,8 @@ export function deriveTechnicalEntities(context) {
       technical_entity: true,
       trust_level: "discovered_technical",
       identifier_columns: identifierColumns,
-      primary_keys: Array.isArray(info?.primary_keys) ? [...info.primary_keys] : []
+      primary_keys: Array.isArray(info?.primary_keys) ? [...info.primary_keys] : [],
+      ...buildColumnProfiles(context, table, info)
     };
   }
   return entities;
@@ -104,6 +186,22 @@ export function validateSemanticCatalog(contexts, catalog, relationshipEvidence 
       if (entity.identity) {
         if (!entity.identity.column || !tableColumns(contexts[sourceId], table).has(entity.identity.column)) errors.push(`${sourceId}.${table} identity column is not a discovered column`);
         if (!entity.identity.group || !entity.identity.mapping_id || entity.identity.validation_status !== "validated" || !Array.isArray(entity.identity.provenance) || entity.identity.provenance.length === 0) errors.push(`${sourceId}.${table} identity mapping requires validated provenance`);
+      }
+      if (entity.display_template) {
+        const displayColumns = Array.isArray(entity.display_template)
+          ? entity.display_template
+          : entity.display_template.columns;
+        if (!Array.isArray(displayColumns) || displayColumns.length === 0 || displayColumns.some(column => !tableColumns(contexts[sourceId], table).has(String(column)))) {
+          errors.push(`${sourceId}.${table} display_template references unavailable columns`);
+        }
+      }
+      if (entity.secondary_label && !tableColumns(contexts[sourceId], table).has(String(entity.secondary_label))) {
+        errors.push(`${sourceId}.${table}.${entity.secondary_label} secondary label is not a discovered column`);
+      }
+      for (const [column, role] of Object.entries(entity.column_roles || {})) {
+        if (!tableColumns(contexts[sourceId], table).has(column)) errors.push(`${sourceId}.${table}.${column} column role references an unavailable column`);
+        if (!role || typeof role !== "object" || !["display", "internal_id", "foreign_key", "status", "timestamp", "metric", "other"].includes(role.role)) errors.push(`${sourceId}.${table}.${column} has an invalid column role`);
+        if (role?.role === "foreign_key" && (!role.target_table || !role.target_column || !contexts[sourceId]?.tables?.[role.target_table] || !tableColumns(contexts[sourceId], role.target_table).has(String(role.target_column)))) errors.push(`${sourceId}.${table}.${column} foreign key role is not schema-grounded`);
       }
     }
   }
@@ -182,6 +280,35 @@ export function reconcileSemanticCatalog(contexts, catalog, { generation = null,
         if (unavailable.length > 0) {
           entity[field] = entity[field].filter(column => columns.has(String(column)));
           invalidated.push({ kind: field, source_id: sourceId, table, columns: unavailable, reason: "column_unavailable" });
+        }
+      }
+      if (entity.display_template) {
+        const rawDisplayColumns = Array.isArray(entity.display_template)
+          ? entity.display_template
+          : entity.display_template.columns;
+        const availableDisplayColumns = Array.isArray(rawDisplayColumns)
+          ? rawDisplayColumns.filter(column => columns.has(String(column)))
+          : [];
+        if (availableDisplayColumns.length !== (Array.isArray(rawDisplayColumns) ? rawDisplayColumns.length : 0)) {
+          if (availableDisplayColumns.length > 0) {
+            entity.display_template = { ...(entity.display_template || {}), columns: availableDisplayColumns };
+          } else {
+            delete entity.display_template;
+          }
+          invalidated.push({ kind: "display_template", source_id: sourceId, table, reason: "column_unavailable" });
+        }
+      }
+      if (entity.secondary_label && !columns.has(String(entity.secondary_label))) {
+        const column = entity.secondary_label;
+        delete entity.secondary_label;
+        invalidated.push({ kind: "secondary_label", source_id: sourceId, table, column, reason: "column_unavailable" });
+      }
+      if (entity.column_roles && typeof entity.column_roles === "object") {
+        for (const [column, role] of Object.entries(entity.column_roles)) {
+          if (!columns.has(column) || (role?.role === "foreign_key" && (!contexts[sourceId]?.tables?.[role.target_table] || !tableColumns(contexts[sourceId], role.target_table).has(String(role.target_column))))) {
+            delete entity.column_roles[column];
+            invalidated.push({ kind: "column_role", source_id: sourceId, table, column, reason: "column_unavailable" });
+          }
         }
       }
     }
@@ -290,7 +417,14 @@ export function attachSemanticCatalog(contexts, catalog = null) {
     // Approved entries always win. Derived entries are intentionally scoped to
     // tables missing an approved definition and can never provide identity or
     // verified-path authority.
-    const entities = { ...deriveTechnicalEntities(context), ...approved };
+    const derived = deriveTechnicalEntities(context);
+    const entities = Object.fromEntries(Object.keys(derived).map(table => [table, {
+      ...derived[table],
+      ...(approved[table] || {}),
+      display_template: approved[table]?.display_template || derived[table].display_template,
+      secondary_label: approved[table]?.secondary_label || derived[table].secondary_label,
+      column_roles: { ...derived[table].column_roles, ...(approved[table]?.column_roles || {}) }
+    }]));
     return [sourceId, {
       ...context,
       semantic_catalog_status: status,
