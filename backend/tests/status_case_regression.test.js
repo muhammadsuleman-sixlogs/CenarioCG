@@ -206,7 +206,7 @@ test("count requests never execute without the mandatory verified status filter"
       authorization: { postgresql_sources: ["db1"], security_resources: [] }
     });
     assert.equal(result.retrieval_status, "success_with_data");
-    assert.equal(result.answer, "Total pending tickets: 96.");
+  assert.equal(result.answer, "There are 96 tickets.");
   }
 
   assert.equal(observedSql.length, 4);

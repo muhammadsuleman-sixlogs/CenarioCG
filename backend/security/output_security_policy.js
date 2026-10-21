@@ -29,6 +29,8 @@ const GLOBAL_REPLACE_PATTERNS = [
   /-----BEGIN\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi,
 ];
 
+export const UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
+
 const PUBLIC_INTERNAL_KEYS = /(?:^|_)(?:sql|query|source_id|source_ids|table|tables|column|columns|sql_columns|primary_key|primary_keys|evidence|plan|retrieval_contract|parameters|raw_rows?|_internal)$/i;
 
 function public_hash(value) {
@@ -131,6 +133,12 @@ export function sanitize_output_text(text) {
 }
 
 export const sanitizeOutputText = sanitize_output_text;
+
+export function sanitize_public_answer_text(text) {
+  return sanitize_output_text(text).replace(UUID_PATTERN, "[REDACTED ID]");
+}
+
+export const sanitizePublicAnswerText = sanitize_public_answer_text;
 
 /**
  * Reject output containing credential-like values.
@@ -244,6 +252,8 @@ export default {
   containsSensitiveValue,
   sanitize_output_text,
   sanitizeOutputText,
+  sanitize_public_answer_text,
+  sanitizePublicAnswerText,
   validate_output_text,
   validateOutputText,
   sanitize_sensitive_values,

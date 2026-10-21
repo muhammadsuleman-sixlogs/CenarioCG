@@ -5,7 +5,7 @@ import {
   recordAnswerEvidenceMetrics,
   recordLlmAttempt
 } from "./usage_tracker.js";
-import { sanitizeOutputText } from "../security/output_security_policy.js";
+import { sanitizePublicAnswerText } from "../security/output_security_policy.js";
 
 /**
  * Generate concise, natural-language answers from retrieved evidence.
@@ -28,7 +28,7 @@ export class AnswerGenerator {
       throw new Error("Evidence must be a dictionary.");
     }
 
-    const evidenceStr = typeof evidence === "string" ? evidence : JSON.stringify(evidence, null, 2);
+    const evidenceStr = typeof evidence === "string" ? evidence : JSON.stringify(evidence);
 
     return `
 You are a natural, concise, and trustworthy data assistant.
@@ -57,6 +57,9 @@ ANSWERING RULES:
 2. Write like a helpful human assistant.
    Use natural language, clear sentences, and a clean structure.
    Avoid robotic, repetitive, or database-dump-style responses.
+
+   Use ASD-STE100-inspired English. Keep sentences short and clear.
+   Preserve technical details.
 
 3. The retrieved evidence is the ONLY factual source available to you.
    Never introduce facts, names, numbers, dates, relationships, or conclusions
@@ -156,6 +159,10 @@ ANSWERING RULES:
     - amounts
     - statuses
     when they are present in the evidence.
+
+    Use human-readable labels and label fields when available. Never mention
+    internal UUIDs, primary keys, foreign keys, source IDs, or column names
+    such as owner_consultant_id.
 
 27. Never claim that a record, entity, event, relationship, or value exists
     unless it appears in the retrieved evidence.
@@ -284,8 +291,8 @@ Return ONLY the final answer to the user.
     }
 
     // Apply security output sanitization
-    if (typeof sanitizeOutputText === "function") {
-      answer = sanitizeOutputText(answer);
+    if (typeof sanitizePublicAnswerText === "function") {
+      answer = sanitizePublicAnswerText(answer);
     }
 
     return answer;

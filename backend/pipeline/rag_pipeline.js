@@ -122,6 +122,23 @@ function categoricalVerificationError({ sourceId, table, field, requested, allow
   return error;
 }
 
+function scalarCountAnswer(question, plan, evidence) {
+  const grouping = Array.isArray(plan?.grouping) ? plan.grouping : [];
+  const operations = Array.isArray(plan?.operations) ? plan.operations.map(value => String(value).toLowerCase()) : [];
+  const rows = Array.isArray(evidence?.items)
+    ? evidence.items.map(item => item?.row).filter(row => row && typeof row === "object" && !Array.isArray(row))
+    : [];
+  if (grouping.length || rows.length !== 1 || !operations.includes("count")) return null;
+  const row = rows[0];
+  const countKey = Object.keys(row).find(key => /^count(?:\b|_)/i.test(key));
+  if (!countKey || Object.keys(row).some(key => key !== countKey)) return null;
+  const rawCount = row[countKey];
+  if (rawCount === null || rawCount === undefined || !/^-?\d+(?:\.\d+)?$/.test(String(rawCount))) return null;
+  const table = Array.isArray(plan?.required_tables) ? plan.required_tables.at(-1) : null;
+  const label = String(table || "records").replace(/[_-]+/g, " ").replace(/s$/i, "").trim() || "record";
+  return `There ${String(rawCount) === "1" ? "is" : "are"} ${String(rawCount)} ${label}${String(rawCount) === "1" ? "" : "s"}.`;
+}
+
 export class RAGPipeline {
   static ALLOWED_DATA_SOURCES = new Set(["postgresql", "security_logs", "external_api"]);
 
@@ -1941,7 +1958,11 @@ export class RAGPipeline {
         }
         : {});
     const answerEvidence = typeof this.evidence_manager.prepareAnswerEvidence === "function"
-      ? this.evidence_manager.prepareAnswerEvidence(evidence, relationshipAnswerOptions)
+      ? this.evidence_manager.prepareAnswerEvidence(evidence, {
+        ...relationshipAnswerOptions,
+        question: cleanQuestion,
+        contexts: this.plan_validator.contexts
+      })
       : evidence;
     const answerEvidenceMetrics = measureAnswerEvidenceStructure(answerEvidence);
     recordAnswerEvidenceMetrics(this.llm_usage_tracker, {
@@ -1954,9 +1975,13 @@ export class RAGPipeline {
     let answerGenerationStatus = "success";
     let answerGenerationError = null;
 
+    const scalarCount = scalarCountAnswer(cleanQuestion, validatedPlan, answerEvidence);
     if (followupIdentityResolution?.requires_clarification) {
       answer = followupIdentityResolution.message;
       answerGenerationStatus = "skipped_identity_ambiguity";
+    } else if (scalarCount) {
+      answer = scalarCount;
+      answerGenerationStatus = "template_scalar_count";
     } else try {
       answer = await this.answer_generator.generate(cleanQuestion, answerEvidence, null, null, this.llm_usage_tracker);
     } catch (exc) {
@@ -2102,6 +2127,8 @@ export class RAGPipeline {
     return output;
   }
 }
+
+export { scalarCountAnswer };
 
 // Attach snake_case aliases for full Python parity
 RAGPipeline.prototype._validate_question = RAGPipeline.prototype._validateQuestion;

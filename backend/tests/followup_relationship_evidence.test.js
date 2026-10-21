@@ -305,7 +305,7 @@ test("pipeline preserves the multi-row user set and sends only final relationshi
   assert.equal(manager.getActiveContext().record_set, undefined);
   assert.equal(captured.length, 2);
   assert.equal(captured[1].evidence_scope, "verified_relationship");
-  assert.deepEqual(captured[1].items.map(item => item.row), [{ id: "c1", name: "Cenario" }]);
+  assert.deepEqual(captured[1].items.map(item => item.row), [{ name: "Cenario" }]);
   assert.equal(captured[1].relationship_resolution.status, "complete");
   assert.equal(captured[1].relationship_resolution.scope, "common_across_matching_records");
   assert.equal(second.evidence.items.length, 12);
