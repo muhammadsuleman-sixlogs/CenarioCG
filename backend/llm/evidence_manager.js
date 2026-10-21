@@ -85,6 +85,7 @@ export class EvidenceManager {
       row_count: limitedRows.length,
       total_retrieved: rows.length,
       truncated: rows.length > this.maxRows,
+      sampled: Boolean(retrieval.sampled || retrieval.is_sampled),
       sources: limitedSources
     };
   }
@@ -120,6 +121,7 @@ export class EvidenceManager {
       event_count: limitedEvents.length,
       total_retrieved: events.length,
       truncated: events.length > this.maxEvents,
+      sampled: Boolean(retrieval.sampled || retrieval.is_sampled),
       sources: limitedSources
     };
   }

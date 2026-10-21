@@ -139,6 +139,17 @@ function scalarCountAnswer(question, plan, evidence) {
   return `There ${String(rawCount) === "1" ? "is" : "are"} ${String(rawCount)} ${label}${String(rawCount) === "1" ? "" : "s"}.`;
 }
 
+function questionRequiresCompleteEvidence(question) {
+  return /\b(?:relationship|related|belongs|assigned|owner|consultant|assignee|company|count|total|how many|number of|most|least|top|bottom|highest|lowest|maximum|minimum|extreme)\b/i.test(String(question || ""));
+}
+
+function evidenceIsIncomplete(value, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  if (value.truncated === true || value.sampled === true || value.is_sampled === true) return true;
+  return Object.values(value).some(item => evidenceIsIncomplete(item, seen));
+}
+
 export class RAGPipeline {
   static ALLOWED_DATA_SOURCES = new Set(["postgresql", "security_logs", "external_api"]);
 
@@ -1315,6 +1326,7 @@ export class RAGPipeline {
         evidence.columns = postgresEvidence.columns;
         evidence.total_retrieved = postgresEvidence.total_retrieved;
         evidence.truncated = postgresEvidence.truncated;
+        evidence.sampled = postgresEvidence.sampled;
       }
     }
 
@@ -1459,6 +1471,7 @@ export class RAGPipeline {
     const hasTruncatedEvidence = value => {
       if (!value || typeof value !== "object") return false;
       if (value.truncated === true) return true;
+      if (value.sampled === true || value.is_sampled === true) return true;
       if (value.postgresql?.truncated === true || value.security_logs?.retrieval?.truncated === true) return true;
       if (Array.isArray(value.items) && value.items.some(item => item?.truncated === true)) return true;
       if (Array.isArray(value.complex_execution?.steps) && value.complex_execution.steps.some(step =>
@@ -1976,7 +1989,15 @@ export class RAGPipeline {
     let answerGenerationError = null;
 
     const scalarCount = scalarCountAnswer(cleanQuestion, validatedPlan, answerEvidence);
-    if (followupIdentityResolution?.requires_clarification) {
+    const incompleteEvidence = evidence.retrieval_completeness?.complete === false || evidenceIsIncomplete(evidence);
+    if (questionRequiresCompleteEvidence(cleanQuestion) && incompleteEvidence) {
+      answer = "The retrieved evidence is incomplete for this question. Please narrow the request or add a specific filter. I did not generate an answer from partial data.";
+      answerGenerationStatus = "skipped_incomplete_evidence";
+      answerGenerationError = {
+        type: "EVIDENCE_INCOMPLETE",
+        reason: "relationship_or_aggregate_requires_complete_evidence"
+      };
+    } else if (followupIdentityResolution?.requires_clarification) {
       answer = followupIdentityResolution.message;
       answerGenerationStatus = "skipped_identity_ambiguity";
     } else if (scalarCount) {
@@ -2129,6 +2150,7 @@ export class RAGPipeline {
 }
 
 export { scalarCountAnswer };
+export { questionRequiresCompleteEvidence };
 
 // Attach snake_case aliases for full Python parity
 RAGPipeline.prototype._validate_question = RAGPipeline.prototype._validateQuestion;
