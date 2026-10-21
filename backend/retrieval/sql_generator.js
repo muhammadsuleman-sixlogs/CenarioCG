@@ -930,6 +930,14 @@ export class SQLGenerator {
     for (const [column, role] of Object.entries(roles)) {
       if (role?.role !== "foreign_key" || !role.relationship_role || isSensitiveFieldName(column)) continue;
       if (!this._tables()[finalTable] || !this._tables()[role.target_table]) continue;
+      const sameSourceForeignKey = (this.context.relationships || []).some(relationship =>
+        relationship?.source_table === finalTable &&
+        relationship?.source_column === column &&
+        relationship?.target_table === role.target_table &&
+        relationship?.target_column === role.target_column &&
+        String(relationship.relationship_type || relationship.database_relationship_type || "").toUpperCase() === "FOREIGN_KEY"
+      );
+      if (!sameSourceForeignKey) continue;
       const finalColumns = new Set((this._tables()[finalTable].columns || []).map(item => String(item?.name || item)));
       if (!finalColumns.has(column)) continue;
       expressions.push(this._qualified_identifier(finalTable, column));

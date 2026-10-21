@@ -37,7 +37,13 @@ function context() {
         }
       }
     },
-    relationships: []
+    relationships: [{
+      source_table: "projects",
+      source_column: "owner_consultant_id",
+      target_table: "users",
+      target_column: "id",
+      relationship_type: "FOREIGN_KEY"
+    }]
   };
 }
 

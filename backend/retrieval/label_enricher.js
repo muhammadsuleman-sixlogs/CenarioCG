@@ -41,6 +41,13 @@ function foreignKeyProfiles(context, table) {
   return Object.entries(roles)
     .filter(([column, role]) => role?.role === "foreign_key" && role.relationship_role)
     .filter(([, role]) => context?.tables?.[role.target_table])
+    .filter(([column, role]) => (context.relationships || []).some(relationship =>
+      relationship?.source_table === table &&
+      relationship?.source_column === column &&
+      relationship?.target_table === role.target_table &&
+      relationship?.target_column === role.target_column &&
+      String(relationship.relationship_type || relationship.database_relationship_type || "").toUpperCase() === "FOREIGN_KEY"
+    ))
     .map(([column, role]) => ({
       column,
       targetTable: String(role.target_table),
