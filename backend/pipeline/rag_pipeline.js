@@ -9,6 +9,7 @@ import { QuestionPlanValidator } from "../planning/question_plan_validator.js";
 import { createRetrievalContract } from "../retrieval/retrieval_contract.js";
 import { RetrievalExecutor } from "../retrieval/retrieval_executor.js";
 import { SQLGenerator } from "../retrieval/sql_generator.js";
+import { getCategoricalValues, setCategoricalValues } from "../retrieval/categorical_value_cache.js";
 import { SourceTracker } from "../tracing/source_tracker.js";
 import { SecurityLogRetriever } from "../security_logs/retriever.js";
 import { ExternalApiClient } from "../external_api/client.js";
@@ -79,6 +80,45 @@ function isSqlRepairableError(err) {
     msg.includes("undefined function") ||
     msg.includes("datatype mismatch")
   );
+}
+
+function normalizeCategoricalValue(value) {
+  const words = String(value ?? "")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(word => {
+      if (word.length > 4 && word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+      if (word.length > 3 && word.endsWith("s")) return word.slice(0, -1);
+      return word;
+    });
+  return words.join(" ");
+}
+
+function matchCategoricalValue(requested, allowedValues) {
+  const groups = new Map();
+  for (const rawValue of Array.isArray(allowedValues) ? allowedValues : []) {
+    const value = String(rawValue ?? "").trim();
+    const normalized = normalizeCategoricalValue(value);
+    if (!normalized) continue;
+    if (!groups.has(normalized)) groups.set(normalized, []);
+    if (!groups.get(normalized).includes(value)) groups.get(normalized).push(value);
+  }
+  const matches = groups.get(normalizeCategoricalValue(requested)) || [];
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function categoricalVerificationError({ sourceId, table, field, requested, allowedValues }) {
+  const error = new Error(`Requested categorical value was not verified for ${sourceId}.${table}.${field}.`);
+  error.code = "CATEGORICAL_VALUE_UNVERIFIED";
+  error.allowed_values = (Array.isArray(allowedValues) ? allowedValues : []).slice(0, 20);
+  error.requested_value = String(requested ?? "");
+  error.table = table;
+  error.field = field;
+  return error;
 }
 
 export class RAGPipeline {
@@ -868,20 +908,42 @@ export class RAGPipeline {
 
       const sqlGenerator = this._getSqlGenerator(sourceId);
 
-      const runtimeCategoricalFilters = (contractDict.filters || []).filter(filter => filter?.verification === "runtime_distinct_required");
+      let executionContract = {
+        ...contractDict,
+        filters: Array.isArray(contractDict.filters) ? contractDict.filters.map(filter => ({ ...filter })) : []
+      };
+      const runtimeCategoricalFilters = executionContract.filters.filter(filter => filter?.verification === "runtime_distinct_required");
       for (const filter of runtimeCategoricalFilters) {
         const table = String(filter.table || "").trim();
         const field = String(filter.field || filter.column || filter.column_name || "").split(".").at(-1);
         if (!table || !field) throw Object.assign(new Error("Categorical filter metadata is incomplete."), { code: "CATEGORICAL_FILTER_INVALID" });
         const requested = String(filter.value ?? "");
-        const evidenceQuery = sqlGenerator.generateCategoricalExistence(table, field, requested, sourceId);
-        const evidence = await this._executePostgresqlLive(evidenceQuery.query, sourceId, { parameters: evidenceQuery.parameters });
-        if (!Array.isArray(evidence?.rows) || evidence.rows.length === 0) {
-          throw Object.assign(new Error(`Requested categorical value was not verified for ${sourceId}.${table}.${field}.`), { code: "CATEGORICAL_VALUE_UNVERIFIED" });
+        let allowedValues = getCategoricalValues(sourceId, table, field);
+        if (!allowedValues) {
+          const evidenceQuery = sqlGenerator.generateCategoricalValues(table, field, sourceId, 200);
+          const evidence = await this._executePostgresqlLive(evidenceQuery.query, sourceId, { parameters: evidenceQuery.parameters });
+          allowedValues = setCategoricalValues(
+            sourceId,
+            table,
+            field,
+            (Array.isArray(evidence?.rows) ? evidence.rows : []).map(row => row?.value ?? row?.[0]),
+            settings.categoricalValueCacheTtlMs
+          );
         }
+        const verifiedValue = matchCategoricalValue(requested, allowedValues);
+        if (!verifiedValue) {
+          throw categoricalVerificationError({ sourceId, table, field, requested, allowedValues });
+        }
+        executionContract.filters = executionContract.filters.map(item => {
+          const itemTable = String(item?.table || "").split(".").at(-1).toLowerCase();
+          const itemField = String(item?.field || item?.column || item?.column_name || "").split(".").at(-1).toLowerCase();
+          return itemTable === table.toLowerCase() && itemField === field.toLowerCase()
+            ? { ...item, value: verifiedValue }
+            : item;
+        });
       }
 
-      const generated = sqlGenerator.generatePrepared(contractDict, sourceId, runtimeBindings);
+      const generated = sqlGenerator.generatePrepared(executionContract, sourceId, runtimeBindings);
       let sql = generated.query;
       let executionBindings = {
         ...(runtimeBindings || {}),
@@ -922,7 +984,7 @@ export class RAGPipeline {
         ? sourceTracker.buildSources.bind(sourceTracker)
         : sourceTracker.build_sources.bind(sourceTracker);
 
-      const source = buildFn(sql, retrieval, contractDict, sourceId);
+      const source = buildFn(sql, retrieval, executionContract, sourceId);
 
       const rowCount = Number(retrieval?.row_count ?? retrieval?.rows?.length ?? 0);
       const retrievalStatus = retrieval?.retrieval_status || (rowCount > 0 ? "success_with_data" : "success_empty");
@@ -953,7 +1015,12 @@ export class RAGPipeline {
         sources: [],
         error: {
           type: exc.name || "Error",
-          message: String(exc.message || exc)
+          message: String(exc.message || exc),
+          ...(exc.code ? { code: exc.code } : {}),
+          ...(Array.isArray(exc.allowed_values) ? { allowed_values: exc.allowed_values } : {}),
+          ...(exc.requested_value !== undefined ? { requested_value: exc.requested_value } : {}),
+          ...(exc.table ? { table: exc.table } : {}),
+          ...(exc.field ? { field: exc.field } : {})
         }
       };
     }
@@ -1731,6 +1798,36 @@ export class RAGPipeline {
 
     const sourceStatus = this._buildSourceStatus(postgresResults, securityResult);
     this._updateActiveEntityFromExecution(cleanQuestion, validatedPlan, postgresResults.filter(result => result.source_type === "postgresql"));
+    const categoricalFailure = postgresResults.find(result =>
+      result?.error?.code === "CATEGORICAL_VALUE_UNVERIFIED"
+    );
+    if (categoricalFailure) {
+      const allowedValues = Array.isArray(categoricalFailure.error?.allowed_values)
+        ? categoricalFailure.error.allowed_values.slice(0, 20)
+        : [];
+      const allowedText = allowedValues.length > 0
+        ? ` Available values: ${allowedValues.join(", ")}.`
+        : " No stored values were available for verification.";
+      const result = {
+        question: cleanQuestion,
+        plan: validatedPlan,
+        plan_repaired: planRepaired,
+        data_sources: dataSources,
+        postgresql_source_ids: postgresqlSources,
+        retrieval_contract: retrievalContracts,
+        evidence: {},
+        answer: `I could not verify the requested status or category value. Please specify one of the stored values or the workflow meaning.${allowedText} I did not run an unfiltered retrieval.`,
+        sources: [],
+        source_status: sourceStatus,
+        retrieval_status: "categorical_value_unverified",
+        clarification_required: {
+          type: "CATEGORICAL_VALUE_UNVERIFIED",
+          allowed_values: allowedValues,
+          requested_value: categoricalFailure.error?.requested_value || null
+        }
+      };
+      return this._attachLlmUsage(sanitizeApiResponse(result));
+    }
     const retrievalStates = Object.values(sourceStatus).map(item => item.retrieval_status);
 
     const successfulSources = retrievalStates.filter(state =>

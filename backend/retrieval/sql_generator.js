@@ -163,6 +163,29 @@ export class SQLGenerator {
     return { query, parameters: [String(value ?? "")] };
   }
 
+  generateCategoricalValues(table_name, column_name, source_id = null, limit = 200) {
+    const active_source_id = this._resolve_source_id(source_id, { source_id: this.source_id });
+    if (active_source_id !== this.source_id) {
+      throw new Error(
+        `SQLGenerator source mismatch: generator is bound to '${this.source_id}', ` +
+          `but execution requested '${active_source_id}'.`
+      );
+    }
+
+    const table = this._resolve_table(table_name);
+    const column = this._resolve_column(table, column_name);
+    const operand = `CAST(${this._quote_identifier(table)}.${this._quote_identifier(column)} AS text)`;
+    const boundedLimit = Math.max(1, Math.min(200, Number.parseInt(String(limit), 10) || 200));
+    const query = this._normalize_sql(
+      `SELECT "value" FROM (SELECT DISTINCT ${operand} AS "value" ` +
+      `FROM ${this._quote_identifier(table)} WHERE ${this._quote_identifier(table)}.${this._quote_identifier(column)} IS NOT NULL) AS "categorical_values" ` +
+      `ORDER BY LOWER("value"), "value" LIMIT ${boundedLimit}`
+    );
+    validateReadOnlyQuery(query);
+    validateSqlSyntax(query);
+    return { query, parameters: [] };
+  }
+
   repair(query, database_error, contract, source_id = null, runtime_bindings = null) {
     if (!query || typeof query !== "string" || !query.trim()) {
       throw new Error("SQL query cannot be empty.");

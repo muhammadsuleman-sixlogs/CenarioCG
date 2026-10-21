@@ -3373,14 +3373,6 @@ The final execution plan step objects must use:
         statusCandidate.columns.push(...(context?.tables?.[table]?.columns || []).map(column => String(column?.name || column || "")));
       }
     }
-    const countIntent = this._is_count_question(
-      question,
-      (Array.isArray(plan.required_tables) ? plan.required_tables : []).map(table => ({
-        table,
-        entity_type: this.contexts?.[plan.postgresql_sources?.[0]]?.semantic_catalog?.entities?.[table]?.entity_type,
-        matched_aliases: [table]
-      }))
-    );
     const derivedStatusFilters = [];
     for (const sourceId of Array.isArray(plan.postgresql_sources) ? plan.postgresql_sources : []) {
       for (const table of Array.isArray(plan.required_tables) ? plan.required_tables : []) {
@@ -3395,11 +3387,12 @@ The final execution plan step objects must use:
           matched_aliases: [table, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
         };
         const verified = this._verified_status_filter(candidate, question) ||
-          (countIntent || this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null);
+          (this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null);
         if (verified) derivedStatusFilters.push(verified);
       }
     }
-    const statusIntent = this._has_unverified_status_intent(statusCandidate, question) || derivedStatusFilters.length > 0;
+    const statusIntent = this._has_unverified_status_intent(statusCandidate, question) ||
+      derivedStatusFilters.some(filter => filter?.verification !== "runtime_distinct_required");
     if (!statusIntent) {
       const filters = Array.isArray(plan.filters) ? plan.filters : [];
       const userFilters = filters.filter(filter => !this._is_status_filter(filter, plan));
@@ -3424,7 +3417,7 @@ The final execution plan step objects must use:
           matched_aliases: [table, ...(Array.isArray(entity.synonyms) ? entity.synonyms : [])]
         };
         const verified = this._verified_status_filter(candidate, question) ||
-          (countIntent || this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null);
+          (this._has_unverified_status_intent(candidate, question) ? this._discovered_categorical_filter(candidate, question) : null);
         const statusColumn = this.contexts?.[sourceId]?.semantic_catalog?.entities?.[table]?.status_semantics?.column || verified?.field;
         const hasStatusFilter = statusColumn && (updated.filters || []).some(filter => {
           const field = String(filter?.field || filter?.column || filter?.column_name || "").split(".").at(-1);

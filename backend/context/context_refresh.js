@@ -6,6 +6,7 @@ import { saveValidatedCrossSourceRelationships, validateCrossSourceRelationships
 import { getRegisteredPostgresqlSourceIds } from "../database/connection.js";
 import { settings } from "../config/settings.js";
 import { fetchAndDiscoverOpenApiContext } from "../external_api/openapi.js";
+import { clearCategoricalValueCache } from "../retrieval/categorical_value_cache.js";
 
 /**
  * Explicit, local snapshot lifecycle. Callers must authorize the source before
@@ -30,6 +31,7 @@ export async function refreshContextSnapshot(sourceId, { buildContext = build_co
     }
   };
   save_context(canonical, normalized);
+  clearCategoricalValueCache();
   return canonical;
 }
 
@@ -67,8 +69,10 @@ export async function refreshContextGeneration({ sourceIds = null, buildContext 
     // fingerprint did not change. Advance only the trusted verification time;
     // never rewrite the generation or claim freshness after a failed refresh.
     const verification = markActiveGenerationVerified({ now, directory });
+    clearCategoricalValueCache();
     return { ...publication, last_verified_at: verification.last_verified_at };
   }
+  clearCategoricalValueCache();
   // A changed schema may invalidate old cross-source edges. Revalidate using
   // independent, read-only evidence. Keep the prior artifact if collection
   // fails, rather than publishing an incomplete relationship set.
