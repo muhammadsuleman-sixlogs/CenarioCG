@@ -9,6 +9,8 @@
  * This module does not access or modify any database.
  */
 
+import crypto from "node:crypto";
+
 // Generic patterns for values that should never be exposed.
 // These patterns intentionally target credential-like structures
 // rather than ordinary business values.
@@ -26,6 +28,71 @@ const GLOBAL_REPLACE_PATTERNS = [
   /\b(?:password|passwd|passcode|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|credential)\s*[:=]\s*[^\s,;]+/gi,
   /-----BEGIN\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----/gi,
 ];
+
+const PUBLIC_INTERNAL_KEYS = /(?:^|_)(?:sql|query|source_id|source_ids|table|tables|column|columns|sql_columns|primary_key|primary_keys|evidence|plan|retrieval_contract|parameters|raw_rows?)$/i;
+
+function public_hash(value) {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex").slice(0, 20);
+}
+
+export function opaque_public_ref(kind, value) {
+  return `${String(kind || "ref").replace(/[^a-z0-9]+/gi, "_").toLowerCase()}_${public_hash(value)}`;
+}
+
+export const opaquePublicRef = opaque_public_ref;
+
+export function public_source_descriptor(sourceId, sourceType = "postgresql", details = {}) {
+  const normalized = String(sourceId || "").trim().toLowerCase();
+  const type = String(sourceType || "postgresql").trim().toLowerCase();
+  const known = {
+    db1: { key: "base", label: "Base DB" },
+    db2: { key: "companion", label: "Companion DB" },
+    security_logs: { key: "security_logs", label: "Security Logs" },
+    security_logs_api: { key: "security_logs", label: "Security Logs" }
+  };
+  const fallback = type === "postgresql"
+    ? { key: "database", label: "Database" }
+    : { key: "external", label: "External source" };
+  const selected = known[normalized] || fallback;
+
+  return {
+    source_ref: opaque_public_ref("source", `${type}:${normalized || selected.key}`),
+    source_key: selected.key,
+    source_label: selected.label,
+    source_type: type,
+    ...(Number.isFinite(Number(details.row_count)) ? { row_count: Number(details.row_count) } : {}),
+    ...(Number.isFinite(Number(details.event_count)) ? { event_count: Number(details.event_count) } : {}),
+    ...(details.retrieval_status ? { retrieval_status: String(details.retrieval_status) } : {}),
+    ...(details.truncated !== undefined ? { truncated: Boolean(details.truncated) } : {})
+  };
+}
+
+export const publicSourceDescriptor = public_source_descriptor;
+
+export function project_public_response(response) {
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    return {};
+  }
+
+  const project = (value, key = "") => {
+    if (Array.isArray(value)) return value.map(item => project(item, key)).filter(item => item !== undefined);
+    if (value && typeof value === "object" && !(value instanceof Date) && !(value instanceof RegExp)) {
+      const output = {};
+      for (const [childKey, childValue] of Object.entries(value)) {
+        if (PUBLIC_INTERNAL_KEYS.test(childKey)) continue;
+        const projected = project(childValue, childKey);
+        if (projected !== undefined) output[childKey] = projected;
+      }
+      return output;
+    }
+    if (typeof value === "string" && PUBLIC_INTERNAL_KEYS.test(key)) return undefined;
+    return value;
+  };
+
+  return sanitize_sensitive_values(project(response));
+}
+
+export const projectPublicResponse = project_public_response;
 
 /**
  * Return true if a value contains a credential-like pattern.

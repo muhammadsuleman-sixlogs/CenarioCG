@@ -11,6 +11,9 @@ cytoscape.use(fcose);
 /* ------------------------------------------------------------------ */
 
 function getNodeSource(node) {
+  if (node?.source_key) {
+    return String(node.source_key);
+  }
   if (node?.source_id) {
     return String(node.source_id);
   }
@@ -27,8 +30,8 @@ function getNodeSource(node) {
 function getSourceLabel(sourceId) {
   const source = String(sourceId || "").toLowerCase();
 
-  if (source === "db1") return "Base DB";
-  if (source === "db2") return "Companion DB";
+  if (source === "db1" || source === "base") return "Base DB";
+  if (source === "db2" || source === "companion") return "Companion DB";
   if (source === "security_logs") return "Security Logs";
   if (source === "postgresql") return "PostgreSQL";
 
@@ -69,18 +72,18 @@ const STYLESHEET = [
     },
   },
 
-  /* DB1 - cyan */
+  /* Base DB - cyan */
   {
-    selector: 'node[source_id = "db1"]',
+    selector: 'node[source_id = "base"]',
     style: {
       "background-color": "#0c2a3d",
       "border-color": "#0ea5e9",
     },
   },
 
-  /* DB2 - green */
+  /* Companion DB - green */
   {
-    selector: 'node[source_id = "db2"]',
+    selector: 'node[source_id = "companion"]',
     style: {
       "background-color": "#0b2e26",
       "border-color": "#10b981",
@@ -335,6 +338,7 @@ function GraphView({
           label: node.label || String(node.id),
           type: node.type || "entity",
           source_id: sourceId,
+          source_key: sourceId,
           source_label: getSourceLabel(sourceId),
           columns: node.columns || [],
           primary_keys: node.primary_keys || [],
@@ -368,6 +372,7 @@ function GraphView({
           label: source.label || String(source.id),
           type: source.type || "external_source",
           source_id: String(source.id),
+          source_key: source.source_key || "external",
           source_label: source.label || String(source.id),
           source_type: source.source_type || "",
           source: source.source || "",

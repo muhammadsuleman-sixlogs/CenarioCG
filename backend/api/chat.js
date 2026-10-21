@@ -6,6 +6,11 @@ import { ConversationStore } from "../context/conversation_store.js";
 import { resolveAuthorizedWorkspace } from "../auth/authorization.js";
 import { createRequestId, logRuntimeDiagnostic } from "../diagnostics/runtime_diagnostics.js";
 import { filterSensitiveColumns } from "../security/sensitive_data_policy.js";
+import {
+  opaque_public_ref,
+  project_public_response,
+  public_source_descriptor
+} from "../security/output_security_policy.js";
 
 const router = express.Router();
 
@@ -307,6 +312,123 @@ export function buildSourceTrace(sources, dataSources = null) {
   };
 }
 
+function sourceDescriptorFor(source) {
+  return public_source_descriptor(
+    source?.source_id || source?.source,
+    source?.source_type || "postgresql",
+    {
+      row_count: source?.row_count,
+      event_count: source?.event_count,
+      retrieval_status: source?.retrieval_status,
+      truncated: source?.truncated
+    }
+  );
+}
+
+export function projectPublicSources(sources) {
+  const output = [];
+  const seen = new Set();
+
+  for (const source of Array.isArray(sources) ? sources : []) {
+    if (!source || typeof source !== "object") continue;
+    const descriptor = sourceDescriptorFor(source);
+    if (seen.has(descriptor.source_ref)) continue;
+    seen.add(descriptor.source_ref);
+    output.push(descriptor);
+  }
+
+  return output;
+}
+
+export function projectPublicGraph(graphData) {
+  const nodes = Array.isArray(graphData?.nodes) ? graphData.nodes : [];
+  const nodeRefs = new Map(nodes.map(node => [
+    String(node?.id || ""),
+    opaque_public_ref("node", node?.id || "")
+  ]));
+
+  const projectedNodes = nodes.map(node => {
+    const source = public_source_descriptor(node?.source_id, "postgresql");
+    return {
+      id: nodeRefs.get(String(node?.id || "")),
+      label: node?.label || "Entity",
+      type: node?.type || "entity",
+      source_key: source.source_key,
+      source_label: source.source_label
+    };
+  });
+
+  const projectedEdges = (Array.isArray(graphData?.edges) ? graphData.edges : []).map((edge, index) => ({
+    id: opaque_public_ref("edge", `${edge?.source || ""}:${edge?.target || ""}:${edge?.id || index}`),
+    source: nodeRefs.get(String(edge?.source || "")) || opaque_public_ref("node", edge?.source || ""),
+    target: nodeRefs.get(String(edge?.target || "")) || opaque_public_ref("node", edge?.target || ""),
+    label: edge?.label || "Relationship",
+    type: edge?.type || "database",
+    relationship_type: edge?.relationship_type || "RELATIONSHIP",
+    confidence: edge?.confidence ?? null
+  }));
+
+  return { graph: { nodes: projectedNodes, edges: projectedEdges }, nodeRefs };
+}
+
+export function projectPublicGraphTrace(graphTrace, nodeRefs) {
+  const mapNode = value => nodeRefs.get(String(value || "")) || opaque_public_ref("node", value || "");
+  const trace = graphTrace && typeof graphTrace === "object" ? graphTrace : {};
+
+  return {
+    nodes: (Array.isArray(trace.nodes) ? trace.nodes : []).map(node => ({
+      id: mapNode(node?.id),
+      label: node?.label || "Entity",
+      type: node?.type || "entity"
+    })),
+    edges: (Array.isArray(trace.edges) ? trace.edges : []).map((edge, index) => ({
+      id: opaque_public_ref("edge", `${edge?.source || ""}:${edge?.target || ""}:${edge?.id || index}`),
+      source: mapNode(edge?.source),
+      target: mapNode(edge?.target),
+      label: edge?.label || "Relationship",
+      relationship_type: edge?.relationship_type || "RELATIONSHIP",
+      confidence: edge?.confidence ?? null
+    })),
+    source_entities: (Array.isArray(trace.matched_graph_nodes) ? trace.matched_graph_nodes : []).map(mapNode),
+    source_tables: (Array.isArray(trace.matched_graph_nodes) ? trace.matched_graph_nodes : []).map(mapNode),
+    matched_graph_nodes: (Array.isArray(trace.matched_graph_nodes) ? trace.matched_graph_nodes : []).map(mapNode)
+  };
+}
+
+export function projectPublicSourceTrace(sources, dataSources = null) {
+  const sourceDescriptors = projectPublicSources(sources);
+  const descriptorByKey = new Map(sourceDescriptors.map(item => [item.source_key, item]));
+  const dataSourceLabels = [];
+
+  for (const source of sourceDescriptors) {
+    if (!dataSourceLabels.includes(source.source_label)) dataSourceLabels.push(source.source_label);
+  }
+
+  for (const sourceType of Array.isArray(dataSources) ? dataSources : []) {
+    if (String(sourceType).toLowerCase() === "security_logs" && !dataSourceLabels.includes("Security Logs")) {
+      dataSourceLabels.push("Security Logs");
+    }
+  }
+
+  return {
+    data_sources: dataSourceLabels,
+    postgresql_sources: sourceDescriptors
+      .filter(item => item.source_type === "postgresql")
+      .map(item => ({ source_ref: item.source_ref, source_key: item.source_key, source_label: item.source_label })),
+    external_sources: sourceDescriptors
+      .filter(item => item.source_type !== "postgresql")
+      .map(item => ({
+        id: item.source_ref,
+        source_ref: item.source_ref,
+        source_key: item.source_key,
+        label: item.source_label,
+        source_type: item.source_type,
+        event_count: item.event_count || 0,
+        truncated: Boolean(item.truncated)
+      }))
+  };
+}
+
 // --------------------------------------------------
 // Chat endpoint
 // --------------------------------------------------
@@ -342,30 +464,34 @@ router.post("/chat", async (req, res) => {
       request_id: requestId
     });
 
-    // Multi-source Context Graph
+    // Multi-source Context Graph. Internal graph identifiers stay server-side.
     const contextGraph = loadCurrentContextGraph();
-    const graphData = graphToDict(contextGraph);
+    const internalGraphData = graphToDict(contextGraph);
+    const { graph: graphData, nodeRefs } = projectPublicGraph(internalGraphData);
     const graphSummary = getGraphSummary(contextGraph);
 
     // Provenance graph trace
-    const graphTrace = buildGraphTrace(contextGraph, result.sources || []);
+    const graphTrace = projectPublicGraphTrace(
+      buildGraphTrace(contextGraph, result.sources || []),
+      nodeRefs
+    );
 
     // Source trace
-    const sourceTrace = buildSourceTrace(result.sources || [], result.data_sources || []);
+    const sourceTrace = projectPublicSourceTrace(result.sources || [], result.data_sources || []);
+    const publicSources = projectPublicSources(result.sources || []);
 
     // Clean frontend response (exact 7 keys matching Python backend)
-    return res.json({
+    return res.json(project_public_response({
       question,
       answer: result.answer || "",
-      sources: result.sources || [],
+      sources: publicSources,
       graph: graphData,
       graph_summary: graphSummary,
       graph_trace: graphTrace,
       source_trace: sourceTrace
-      ,request_id: requestId
       ,conversation_id: conversation.id
       ,conversation_created: created
-    });
+    }));
   } catch (err) {
     logRuntimeDiagnostic(err, { requestId, phase: "chat_request" });
 
@@ -389,7 +515,7 @@ router.post("/chat", async (req, res) => {
 router.get("/graph", (req, res) => {
   try {
     const freshContextGraph = loadCurrentContextGraph();
-    const graphData = graphToDict(freshContextGraph);
+    const { graph: graphData } = projectPublicGraph(graphToDict(freshContextGraph));
     const graphSummary = getGraphSummary(freshContextGraph);
 
     return res.json({

@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { graphToDict, buildGraphTrace, buildSourceTrace } from "../api/chat.js";
+import {
+  graphToDict,
+  buildGraphTrace,
+  buildSourceTrace,
+  projectPublicGraph,
+  projectPublicGraphTrace,
+  projectPublicSources,
+  projectPublicSourceTrace
+} from "../api/chat.js";
 import { MultiDiGraph } from "../context/context_graph.js";
 
 test("graphToDict converts MultiDiGraph into exact frontend node and edge structures", () => {
@@ -105,4 +113,53 @@ test("buildSourceTrace normalizes data sources and categorizes PostgreSQL and Se
   assert.strictEqual(trace.external_sources.length, 1);
   assert.strictEqual(trace.external_sources[0].id, "security_logs");
   assert.strictEqual(trace.external_sources[0].event_count, 5);
+});
+
+test("public graph projection preserves connectivity without internal source or schema identifiers", () => {
+  const internal = {
+    nodes: [
+      { id: "db1:companies", label: "companies", type: "table", source_id: "db1", columns: [{ name: "id" }] },
+      { id: "db2:projects", label: "projects", type: "table", source_id: "db2", columns: [{ name: "id" }] }
+    ],
+    edges: [{ id: "db1:companies-db2:projects-0", source: "db1:companies", target: "db2:projects", label: "PROJECT_COMPANY", type: "cross_source", source_id: "db1" }]
+  };
+
+  const projected = projectPublicGraph(internal);
+  assert.equal(projected.graph.nodes.length, 2);
+  assert.equal(projected.graph.edges.length, 1);
+  assert.notEqual(projected.graph.nodes[0].id, "db1:companies");
+  assert.equal(projected.graph.nodes[0].source_label, "Base DB");
+  assert.equal(projected.graph.nodes[1].source_label, "Companion DB");
+  assert.equal(projected.graph.edges[0].source, projected.graph.nodes[0].id);
+  assert.equal(projected.graph.edges[0].target, projected.graph.nodes[1].id);
+  assert.equal("source_id" in projected.graph.nodes[0], false);
+  assert.equal("columns" in projected.graph.nodes[0], false);
+
+  const trace = projectPublicGraphTrace({
+    matched_graph_nodes: ["db1:companies", "db2:projects"],
+    nodes: [{ id: "db1:companies", label: "companies" }],
+    edges: [{ id: "db1:companies-db2:projects-0", source: "db1:companies", target: "db2:projects", label: "PROJECT_COMPANY" }]
+  }, projected.nodeRefs);
+  assert.deepEqual(trace.matched_graph_nodes, [projected.graph.nodes[0].id, projected.graph.nodes[1].id]);
+  assert.equal(trace.edges[0].source, projected.graph.nodes[0].id);
+  assert.equal(trace.edges[0].target, projected.graph.nodes[1].id);
+});
+
+test("public source projection exposes safe labels and no raw source identifiers or SQL", () => {
+  const sources = projectPublicSources([
+    { source_type: "postgresql", source_id: "db1", query: "SELECT secret FROM users", row_count: 2 },
+    { source_type: "postgresql", source_id: "db2", query: "SELECT id FROM projects", row_count: 0 }
+  ]);
+  assert.deepEqual(sources.map(source => source.source_label), ["Base DB", "Companion DB"]);
+  assert.equal(sources.some(source => JSON.stringify(source).includes("db1")), false);
+  assert.equal(sources.some(source => JSON.stringify(source).includes("SELECT")), false);
+
+  const trace = projectPublicSourceTrace([
+    { source_type: "postgresql", source_id: "db1" },
+    { source_type: "postgresql", source_id: "db2" }
+  ], ["postgresql"]);
+  assert.deepEqual(trace.data_sources, ["Base DB", "Companion DB"]);
+  assert.deepEqual(trace.postgresql_sources.map(source => source.source_label), ["Base DB", "Companion DB"]);
+  assert.equal(JSON.stringify(trace).includes("db1"), false);
+  assert.equal(JSON.stringify(trace).includes("db2"), false);
 });

@@ -9,7 +9,7 @@ export class ConversationStore {
     this.conversations = new Map();
   }
 
-  _validId(value) { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
+  _validId(value) { return typeof value === "string" && /^conv_[A-Za-z0-9_-]{24}$/.test(value); }
   _cleanup(now = Date.now()) { for (const [id, item] of this.conversations) if (item.expires_at <= now) this.conversations.delete(id); }
 
   getOrCreate({ conversationId = null, principal, workspaceId }) {
@@ -17,7 +17,7 @@ export class ConversationStore {
     if (typeof principal !== "string" || !principal || typeof workspaceId !== "string" || !workspaceId) throw new Error("Conversation ownership context is required.");
     if (!conversationId) {
       if (this.conversations.size >= this.maxConversations) this._cleanup(Date.now() + this.ttlMs);
-      const id = crypto.randomUUID();
+      const id = `conv_${crypto.randomBytes(18).toString("base64url")}`;
       const item = { id, principal, workspace_id: workspaceId, context_manager: new ContextManager(), expires_at: Date.now() + this.ttlMs };
       this.conversations.set(id, item); return { conversation: item, created: true };
     }

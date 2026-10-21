@@ -37,6 +37,7 @@ const EMPTY_GRAPH_SUMMARY = {
 };
 
 function getNodeSource(node) {
+  if (node?.source_key) return String(node.source_key);
   if (node?.source_id) return String(node.source_id);
 
   const id = String(node?.id || "");
@@ -51,8 +52,8 @@ function getNodeSource(node) {
 function getSourceLabel(sourceId) {
   const source = String(sourceId || "").toLowerCase();
 
-  if (source === "db1") return "Base DB";
-  if (source === "db2") return "Companion DB";
+  if (source === "db1" || source === "base") return "Base DB";
+  if (source === "db2" || source === "companion") return "Companion DB";
   if (source === "security_logs") return "Security Logs";
   if (source === "security_logs_api") return "Security Logs";
   if (source === "postgresql") return "PostgreSQL";
@@ -68,6 +69,9 @@ function normalizeSourceId(source) {
   }
 
   return (
+    source.source_label ||
+    source.source_ref ||
+    source.source_key ||
     source.source_id ||
     source.id ||
     source.name ||
@@ -129,6 +133,9 @@ function getSourceDetails(message, sourceId) {
     const postgresSources = objectSources.filter((source) => {
       const candidates = [
         source?.source_id,
+        source?.source_ref,
+        source?.source_key,
+        source?.source_label,
         source?.id,
         source?.source,
         source?.name,
@@ -141,7 +148,11 @@ function getSourceDetails(message, sourceId) {
         source?.source_type === "postgresql" ||
         candidates.includes("postgresql") ||
         candidates.includes("db1") ||
-        candidates.includes("db2")
+        candidates.includes("db2") ||
+        candidates.includes("base") ||
+        candidates.includes("companion") ||
+        candidates.includes("base db") ||
+        candidates.includes("companion db")
       );
     });
 
@@ -194,6 +205,9 @@ function getSourceDetails(message, sourceId) {
   const matchingSource = objectSources.find((source) => {
     const candidates = [
       source?.source_id,
+      source?.source_ref,
+      source?.source_key,
+      source?.source_label,
       source?.id,
       source?.source,
       source?.name,
@@ -423,7 +437,9 @@ function App() {
 
     (sourceTrace?.data_sources || []).forEach(
       (source) => {
-        const normalized = normalizeSourceId(source);
+        const normalized = typeof source === "object"
+          ? (source.source_label || source.label || normalizeSourceId(source))
+          : normalizeSourceId(source);
 
         if (normalized) {
           sources.add(String(normalized));
